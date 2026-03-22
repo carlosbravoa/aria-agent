@@ -1,129 +1,262 @@
-# Local LLM Agent
+# Aria Agent
 
-A lean, streaming agent that runs against any OpenAI-compatible local LLM (Ollama, LM Studio, llama.cpp, etc.) with persistent markdown workspace, pluggable tools, and Gmail support via `gog` CLI.
+A lean agent that runs against any OpenAI-compatible LLM endpoint — local
+(Ollama, LM Studio, llama.cpp) or cloud (Anthropic, OpenAI) — with persistent
+markdown workspace, pluggable tools, Telegram support, and a first-run setup wizard.
 
 ---
 
-## Quick Start
+## Install
 
 ```bash
-# 1. Install dependencies
-pip install -r requirements.txt
+# Terminal interface only
+pip install -e .
 
-# 2. Configure
-cp .env.example .env
-$EDITOR .env          # set your LLM endpoint, model, etc.
-
-# 3. Run
-python main.py
+# With Telegram bot support
+pip install -e ".[telegram]"
 ```
+
+> **Tip — if pip defaults to user install and things break:**
+> ```bash
+> pip install -e . --break-system-packages
+> # or use a virtualenv:
+> python3 -m venv .venv && source .venv/bin/activate && pip install -e .
+> ```
 
 ---
 
-## Project Structure
+## First run
 
-```
-agent/
-├── main.py              # Entry point & REPL
-├── agent.py             # Core agentic loop (streaming + tool-use)
-├── workspace.py         # Persistent markdown storage
-├── requirements.txt
-├── .env.example
-│
-├── tools/
-│   ├── __init__.py      # Auto-loader & dispatcher
-│   ├── web_fetch.py     # Fetch & extract web page text
-│   ├── shell_run.py     # Run shell commands (with confirmation)
-│   ├── file_access.py   # Read/write/list/delete files
-│   └── gmail.py         # Gmail via `gog` CLI
-│
-└── workspace/           # Auto-created on first run
-    ├── memory/          # Long-term facts & notes (markdown)
-    ├── soul/            # Agent identity & persona
-    ├── sessions/        # Per-session conversation logs
-    └── tools_registry/  # Auto-generated tool docs
-```
-
----
-
-## Configuration (`.env`)
-
-| Variable        | Default                       | Description                        |
-|-----------------|-------------------------------|------------------------------------|
-| `LLM_BASE_URL`  | `http://localhost:11434/v1`   | OpenAI-compatible endpoint         |
-| `LLM_API_KEY`   | `ollama`                      | API key (any string for local LLMs)|
-| `LLM_MODEL`     | `llama3.2`                    | Model name                         |
-| `AGENT_NAME`    | `Agent`                       | Display name                       |
-| `WORKSPACE_DIR` | `./workspace`                 | Workspace root                     |
-| `GMAIL_CLI`     | `gog`                         | Gmail CLI binary name              |
-
----
-
-## Gmail Setup (`gog`)
-
-The agent uses the `gog` CLI for Gmail. Configure it once:
+On first launch Aria detects there is no config and runs a setup wizard
+that creates `~/.aria/` with a `.env` template, then exits with instructions:
 
 ```bash
-gog auth login
+aria
+# ~/.aria has been created — edit ~/.aria/.env then run aria again
 ```
-
-Then set `GMAIL_CLI=gog` in `.env`. If your binary has a different name, set it accordingly.
 
 ---
 
-## Adding Tools
+## Configure
 
-Create a new file in `tools/`, e.g. `tools/calculator.py`:
+Edit `~/.aria/.env`. Aria searches for `.env` in this order:
+
+1. `$ARIA_ENV` — explicit path override
+2. `~/.aria/.env` — default ← **put it here**
+3. `./.env` — current directory (dev convenience)
+
+### Recommended models
+
+Aria uses a plain-text `TOOL:` / `INPUT:` protocol that requires solid
+instruction-following. These models work well:
+
+| Provider | Model | Notes |
+|----------|-------|-------|
+| Ollama | `llama3.2`, `mistral`, `qwen2.5` | Best local option |
+| Anthropic | `claude-haiku-4-5`, `claude-sonnet-4-5` | Cloud, reliable |
+| OpenAI | `gpt-4o-mini`, `gpt-4o` | Cloud, reliable |
+
+> **Avoid:** on-device runtimes like MediaPipe/Gemma — limited context window
+> and no reliable structured output support.
+
+### Ollama example
+
+```bash
+ollama pull llama3.2
+```
+
+```ini
+LLM_BASE_URL=http://localhost:11434/v1
+LLM_API_KEY=ollama
+LLM_MODEL=llama3.2
+AGENT_NAME=Aria
+```
+
+### Anthropic example
+
+```ini
+LLM_BASE_URL=https://api.anthropic.com/v1
+LLM_API_KEY=sk-ant-...
+LLM_MODEL=claude-haiku-4-5-20251001
+AGENT_NAME=Aria
+```
+
+### OpenAI example
+
+```ini
+LLM_BASE_URL=https://api.openai.com/v1
+LLM_API_KEY=sk-...
+LLM_MODEL=gpt-4o-mini
+AGENT_NAME=Aria
+```
+
+### All config variables
+
+| Variable           | Default             | Description                          |
+|--------------------|---------------------|--------------------------------------|
+| `LLM_BASE_URL`     | *(required)*        | OpenAI-compatible endpoint           |
+| `LLM_API_KEY`      | `local`             | API key (any string for local LLMs)  |
+| `LLM_MODEL`        | `llama3.2`          | Model name                           |
+| `AGENT_NAME`       | `Agent`             | Display name in the terminal         |
+| `ARIA_WORKSPACE`   | `~/.aria/workspace` | Override workspace location          |
+| `ARIA_TOOLS_DIR`   | `~/.aria/tools`     | Directory for user-added tools       |
+| `TELEGRAM_TOKEN`   | —                   | Telegram bot token                   |
+| `TELEGRAM_ALLOWED` | —                   | Comma-separated allowed chat IDs     |
+| `GMAIL_CLI`        | `gog`               | Gmail CLI binary name                |
+
+---
+
+## Usage
+
+```bash
+aria                                 # interactive REPL
+aria "how do I list hidden files?"   # single-shot, then exit
+aria-telegram                        # Telegram bot
+```
+
+### REPL commands
+
+| Command        | Description                      |
+|----------------|----------------------------------|
+| `/memory`      | Print current memory             |
+| `/tools`       | List available tools             |
+| `/clear`       | Clear conversation history       |
+| `/save <note>` | Append a note directly to memory |
+| `/quit`        | Exit                             |
+
+---
+
+## Tool protocol
+
+Aria does not use the OpenAI function-calling API — instead it uses a plain-text
+protocol that works with any LLM:
+
+```
+TOOL: file_access
+INPUT: {"action": "list", "path": "~"}
+
+RESULT: Documents Downloads ...
+```
+
+The agent also supports a `REMEMBER:` marker for saving facts to memory:
+
+```
+REMEMBER: User prefers dark mode.
+```
+
+Both are intercepted by the Python layer — the model never needs to know about
+file paths or API calls.
+
+---
+
+## Workspace
+
+All state is plain markdown, fully human-editable:
+
+```
+~/.aria/
+├── .env                          ← config
+├── tools/                        ← drop custom tool .py files here
+└── workspace/
+    ├── memory/
+    │   └── core.md               ← long-term memory (agent writes here)
+    ├── soul/
+    │   └── identity.md           ← agent persona (edit to customise)
+    ├── sessions/
+    │   └── session_YYYYMMDD_HHMMSS.md   ← per-session logs
+    └── tools_registry/
+        └── available_tools.md    ← auto-generated tool docs
+```
+
+---
+
+## Built-in tools
+
+| Tool          | Description                                              |
+|---------------|----------------------------------------------------------|
+| `file_access` | Read, write, append, list, delete local files            |
+| `shell_run`   | Run shell commands (requires confirmation before running)|
+| `web_fetch`   | Fetch and extract text from a web page                   |
+| `gmail`       | List, read, search, send email via `gog` CLI             |
+
+---
+
+## Adding tools
+
+Drop a `.py` file into `~/.aria/tools/`. Two things required:
 
 ```python
 DEFINITION = {
-    "name": "calculator",
-    "description": "Evaluate a math expression.",
+    "name": "my_tool",
+    "description": "What this tool does.",
     "parameters": {
         "type": "object",
         "properties": {
-            "expression": {"type": "string", "description": "Math expression to evaluate."}
+            "input": {"type": "string", "description": "The input value."}
         },
-        "required": ["expression"],
+        "required": ["input"],
     },
 }
 
 def execute(args: dict) -> str:
-    try:
-        return str(eval(args["expression"], {"__builtins__": {}}, {}))
-    except Exception as e:
-        return f"[error] {e}"
+    return f"Result: {args['input']}"
 ```
 
-That's it — the tool is auto-discovered on next run.
+Restart `aria` — the tool is auto-discovered.
 
 ---
 
-## REPL Commands
+## Telegram
 
-| Command         | Description                          |
-|-----------------|--------------------------------------|
-| `/memory`       | Print current memory contents        |
-| `/tools`        | List available tools                 |
-| `/clear`        | Clear conversation history           |
-| `/save <note>`  | Append a note directly to memory     |
-| `/quit`         | Exit                                 |
+1. Create a bot via [@BotFather](https://t.me/BotFather) and copy the token.
+2. Get your chat ID by messaging [@userinfobot](https://t.me/userinfobot).
+3. Add to `~/.aria/.env`:
 
----
+```ini
+TELEGRAM_TOKEN=<your bot token>
+TELEGRAM_ALLOWED=<your chat ID>
+```
 
-## Single-Shot Mode
+4. Run:
 
 ```bash
-python main.py "What is the weather in Santiago?"
-python main.py "List my recent emails"
+aria-telegram
 ```
+
+Each Telegram chat gets its own isolated agent (separate history and session log).
+Available bot commands: `/start`, `/memory`, `/tools`, `/clear`, `/save <note>`.
 
 ---
 
-## Workspace Files
+## Gmail setup
 
-All agent state is plain markdown — editable with any text editor:
+```bash
+gog auth login     # authenticate once
+```
 
-- `workspace/soul/identity.md` — edit to change agent personality/instructions
-- `workspace/memory/core.md` — long-term memory (agent writes here automatically)
-- `workspace/sessions/` — full conversation logs per session
+Set `GMAIL_CLI=gog` in `~/.aria/.env`.
+
+---
+
+## Project structure
+
+```
+aria_pkg/
+├── pyproject.toml
+├── README.md
+└── src/
+    └── aria/
+        ├── __init__.py
+        ├── agent.py          ← ReAct loop, streaming, tool dispatch
+        ├── config.py         ← path resolution, .env loading
+        ├── main.py           ← terminal REPL entry point
+        ├── setup.py          ← first-run wizard
+        ├── telegram_bot.py   ← Telegram interface
+        ├── workspace.py      ← markdown persistence (memory, soul, sessions)
+        └── tools/
+            ├── __init__.py   ← auto-loader & dispatcher
+            ├── file_access.py
+            ├── gmail.py
+            ├── shell_run.py
+            └── web_fetch.py
+```
