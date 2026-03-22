@@ -1,0 +1,231 @@
+"""
+agent.py — ReAct-style agentic loop for any local LLM.
+
+Tools are invoked via a plain-text protocol the model outputs:
+
+    TOOL: tool_name
+    INPUT: {"arg": "value"}
+
+Memory writes are handled by a dedicated REMEMBER: marker that the
+agent intercepts and saves directly — no fragile tool-call path needed.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+from typing import Any
+
+from openai import OpenAI
+
+from aria import tools
+from aria.workspace import Workspace
+
+_TOOL_RE = re.compile(r"TOOL:\s*(?P<n>\w+)\s*\nINPUT:\s*(?P<args>\{.*?\})", re.DOTALL)
+_REMEMBER_RE = re.compile(r"REMEMBER:\s*(?P<note>.+?)(?=\nTOOL:|\Z)", re.DOTALL)
+_MAX_LOOPS = 10
+
+
+class Agent:
+    def __init__(self) -> None:
+        self.client = OpenAI(
+            base_url=os.environ["LLM_BASE_URL"],
+            api_key=os.environ.get("LLM_API_KEY", "local"),
+        )
+        self.model: str = os.environ.get("LLM_MODEL", "llama3.2")
+        self.name: str = os.environ.get("AGENT_NAME", "Agent")
+
+        self.ws = Workspace(os.environ.get("WORKSPACE_DIR", "./workspace"))
+        self.tool_schemas = tools.load_all()
+        self.ws.update_tools_registry(self.tool_schemas)
+
+        self.system_prompt = self._build_system_prompt()
+        self.history: list[dict[str, Any]] = self._few_shot_examples()
+        self.session_log = self.ws.new_session_path()
+
+    # ── System prompt ────────────────────────────────────────────────────────
+
+    def _build_system_prompt(self) -> str:
+        soul = self.ws.load_soul()
+        memory = self.ws.load_memory()
+        tool_docs = self._build_tool_docs()
+
+        return f"""{soul}
+
+## Memory
+{memory}
+
+## Tool Protocol
+To call a tool, output EXACTLY these two lines with no other text before them:
+
+TOOL: <tool_name>
+INPUT: {{"key": "value"}}
+
+The system runs it and replies:
+
+RESULT: <o>
+
+After RESULT, write your final answer in plain text.
+
+{tool_docs}
+
+## Saving to Memory
+To save a fact permanently, output this line anywhere in your response:
+
+REMEMBER: <the fact to save>
+
+The system will persist it. Use this whenever the user shares their name,
+preferences, or anything they would expect you to recall later.
+
+## Rules
+- Use TOOL:/INPUT: for tool calls. No other syntax works.
+- Use REMEMBER: to persist facts. Do not call file_access for memory.
+- Never narrate before a tool call. Emit TOOL: immediately.
+- After RESULT, answer in plain text.
+- Be concise.
+"""
+
+    def _build_tool_docs(self) -> str:
+        if not self.tool_schemas:
+            return "_No tools available._"
+        lines = ["### Tools\n"]
+        for t in self.tool_schemas:
+            fn = t["function"]
+            props = fn.get("parameters", {}).get("properties", {})
+            required = fn.get("parameters", {}).get("required", [])
+            args = ", ".join(f"{k}{'*' if k in required else '?'}" for k in props)
+            lines.append(f"- **{fn['name']}**({args}): {fn['description'].splitlines()[0]}")
+        lines.append("\n_* required, ? optional_")
+        return "\n".join(lines)
+
+    def _few_shot_examples(self) -> list[dict]:
+        """Concrete examples as real turns — models learn format by imitation."""
+        return [
+            # Tool use
+            {"role": "user", "content": "List the files in /tmp"},
+            {
+                "role": "assistant",
+                "content": 'TOOL: file_access\nINPUT: {"action": "list", "path": "/tmp"}',
+            },
+            {"role": "user", "content": "RESULT: notes.txt\nreport.pdf"},
+            {"role": "assistant", "content": "/tmp contains: notes.txt, report.pdf."},
+            # No-tool
+            {"role": "user", "content": "What is 2+2?"},
+            {"role": "assistant", "content": "4."},
+            # Memory save
+            {"role": "user", "content": "My name is Carlos."},
+            {"role": "assistant", "content": "REMEMBER: User name is Carlos.\nNice to meet you, Carlos!"},
+            {"role": "user", "content": "I prefer dark mode and I like the number 7."},
+            {"role": "assistant", "content": "REMEMBER: User prefers dark mode. User's favourite number is 7.\nGot it, I've saved that."},
+        ]
+
+    # ── Public interface ─────────────────────────────────────────────────────
+
+    def chat(self, user_input: str) -> None:
+        self.history.append({"role": "user", "content": user_input})
+        self.ws.log_session(self.session_log, "user", user_input)
+        self._run_loop()
+
+    # ── ReAct loop ───────────────────────────────────────────────────────────
+
+    def _run_loop(self) -> None:
+        for _ in range(_MAX_LOOPS):
+            response = self._stream_response()
+
+            # Handle REMEMBER: before checking for tool calls
+            self._handle_remember(response)
+
+            match = _TOOL_RE.search(response)
+            if not match:
+                self.ws.log_session(self.session_log, self.name, response)
+                return
+
+            tool_name = match.group("name").strip()
+            raw_args = match.group("args").strip()
+
+            try:
+                args = json.loads(raw_args)
+            except json.JSONDecodeError:
+                result = f"[agent] Invalid JSON: {raw_args}"
+            else:
+                result = self._execute_tool(tool_name, args)
+
+            self.ws.log_session(
+                self.session_log,
+                f"tool:{tool_name}",
+                f"**Input:** `{raw_args}`\n\n**Output:**\n```\n{result}\n```",
+            )
+
+            tool_exchange = f"{response.strip()}\n\nRESULT: {result}"
+            if self.history and self.history[-1]["role"] == "assistant":
+                self.history[-1]["content"] = tool_exchange
+            else:
+                self.history.append({"role": "assistant", "content": tool_exchange})
+
+        print(f"\n[agent] Hit loop limit ({_MAX_LOOPS}).")
+
+    def _handle_remember(self, response: str) -> None:
+        """Intercept REMEMBER: lines and persist them directly to core memory."""
+        for match in _REMEMBER_RE.finditer(response):
+            note = match.group("note").strip()
+            if note:
+                self.ws.append_memory(f"- {note}")
+                print(f"  💾 saved: {note}", flush=True)
+
+    # ── Streaming ────────────────────────────────────────────────────────────
+
+    def _stream_response(self) -> str:
+        messages = [{"role": "system", "content": self.system_prompt}] + self.history
+        stream = self.client.chat.completions.create(
+            model=self.model,
+            messages=messages,
+            stream=True,
+        )
+
+        print(f"\n{self.name}: ", end="", flush=True)
+        full_text = ""
+        in_tool_block = False
+        in_remember_block = False
+
+        for chunk in stream:
+            delta = chunk.choices[0].delta if chunk.choices else None
+            if delta and delta.content:
+                token = delta.content
+                full_text += token
+
+                if "TOOL:" in full_text and not in_tool_block:
+                    in_tool_block = True
+
+                if "REMEMBER:" in full_text and not in_remember_block:
+                    in_remember_block = True
+
+                # Print only the non-special parts
+                if not in_tool_block and not in_remember_block:
+                    print(token, end="", flush=True)
+                elif in_remember_block and not in_tool_block:
+                    # Print everything after the REMEMBER: line
+                    after_remember = re.split(r"REMEMBER:.*\n?", full_text, maxsplit=1)
+                    if len(after_remember) > 1:
+                        remainder = after_remember[-1]
+                        # Only print new tokens that are past the REMEMBER block
+                        if token in remainder:
+                            print(token, end="", flush=True)
+
+        if in_tool_block:
+            m = _TOOL_RE.search(full_text)
+            label = m.group("name") if m else "unknown"
+            print(f"🔧 calling {label}...", flush=True)
+        else:
+            print()
+
+        self.history.append({"role": "assistant", "content": full_text})
+        return full_text
+
+    # ── Tool execution ────────────────────────────────────────────────────────
+
+    def _execute_tool(self, name: str, args: dict) -> str:
+        result = tools.dispatch(name, args)
+        if len(result) > 6000:
+            result = result[:6000] + "\n… [truncated]"
+        return result
