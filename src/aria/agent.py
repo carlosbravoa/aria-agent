@@ -91,6 +91,7 @@ REMEMBER: <the fact>
 - Never narrate before a tool call. Emit TOOL: immediately.
 - After RESULT, answer in plain text.
 - You already know your own tools from the list above — never call a tool to look them up.
+- shell_run: read-only commands and workspace file creation run automatically. Destructive commands (rm, mv, kill, etc.) outside the workspace will prompt the user for confirmation — or be auto-rejected if there is no terminal (e.g. Telegram).
 - Be concise.
 """
 
@@ -115,10 +116,10 @@ REMEMBER: <the fact>
             {"role": "assistant", "content": "/tmp contains: notes.txt, report.pdf."},
             {"role": "user", "content": "What is 2+2?"},
             {"role": "assistant", "content": "4."},
-            {"role": "user", "content": "My name is Carlos."},
-            {"role": "assistant", "content": "REMEMBER: User name is Carlos.\nNice to meet you, Carlos!"},
+            {"role": "user", "content": "My name is Alice."},
+            {"role": "assistant", "content": "REMEMBER: User name is Alice.\nNice to meet you, Alice!"},
             {"role": "user", "content": "What tools do you have?"},
-            {"role": "assistant", "content": "I have four tools: file_access (read/write/list files), shell_run (run shell commands), web_fetch (fetch web pages), and gmail (interact with Gmail via CLI)."},
+            {"role": "assistant", "content": "I have four tools: file_access (read/write/list/delete files), shell_run (run shell commands — read-only and script creation run automatically, destructive ops outside the workspace ask for confirmation), web_fetch (fetch web pages), and gmail (read/send email via CLI)."},
         ]
 
     # ── Public interface ─────────────────────────────────────────────────────
