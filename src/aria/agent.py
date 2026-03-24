@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import os
 import re
+from datetime import datetime, timezone
 from typing import Any
 
 from openai import OpenAI
@@ -258,7 +259,10 @@ REMEMBER: <the fact>
           complete lines are inspected before printing so protocol lines
           are never shown to the user mid-stream.
         """
-        messages = [{"role": "system", "content": self.system_prompt}] + self.history
+        now = datetime.now(timezone.utc).astimezone()  # local time with tz
+        time_ctx = f"Current date and time: {now.strftime('%A, %Y-%m-%d %H:%M %Z')}"
+        system_with_time = self.system_prompt + f"\n\n## Context\n{time_ctx}\n"
+        messages = [{"role": "system", "content": system_with_time}] + self.history
 
         # Anthropic (and some other APIs) reject requests that end on an assistant
         # message. Trim any trailing assistant turns before sending.
