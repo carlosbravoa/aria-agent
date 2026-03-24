@@ -9,6 +9,8 @@ import subprocess
 import shlex
 import os
 
+from aria.tools._env import build_env
+
 # Override CLI binary via env if needed
 _CLI = os.getenv("GMAIL_CLI", "gog")
 
@@ -51,6 +53,7 @@ def _run(cmd: str) -> str:
             capture_output=True,
             text=True,
             timeout=20,
+            env=build_env(),     # full user env for background services
         )
         out = result.stdout.strip()
         err = result.stderr.strip()

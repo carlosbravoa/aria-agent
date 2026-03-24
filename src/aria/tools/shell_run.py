@@ -14,6 +14,8 @@ import os
 import re
 import shlex
 import subprocess
+
+from aria.tools._env import build_env
 from pathlib import Path
 
 DEFINITION = {
@@ -147,6 +149,7 @@ def execute(args: dict) -> str:
             text=True,
             timeout=60,
             cwd=cwd,
+            env=build_env(),     # full user env even in background services
         )
         out = result.stdout.strip()
         err = result.stderr.strip()
