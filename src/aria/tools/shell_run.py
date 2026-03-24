@@ -15,7 +15,7 @@ import re
 import shlex
 import subprocess
 
-from aria.tools._env import build_env
+from aria.tools._env import build_env, is_tty_command
 from pathlib import Path
 
 DEFINITION = {
@@ -53,7 +53,8 @@ _SAFE_RE = re.compile(
     r"cat\s*>|tee|"          # writing new files is fine
     r"apt\s+(install|show|list|search)|"
     r"apt-get\s+(install|show)|"
-    r"snap\s+(install|list|info)"
+    r"snap\s+(install|list|info)|"
+    r"gog\b"
     r")\b",
     re.IGNORECASE,
 )
@@ -103,13 +104,12 @@ def _targets_workspace(command: str) -> bool:
 
 
 def _needs_confirmation(command: str) -> bool:
-    """Decide whether a command needs user confirmation."""
-    if _SAFE_RE.match(command):
-        return False
+    """Decide whether a command needs user confirmation.
+    Only explicitly destructive commands require it — everything else runs.
+    """
     if _DESTRUCTIVE_RE.match(command):
         return True
-    # Default: ask if not obviously safe
-    return True
+    return False
 
 
 def _confirm(command: str) -> bool:
@@ -124,6 +124,15 @@ def _confirm(command: str) -> bool:
 def execute(args: dict) -> str:
     command: str = args["command"]
     cwd: str | None = args.get("cwd")
+
+    # Reject commands that require an interactive TTY — they will hang
+    if is_tty_command(command):
+        first = command.strip().split()[0]
+        return (
+            f"[shell_run] '{first}' requires an interactive terminal and "
+            "cannot run in a background process. "
+            "Try a non-interactive alternative (e.g. 'ps aux' instead of 'top')."
+        )
 
     destructive = bool(_DESTRUCTIVE_RE.match(command))
     needs_confirm = _needs_confirmation(command)
