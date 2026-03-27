@@ -5,6 +5,7 @@ Correct command syntax (gogcli / steipete):
   gog gmail search '<query>' --max <n> [--json]
   gog gmail get <thread_id> [--json]
   gog gmail send --to <email> --subject <subject> --body <text>
+  gog gmail thread modify <thread_id> --remove UNREAD   (mark as read)
 
 Required env var in ~/.aria/.env:
   GOG_ACCOUNT=you@gmail.com
@@ -27,21 +28,21 @@ DEFINITION = {
     "name": "gmail",
     "description": (
         "Interact with Gmail via the gog CLI. "
-        "Actions: list (recent emails), read (full thread by ID), send, search (by query)."
+        "Actions: list (recent emails), read (full thread by ID), send, search (by query), mark_read (mark thread as read)."
     ),
     "parameters": {
         "type": "object",
         "properties": {
             "action": {
                 "type": "string",
-                "enum": ["list", "read", "send", "search"],
+                "enum": ["list", "read", "send", "search", "mark_read"],
                 "description": "Gmail action to perform.",
             },
             "query": {
                 "type": "string",
                 "description": (
                     "Search query for 'search' (Gmail search syntax, e.g. 'is:unread newer_than:7d'). "
-                    "Thread ID for 'read'."
+                    "Thread ID for 'read' and 'mark_read'."
                 ),
             },
             "to":      {"type": "string", "description": "Recipient email address (for 'send')."},
@@ -127,6 +128,12 @@ def execute(args: dict) -> str:
                 f" --subject {_shlex.quote(subject)}"
                 f" --body {_shlex.quote(body)}"
             )
+
+        case "mark_read":
+            thread_id = args.get("query", "")
+            if not thread_id:
+                return "[gmail] 'query' must contain a thread ID for 'mark_read'."
+            return _run(f"{_CLI} gmail thread modify {thread_id} --remove UNREAD")
 
         case _:
             return f"[gmail] Unknown action: {action}"
