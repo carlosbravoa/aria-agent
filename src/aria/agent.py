@@ -93,6 +93,7 @@ REMEMBER: <the fact>
 - After RESULT, answer in plain text.
 - You already know your own tools from the list above — never call a tool to look them up.
 - shell_run: read-only commands and workspace file creation run automatically. Destructive commands (rm, mv, kill, etc.) outside the workspace will prompt the user for confirmation — or be auto-rejected if there is no terminal (e.g. Telegram).
+- When completing a task that was triggered non-interactively (cron, script), always call the notify tool to deliver the result to the user via Telegram.
 - Be concise.
 """
 
@@ -119,8 +120,14 @@ REMEMBER: <the fact>
             {"role": "assistant", "content": "4."},
             {"role": "user", "content": "My name is Alice."},
             {"role": "assistant", "content": "REMEMBER: User name is Alice.\nNice to meet you, Alice!"},
+            {"role": "user", "content": "scheduled task: fetch https://news.ycombinator.com and summarise top 3 stories"},
+            {"role": "assistant", "content": 'TOOL: web_fetch\nINPUT: {"url": "https://news.ycombinator.com", "max_chars": 2000}'},
+            {"role": "user", "content": "RESULT: 1. Story A\n2. Story B\n3. Story C"},
+            {"role": "assistant", "content": 'TOOL: notify\nINPUT: {"message": "Top HN stories:\n1. Story A\n2. Story B\n3. Story C"}'},
+            {"role": "user", "content": "RESULT: [notify] Message sent."},
+            {"role": "assistant", "content": "Done. Summary sent to Telegram."},
             {"role": "user", "content": "What tools do you have?"},
-            {"role": "assistant", "content": "I have four tools: file_access (read/write/list/delete files), shell_run (run shell commands — read-only and script creation run automatically, destructive ops outside the workspace ask for confirmation), web_fetch (fetch web pages), and gmail (read/send email via CLI)."},
+            {"role": "assistant", "content": "I have four tools: file_access (read/write/list/delete files), shell_run (run shell commands), web_fetch (fetch web pages), and gmail (search/read/send Gmail via gog CLI — requires GOG_ACCOUNT in ~/.aria/.env)."},
         ]
 
     # ── Public interface ─────────────────────────────────────────────────────
