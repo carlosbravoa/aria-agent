@@ -112,6 +112,7 @@ AGENT_NAME=Aria
 aria                                 # interactive REPL
 aria "how do I list hidden files?"   # single-shot, then exit
 aria-telegram                        # Telegram bot
+aria --notify "summarise my unread emails from today" # Will send output in the telegram default channel
 ```
 
 ### REPL commands
@@ -223,7 +224,9 @@ TELEGRAM_ALLOWED=<your chat ID>
 aria-telegram
 ```
 
-Each Telegram chat gets its own isolated agent (separate history and session log).
+Each Telegram chat gets its own isolated agent (separate history and session log), but
+note that memory, sould and environment are not multi-user ready!
+
 Available bot commands: `/start`, `/memory`, `/tools`, `/clear`, `/save <note>`.
 
 ---
@@ -234,7 +237,21 @@ Available bot commands: `/start`, `/memory`, `/tools`, `/clear`, `/save <note>`.
 gog auth login     # authenticate once
 ```
 
-Set `GMAIL_CLI=gog` in `~/.aria/.env`.
+Set `GMAIL_CLI=gog` and `GOG_ACCOUNT=your@email.com` in `~/.aria/.env`.
+
+---
+
+## Scheduled tasks
+
+From cron (crontab -e):
+
+```
+cron# Every morning at 8am — email summary to Telegram
+0 8 * * * /home/carlos/.local/bin/aria --notify "list my unread emails and summarise them"
+
+# Every Friday at 6pm — weekly digest
+0 18 * * 5 /home/carlos/.local/bin/aria --notify "summarise what happened 
+```
 
 ---
 
