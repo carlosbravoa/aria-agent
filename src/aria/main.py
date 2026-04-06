@@ -69,6 +69,11 @@ def repl(agent: Agent) -> None:
             case _:
                 agent.chat(user)
 
+    # Summarise and save this session for continuity next time
+    print("Saving session summary...", end=" ", flush=True)
+    agent.close()
+    print("done.")
+
 
 def main() -> None:
     parser = argparse.ArgumentParser(
@@ -106,7 +111,8 @@ def main() -> None:
         agent = Agent()
         try:
             result = agent.chat_collect(query)
-            # Strip the "Aria: " prefix chat_collect includes
+            agent.close()
+            # Strip the "<agent name>: " prefix chat_collect includes
             prefix = f"\n{agent.name}: "
             if result.startswith(prefix.strip()):
                 result = result[len(prefix.strip()):].strip()
@@ -125,6 +131,7 @@ def main() -> None:
         # ── Single-shot mode: print to stdout ────────────────────────────
         agent = Agent()
         agent.chat(query)
+        agent.close()
 
     else:
         # ── Interactive REPL ──────────────────────────────────────────────

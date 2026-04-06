@@ -1,16 +1,16 @@
 """
 aria/workspace.py — Persistent markdown storage.
 
-Default layout:
-  ~/.aria/workspace/
-    memory/          long-term facts, user prefs
-    soul/            agent identity and persona
-    sessions/        per-session conversation logs
-    tools_registry/  auto-generated tool docs
+Layout (all under the configured root, default ~/.aria/workspace/):
+  memory/           long-term facts, user prefs, last-session summary
+  soul/             agent identity and persona
+  sessions/         per-session conversation logs
+  tools_registry/   auto-generated tool docs
 """
 
 from __future__ import annotations
 
+import os
 from datetime import datetime
 from pathlib import Path
 
@@ -20,8 +20,6 @@ class Workspace:
         self.root = Path(root).expanduser().resolve()
         for sub in ("memory", "soul", "sessions", "tools_registry"):
             (self.root / sub).mkdir(parents=True, exist_ok=True)
-        # Pass agent name so the soul file uses the configured name, not a hardcoded one
-        import os
         self._bootstrap(agent_name=os.environ.get("AGENT_NAME", "Agent"))
 
     # ── Bootstrap ────────────────────────────────────────────────────────────
@@ -30,7 +28,7 @@ class Workspace:
         soul_file = self.root / "soul" / "identity.md"
         if not soul_file.exists():
             soul_file.write_text(
-                f"# Agent Identity\n\n"
+                "# Agent Identity\n\n"
                 f"You are {agent_name}, a lean and precise assistant running on a local LLM.\n"
                 "You think step-by-step and only call tools when needed.\n"
                 "\n"
@@ -70,7 +68,28 @@ class Workspace:
         with path.open("a", encoding="utf-8") as f:
             f.write(f"\n<!-- {ts} -->\n{note.strip()}\n")
 
-    # ── Sessions ─────────────────────────────────────────────────────────────
+    # ── Session summaries ─────────────────────────────────────────────────────
+
+    def last_session_summary(self) -> str | None:
+        """Return the most recent session summary, or None if none exists."""
+        summary_file = self.root / "memory" / "last_session.md"
+        if summary_file.exists():
+            return summary_file.read_text(encoding="utf-8").strip()
+        return None
+
+    def save_session_summary(self, summary: str) -> None:
+        """Overwrite the rolling last-session summary file."""
+        path = self.root / "memory" / "last_session.md"
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M")
+        lines = [
+            "# Last Session Summary\n",
+            f"<!-- {ts} -->\n\n",
+            summary.strip(),
+            "\n",
+        ]
+        path.write_text("".join(lines), encoding="utf-8")
+
+    # ── Session logs ──────────────────────────────────────────────────────────
 
     def new_session_path(self) -> Path:
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")

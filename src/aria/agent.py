@@ -9,6 +9,10 @@ Tools are invoked via a plain-text protocol:
 Memory is saved via:
 
     REMEMBER: some fact
+
+Session continuity: agent.close() summarises the conversation and saves it
+to workspace/memory/last_session.md. Next session, that summary is loaded
+into the system prompt for lightweight continuity without replaying history.
 """
 
 from __future__ import annotations
@@ -36,8 +40,6 @@ _MAX_HISTORY = int(os.environ.get("ARIA_MAX_HISTORY", "60"))
 
 class Agent:
     def __init__(self, output_callback=None) -> None:
-        # output_callback(text) receives streamed/final output.
-        # Defaults to printing to stdout (terminal interface).
         self._output = output_callback or (lambda t: print(t, end="", flush=True))
         self.client = OpenAI(
             base_url=os.environ["LLM_BASE_URL"],
@@ -59,48 +61,40 @@ class Agent:
     # ── System prompt ────────────────────────────────────────────────────────
 
     def _build_system_prompt(self) -> str:
-        soul     = self.ws.load_soul()
-        memory   = self.ws.load_memory()
-        tool_docs = self._build_tool_docs()
+        soul         = self.ws.load_soul()
+        memory       = self.ws.load_memory()
+        tool_docs    = self._build_tool_docs()
+        last_session = self.ws.last_session_summary()
+        prev_block   = last_session if last_session else "_No previous session._"
 
-        return f"""{soul}
-
-## Memory
-{memory}
-
-## Tool Protocol
-To call a tool, output EXACTLY these two lines with no other text before them:
-
-TOOL: <tool_name>
-INPUT: {{"key": "value"}}
-
-The system runs it and replies:
-
-RESULT: <o>
-
-After RESULT, write your final answer in plain text.
-
-{tool_docs}
-
-## Saving to Memory
-To save a fact, output this anywhere in your response:
-
-REMEMBER: <the fact>
-
-## Rules
-- Use TOOL:/INPUT: for tool calls. No other syntax works.
-- Use REMEMBER: to persist facts.
-- Never narrate before a tool call. Emit TOOL: immediately.
-- After RESULT, answer in plain text.
-- You know your available tools from the list above — never call a tool to look them up.
-- Be concise.
-"""
+        return (
+            f"{soul}\n\n"
+            "## Memory\n"
+            f"{memory}\n\n"
+            "## Previous Session\n"
+            f"{prev_block}\n\n"
+            "## Tool Protocol\n"
+            "To call a tool, output EXACTLY these two lines with no other text before them:\n\n"
+            "TOOL: <tool_name>\n"
+            'INPUT: {"key": "value"}\n\n'
+            "The system runs it and replies:\n\n"
+            "RESULT: <o>\n\n"
+            "After RESULT, write your final answer in plain text.\n\n"
+            f"{tool_docs}\n\n"
+            "## Saving to Memory\n"
+            "To save a fact, output this anywhere in your response:\n\n"
+            "REMEMBER: <the fact>\n\n"
+            "## Rules\n"
+            "- Use TOOL:/INPUT: for tool calls. No other syntax works.\n"
+            "- Use REMEMBER: to persist facts.\n"
+            "- Never narrate before a tool call. Emit TOOL: immediately.\n"
+            "- After RESULT, answer in plain text.\n"
+            "- You know your available tools from the list above — never call a tool to look them up.\n"
+            "- Be concise.\n"
+        )
 
     def _build_tool_docs(self) -> str:
-        """
-        Build tool documentation dynamically from loaded schemas.
-        Never hardcodes tool names — works with any set of tools.
-        """
+        """Build tool docs dynamically — never hardcodes tool names."""
         if not self.tool_schemas:
             return "_No tools available._"
         lines = ["### Available Tools\n"]
@@ -109,7 +103,6 @@ REMEMBER: <the fact>
             props    = fn.get("parameters", {}).get("properties", {})
             required = fn.get("parameters", {}).get("required", [])
             args     = ", ".join(f"{k}{'*' if k in required else '?'}" for k in props)
-            # Include full description so the model understands each tool's capabilities
             lines.append(f"#### `{fn['name']}`({args})")
             lines.append(fn["description"] + "\n")
         lines.append("_* required, ? optional_")
@@ -117,39 +110,22 @@ REMEMBER: <the fact>
 
     def _few_shot_examples(self) -> list[dict]:
         """
-        Minimal examples teaching the TOOL:/INPUT: and REMEMBER: protocols.
-        Deliberately tool-agnostic — does not list or name specific tools
-        so it stays valid regardless of which tools are installed.
+        Protocol examples — tool-agnostic except for the file_access demo
+        which is needed to show the TOOL:/INPUT: format concretely.
         """
         return [
-            # Tool use
             {"role": "user", "content": "List the files in /tmp"},
-            {
-                "role": "assistant",
-                "content": 'TOOL: file_access\nINPUT: {"action": "list", "path": "/tmp"}',
-            },
+            {"role": "assistant", "content": 'TOOL: file_access\nINPUT: {"action": "list", "path": "/tmp"}'},
             {"role": "user", "content": "RESULT: notes.txt\nreport.pdf"},
             {"role": "assistant", "content": "/tmp contains: notes.txt, report.pdf."},
-            # No-tool
             {"role": "user", "content": "What is 2+2?"},
             {"role": "assistant", "content": "4."},
-            # Memory save
             {"role": "user", "content": "My name is Alice."},
-            {
-                "role": "assistant",
-                "content": "REMEMBER: User name is Alice.\nNice to meet you, Alice!",
-            },
-            # Scheduled task with notify
+            {"role": "assistant", "content": "REMEMBER: User name is Alice.\nNice to meet you, Alice!"},
             {"role": "user", "content": "scheduled task: summarise top stories from https://news.ycombinator.com"},
-            {
-                "role": "assistant",
-                "content": 'TOOL: web_fetch\nINPUT: {"url": "https://news.ycombinator.com", "max_chars": 2000}',
-            },
+            {"role": "assistant", "content": 'TOOL: web_fetch\nINPUT: {"url": "https://news.ycombinator.com", "max_chars": 2000}'},
             {"role": "user", "content": "RESULT: 1. Story A\n2. Story B\n3. Story C"},
-            {
-                "role": "assistant",
-                "content": 'TOOL: notify\nINPUT: {"message": "Top HN stories:\\n1. Story A\\n2. Story B\\n3. Story C"}',
-            },
+            {"role": "assistant", "content": 'TOOL: notify\nINPUT: {"message": "Top HN stories:\\n1. Story A\\n2. Story B\\n3. Story C"}'},
             {"role": "user", "content": "RESULT: [notify] Message sent."},
             {"role": "assistant", "content": "Done. Summary sent."},
         ]
@@ -164,9 +140,7 @@ REMEMBER: <the fact>
         self._run_loop()
 
     def chat_collect(self, user_input: str) -> str:
-        """Like chat() but captures output and returns it as a string.
-        Used by non-terminal interfaces (e.g. Telegram, WhatsApp).
-        """
+        """Like chat() but captures output as a string (for Telegram, WhatsApp, etc.)."""
         buf: list[str] = []
         orig = self._output
         self._output = buf.append
@@ -177,11 +151,7 @@ REMEMBER: <the fact>
         return "".join(buf).strip()
 
     def _trim_history(self) -> None:
-        """
-        Keep history healthy before each turn:
-        1. Compress old RESULT: blocks to avoid context overflow.
-        2. Drop oldest non-seed turns if total exceeds _MAX_HISTORY.
-        """
+        """Compress old RESULT blocks and drop oldest turns to stay within limits."""
         seed_len = len(self._seed)
         real = self.history[seed_len:]
 
@@ -198,9 +168,7 @@ REMEMBER: <the fact>
                 if len(msg["content"]) > 400:
                     real[i] = {**msg, "content": "RESULT: [output truncated — already processed]"}
                 continue
-            if msg["role"] != "assistant":
-                continue
-            if i == last_asst_idx:
+            if msg["role"] != "assistant" or i == last_asst_idx:
                 continue
 
         excess = len(real) - _MAX_HISTORY
@@ -217,7 +185,6 @@ REMEMBER: <the fact>
         for _ in range(_MAX_LOOPS):
             response = self._stream_response()
 
-            # Persist REMEMBER: lines
             for m in _REMEMBER_RE.finditer(response):
                 note = m.group("note").strip()
                 if note:
@@ -237,11 +204,10 @@ REMEMBER: <the fact>
             tool_name = tool_match.group("tool_name")
             raw_args  = tool_match.group("args")
 
-            # Detect spinning
             call_sig = f"{tool_name}:{raw_args}"
             if call_sig in seen_calls:
                 msg = f"(tool {tool_name} called repeatedly with same args — stopping)"
-                self._output(f"  ⚠️  {msg}\n")
+                self._output(f"  \u26a0\ufe0f  {msg}\n")
                 self.ws.log_session(self.session_log, self.name, msg)
                 if self.history and self.history[-1]["role"] == "assistant":
                     self.history[-1]["content"] = msg
@@ -261,8 +227,6 @@ REMEMBER: <the fact>
                 f"**Input:** `{raw_args}`\n\n**Output:**\n```\n{result}\n```",
             )
 
-            # Keep assistant message (TOOL call), inject result as user turn.
-            # Ensures conversation always ends on a user turn (required by Anthropic API).
             if not (self.history and self.history[-1]["role"] == "assistant"):
                 self.history.append({"role": "assistant", "content": response})
             self.history.append({"role": "user", "content": f"RESULT: {result}"})
@@ -277,7 +241,6 @@ REMEMBER: <the fact>
         sys_prompt = self.system_prompt + f"\n\n## Context\n{time_ctx}\n"
         messages   = [{"role": "system", "content": sys_prompt}] + self.history
 
-        # Trim trailing assistant turns — Anthropic API rejects them
         while messages and messages[-1]["role"] == "assistant":
             messages = messages[:-1]
 
@@ -318,6 +281,57 @@ REMEMBER: <the fact>
 
         self.history.append({"role": "assistant", "content": full_text})
         return full_text
+
+    # ── Session continuity ────────────────────────────────────────────────────
+
+    def summarise_session(self) -> str | None:
+        """
+        One-shot (non-streaming) LLM call producing a 3-5 bullet summary.
+        Skips RESULT: blocks to keep the transcript compact.
+        Returns None if there were no real exchanges this session.
+        """
+        seed_len = len(self._seed)
+        real = self.history[seed_len:]
+        if not real:
+            return None
+
+        transcript_lines = []
+        for msg in real:
+            role    = msg["role"]
+            content = msg.get("content") or ""
+            if role == "user" and content.startswith("RESULT:"):
+                continue
+            if role in ("user", "assistant"):
+                prefix  = "User" if role == "user" else self.name
+                snippet = content[:300] + ("\u2026" if len(content) > 300 else "")
+                transcript_lines.append(f"{prefix}: {snippet}")
+
+        if not transcript_lines:
+            return None
+
+        transcript = "\n".join(transcript_lines)
+        prompt = (
+            "Summarise this conversation in 3-5 bullet points. "
+            "Focus on decisions made, facts learned, and tasks completed. "
+            "Be brief — this summary will be used as context for the next session.\n\n"
+            + transcript
+        )
+
+        try:
+            resp = self.client.chat.completions.create(
+                model=self.model,
+                messages=[{"role": "user", "content": prompt}],
+                stream=False,
+            )
+            return resp.choices[0].message.content.strip()
+        except Exception:
+            return None  # best-effort, never block on failure
+
+    def close(self) -> None:
+        """Summarise this session and persist it for continuity next time."""
+        summary = self.summarise_session()
+        if summary:
+            self.ws.save_session_summary(summary)
 
     # ── Tool execution ────────────────────────────────────────────────────────
 
