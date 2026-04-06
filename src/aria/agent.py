@@ -38,13 +38,13 @@ class Agent:
     def __init__(self, output_callback=None) -> None:
         # output_callback(text) receives streamed/final output.
         # Defaults to printing to stdout (terminal interface).
-        self._output = output_callback or (lambda t: print(t, end='', flush=True))
+        self._output = output_callback or (lambda t: print(t, end="", flush=True))
         self.client = OpenAI(
             base_url=os.environ["LLM_BASE_URL"],
             api_key=os.environ.get("LLM_API_KEY", "local"),
         )
         self.model: str = os.environ.get("LLM_MODEL", "llama3.2")
-        self.name: str = os.environ.get("AGENT_NAME", "Agent")
+        self.name: str  = os.environ.get("AGENT_NAME", "Agent")
 
         from aria import config
         self.ws = Workspace(config.workspace_dir())
@@ -52,15 +52,15 @@ class Agent:
         self.ws.update_tools_registry(self.tool_schemas)
 
         self.system_prompt = self._build_system_prompt()
-        self._seed = self._few_shot_examples()   # kept separate so /clear works
+        self._seed = self._few_shot_examples()
         self.history: list[dict[str, Any]] = list(self._seed)
         self.session_log = self.ws.new_session_path()
 
     # ── System prompt ────────────────────────────────────────────────────────
 
     def _build_system_prompt(self) -> str:
-        soul = self.ws.load_soul()
-        memory = self.ws.load_memory()
+        soul     = self.ws.load_soul()
+        memory   = self.ws.load_memory()
         tool_docs = self._build_tool_docs()
 
         return f"""{soul}
@@ -92,46 +92,66 @@ REMEMBER: <the fact>
 - Use REMEMBER: to persist facts.
 - Never narrate before a tool call. Emit TOOL: immediately.
 - After RESULT, answer in plain text.
-- You already know your own tools from the list above — never call a tool to look them up.
-- shell_run: destructive commands (rm, mv, kill, etc.) outside the workspace ask for confirmation or are auto-rejected in non-interactive mode. Everything else runs freely.
-- shell_run 'script' field: use for Python/bash code with quotes, braces, or backslashes — bypasses JSON escaping. Set interpreter='python3' for Python.
-- file_access 'patch': replace a specific string in a file without rewriting it — safer for large files, avoids truncation.
-- file_access encoding='base64': encode content as base64 when writing files with special characters that break JSON.
-- file_access 'read' with offset/limit: page through large files in chunks.
+- You know your available tools from the list above — never call a tool to look them up.
 - Be concise.
 """
 
     def _build_tool_docs(self) -> str:
+        """
+        Build tool documentation dynamically from loaded schemas.
+        Never hardcodes tool names — works with any set of tools.
+        """
         if not self.tool_schemas:
             return "_No tools available._"
-        lines = ["### Tools\n"]
+        lines = ["### Available Tools\n"]
         for t in self.tool_schemas:
-            fn = t["function"]
-            props = fn.get("parameters", {}).get("properties", {})
+            fn       = t["function"]
+            props    = fn.get("parameters", {}).get("properties", {})
             required = fn.get("parameters", {}).get("required", [])
-            args = ", ".join(f"{k}{'*' if k in required else '?'}" for k in props)
-            lines.append(f"- **{fn['name']}**({args}): {fn['description'].splitlines()[0]}")
-        lines.append("\n_* required, ? optional_")
+            args     = ", ".join(f"{k}{'*' if k in required else '?'}" for k in props)
+            # Include full description so the model understands each tool's capabilities
+            lines.append(f"#### `{fn['name']}`({args})")
+            lines.append(fn["description"] + "\n")
+        lines.append("_* required, ? optional_")
         return "\n".join(lines)
 
     def _few_shot_examples(self) -> list[dict]:
+        """
+        Minimal examples teaching the TOOL:/INPUT: and REMEMBER: protocols.
+        Deliberately tool-agnostic — does not list or name specific tools
+        so it stays valid regardless of which tools are installed.
+        """
         return [
+            # Tool use
             {"role": "user", "content": "List the files in /tmp"},
-            {"role": "assistant", "content": 'TOOL: file_access\nINPUT: {"action": "list", "path": "/tmp"}'},
+            {
+                "role": "assistant",
+                "content": 'TOOL: file_access\nINPUT: {"action": "list", "path": "/tmp"}',
+            },
             {"role": "user", "content": "RESULT: notes.txt\nreport.pdf"},
             {"role": "assistant", "content": "/tmp contains: notes.txt, report.pdf."},
+            # No-tool
             {"role": "user", "content": "What is 2+2?"},
             {"role": "assistant", "content": "4."},
+            # Memory save
             {"role": "user", "content": "My name is Alice."},
-            {"role": "assistant", "content": "REMEMBER: User name is Alice.\nNice to meet you, Alice!"},
-            {"role": "user", "content": "scheduled task: fetch https://news.ycombinator.com and summarise top 3 stories"},
-            {"role": "assistant", "content": 'TOOL: web_fetch\nINPUT: {"url": "https://news.ycombinator.com", "max_chars": 2000}'},
+            {
+                "role": "assistant",
+                "content": "REMEMBER: User name is Alice.\nNice to meet you, Alice!",
+            },
+            # Scheduled task with notify
+            {"role": "user", "content": "scheduled task: summarise top stories from https://news.ycombinator.com"},
+            {
+                "role": "assistant",
+                "content": 'TOOL: web_fetch\nINPUT: {"url": "https://news.ycombinator.com", "max_chars": 2000}',
+            },
             {"role": "user", "content": "RESULT: 1. Story A\n2. Story B\n3. Story C"},
-            {"role": "assistant", "content": 'TOOL: notify\nINPUT: {"message": "Top HN stories:\n1. Story A\n2. Story B\n3. Story C"}'},
+            {
+                "role": "assistant",
+                "content": 'TOOL: notify\nINPUT: {"message": "Top HN stories:\\n1. Story A\\n2. Story B\\n3. Story C"}',
+            },
             {"role": "user", "content": "RESULT: [notify] Message sent."},
-            {"role": "assistant", "content": "Done. Summary sent to Telegram."},
-            {"role": "user", "content": "What tools do you have?"},
-            {"role": "assistant", "content": "I have four tools: file_access (read/write/list/delete files), shell_run (run shell commands), web_fetch (fetch web pages), and gmail (search/read/send Gmail via gog CLI — requires GOG_ACCOUNT in ~/.aria/.env)."},
+            {"role": "assistant", "content": "Done. Summary sent."},
         ]
 
     # ── Public interface ─────────────────────────────────────────────────────
@@ -145,7 +165,7 @@ REMEMBER: <the fact>
 
     def chat_collect(self, user_input: str) -> str:
         """Like chat() but captures output and returns it as a string.
-        Used by non-terminal interfaces (e.g. Telegram).
+        Used by non-terminal interfaces (e.g. Telegram, WhatsApp).
         """
         buf: list[str] = []
         orig = self._output
@@ -159,16 +179,12 @@ REMEMBER: <the fact>
     def _trim_history(self) -> None:
         """
         Keep history healthy before each turn:
-        1. Truncate RESULT: user messages to 300 chars —
-           the model had them in full when it replied; it doesn't need them again.
-        2. Drop oldest non-seed turns if total count still exceeds _MAX_HISTORY.
-        The most-recent assistant message is always left untouched so an
-        ongoing tool chain isn't broken.
+        1. Compress old RESULT: blocks to avoid context overflow.
+        2. Drop oldest non-seed turns if total exceeds _MAX_HISTORY.
         """
         seed_len = len(self._seed)
-        real = self.history[seed_len:]  # everything after seed examples
+        real = self.history[seed_len:]
 
-        # Step 1: compress RESULT: blocks in all but the last assistant message
         last_asst_idx = None
         for i in range(len(real) - 1, -1, -1):
             if real[i]["role"] == "assistant":
@@ -176,19 +192,17 @@ REMEMBER: <the fact>
                 break
 
         for i, msg in enumerate(real):
-            # RESULT: is now a user message — truncate large ones
             if msg["role"] == "user" and msg["content"].startswith("RESULT:"):
                 if i == last_asst_idx:
-                    continue  # leave results adjacent to the latest assistant turn
+                    continue
                 if len(msg["content"]) > 400:
                     real[i] = {**msg, "content": "RESULT: [output truncated — already processed]"}
                 continue
             if msg["role"] != "assistant":
                 continue
             if i == last_asst_idx:
-                continue  # leave the most recent assistant message intact
+                continue
 
-        # Step 2: drop oldest turns if still too long
         excess = len(real) - _MAX_HISTORY
         if excess > 0:
             real = real[excess:]
@@ -198,7 +212,7 @@ REMEMBER: <the fact>
     # ── ReAct loop ───────────────────────────────────────────────────────────
 
     def _run_loop(self) -> None:
-        seen_calls: list[str] = []  # track (tool_name, args) to detect spinning
+        seen_calls: list[str] = []
 
         for _ in range(_MAX_LOOPS):
             response = self._stream_response()
@@ -213,21 +227,17 @@ REMEMBER: <the fact>
             tool_match = _TOOL_RE.search(response)
 
             if not tool_match:
-                # No valid tool call — treat as final answer.
-                # Strip any malformed TOOL: fragments before logging.
-                clean = re.sub(r"TOOL:.*", "", response, flags=re.DOTALL).strip()
-                display = clean or response.strip()
-                if not display:
-                    display = "(no response)"
+                clean   = re.sub(r"TOOL:.*", "", response, flags=re.DOTALL).strip()
+                display = clean or response.strip() or "(no response)"
                 self.ws.log_session(self.session_log, self.name, display)
                 if self.history and self.history[-1]["role"] == "assistant":
                     self.history[-1]["content"] = display
                 return
 
             tool_name = tool_match.group("tool_name")
-            raw_args = tool_match.group("args")
+            raw_args  = tool_match.group("args")
 
-            # Detect spinning: same tool+args called twice → bail out
+            # Detect spinning
             call_sig = f"{tool_name}:{raw_args}"
             if call_sig in seen_calls:
                 msg = f"(tool {tool_name} called repeatedly with same args — stopping)"
@@ -251,32 +261,23 @@ REMEMBER: <the fact>
                 f"**Input:** `{raw_args}`\n\n**Output:**\n```\n{result}\n```",
             )
 
-            # Keep assistant message as-is (just the TOOL call),
-            # then inject the result as a user message so the conversation
-            # always ends with a user turn — required by Anthropic's API.
+            # Keep assistant message (TOOL call), inject result as user turn.
+            # Ensures conversation always ends on a user turn (required by Anthropic API).
             if not (self.history and self.history[-1]["role"] == "assistant"):
                 self.history.append({"role": "assistant", "content": response})
             self.history.append({"role": "user", "content": f"RESULT: {result}"})
 
-        self._output(f"\n[agent] Hit loop limit ({_MAX_LOOPS}).\n")
+        self._output(f"\n[{self.name}] Hit loop limit ({_MAX_LOOPS}).\n")
 
     # ── Streaming ────────────────────────────────────────────────────────────
 
     def _stream_response(self) -> str:
-        """
-        Stream one LLM turn with smart output handling:
-        - Normal text is printed token-by-token as it arrives.
-        - Once a TOOL: or REMEMBER: line starts, switch to line-buffering:
-          complete lines are inspected before printing so protocol lines
-          are never shown to the user mid-stream.
-        """
-        now = datetime.now(timezone.utc).astimezone()  # local time with tz
-        time_ctx = f"Current date and time: {now.strftime('%A, %Y-%m-%d %H:%M %Z')}"
-        system_with_time = self.system_prompt + f"\n\n## Context\n{time_ctx}\n"
-        messages = [{"role": "system", "content": system_with_time}] + self.history
+        now        = datetime.now(timezone.utc).astimezone()
+        time_ctx   = f"Current date and time: {now.strftime('%A, %Y-%m-%d %H:%M %Z')}"
+        sys_prompt = self.system_prompt + f"\n\n## Context\n{time_ctx}\n"
+        messages   = [{"role": "system", "content": sys_prompt}] + self.history
 
-        # Anthropic (and some other APIs) reject requests that end on an assistant
-        # message. Trim any trailing assistant turns before sending.
+        # Trim trailing assistant turns — Anthropic API rejects them
         while messages and messages[-1]["role"] == "assistant":
             messages = messages[:-1]
 
@@ -289,33 +290,27 @@ REMEMBER: <the fact>
         self._output(f"\n{self.name}: ")
 
         full_text = ""
-        line_buf  = ""    # accumulates current line when in buffered mode
-        buffering = False # True once a protocol marker has been seen
+        line_buf  = ""
+        buffering = False
 
         for chunk in stream:
             delta = chunk.choices[0].delta if chunk.choices else None
             if delta and delta.content:
                 token = delta.content
                 full_text += token
-
                 if not buffering:
-                    # Check if this token starts a protocol line
                     if "TOOL:" in full_text or "REMEMBER:" in full_text:
                         buffering = True
-                        # Don't print any more — collect into line_buf
                         line_buf += token
                     else:
                         self._output(token)
                 else:
                     line_buf += token
 
-        # Stream ended — decide what to show
         tool_match = _TOOL_RE.search(full_text)
         if tool_match:
-            # Erase the partial line_buf output (none was printed) and show status
             self._output(f"\U0001f527 calling {tool_match.group('tool_name')}...\n")
         elif buffering:
-            # REMEMBER: present but no TOOL — strip markers and print remainder
             visible = re.sub(r"REMEMBER:[^\n]*\n?", "", line_buf).strip()
             self._output((visible or "") + "\n")
         else:
@@ -323,6 +318,8 @@ REMEMBER: <the fact>
 
         self.history.append({"role": "assistant", "content": full_text})
         return full_text
+
+    # ── Tool execution ────────────────────────────────────────────────────────
 
     def _execute_tool(self, name: str, args: dict) -> str:
         result = tools.dispatch(name, args, self.tool_schemas)

@@ -113,7 +113,7 @@ def main() -> None:
             send(result, chat_id=args.chat)
             print(f"Sent to Telegram: {result[:120]}{'...' if len(result) > 120 else ''}")
         except Exception as e:
-            error_msg = f"⚠️ Aria task failed: {e}"
+            error_msg = f"⚠️ {agent.name} task failed: {e}"
             try:
                 send(error_msg, chat_id=args.chat)
             except Exception:

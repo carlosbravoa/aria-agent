@@ -1,12 +1,12 @@
 """
-workspace.py — Persistent markdown storage for agent memory, soul, and session notes.
+aria/workspace.py — Persistent markdown storage.
 
-Layout:
-  workspace/
-    memory/     → long-term facts, user prefs, learned context
-    soul/       → agent identity, values, persona config
-    tools_registry/ → auto-generated tool docs (informational)
-    sessions/   → per-session conversation logs
+Default layout:
+  ~/.aria/workspace/
+    memory/          long-term facts, user prefs
+    soul/            agent identity and persona
+    sessions/        per-session conversation logs
+    tools_registry/  auto-generated tool docs
 """
 
 from __future__ import annotations
@@ -16,22 +16,33 @@ from pathlib import Path
 
 
 class Workspace:
-    def __init__(self, root: str | Path = "./workspace") -> None:
+    def __init__(self, root: Path | str = "./workspace") -> None:
         self.root = Path(root).expanduser().resolve()
         for sub in ("memory", "soul", "sessions", "tools_registry"):
             (self.root / sub).mkdir(parents=True, exist_ok=True)
-        self._bootstrap()
+        # Pass agent name so the soul file uses the configured name, not a hardcoded one
+        import os
+        self._bootstrap(agent_name=os.environ.get("AGENT_NAME", "Agent"))
 
-    # ── Bootstrap defaults ──────────────────────────────────────────────────
+    # ── Bootstrap ────────────────────────────────────────────────────────────
 
-    def _bootstrap(self) -> None:
+    def _bootstrap(self, agent_name: str = "Agent") -> None:
         soul_file = self.root / "soul" / "identity.md"
         if not soul_file.exists():
             soul_file.write_text(
-                "# Agent Identity\n\n"
-                "You are a lean, precise assistant running on a local LLM.\n"
-                "You think step-by-step, prefer short answers, and only call tools when needed.\n"
-                "You save important facts to memory automatically.\n",
+                f"# Agent Identity\n\n"
+                f"You are {agent_name}, a lean and precise assistant running on a local LLM.\n"
+                "You think step-by-step and only call tools when needed.\n"
+                "\n"
+                "## Channels\n\n"
+                "You are reachable through multiple interfaces:\n"
+                "- Terminal: interactive REPL and single-shot queries.\n"
+                "- Telegram: users message you via the Telegram bot.\n"
+                "- WhatsApp: users message your WhatsApp number directly.\n"
+                "- Scheduled tasks: use --notify flag to push results to Telegram.\n"
+                "\n"
+                "All channels share the same memory and tools. "
+                "Conversation history is isolated per channel and user.\n",
                 encoding="utf-8",
             )
         memory_file = self.root / "memory" / "core.md"
@@ -41,29 +52,23 @@ class Workspace:
                 encoding="utf-8",
             )
 
-    # ── Soul (system prompt augmentation) ───────────────────────────────────
+    # ── Soul ─────────────────────────────────────────────────────────────────
 
     def load_soul(self) -> str:
-        parts: list[str] = []
-        soul_dir = self.root / "soul"
-        for f in sorted(soul_dir.glob("*.md")):
-            parts.append(f.read_text(encoding="utf-8"))
+        parts = [f.read_text(encoding="utf-8") for f in sorted((self.root / "soul").glob("*.md"))]
         return "\n\n---\n\n".join(parts)
 
     # ── Memory ───────────────────────────────────────────────────────────────
 
     def load_memory(self) -> str:
-        parts: list[str] = []
-        mem_dir = self.root / "memory"
-        for f in sorted(mem_dir.glob("*.md")):
-            parts.append(f.read_text(encoding="utf-8"))
+        parts = [f.read_text(encoding="utf-8") for f in sorted((self.root / "memory").glob("*.md"))]
         return "\n\n---\n\n".join(parts)
 
     def append_memory(self, note: str, filename: str = "core.md") -> None:
         path = self.root / "memory" / filename
         ts = datetime.now().strftime("%Y-%m-%d %H:%M")
         with path.open("a", encoding="utf-8") as f:
-            f.write(f"\n\n<!-- {ts} -->\n{note.strip()}\n")
+            f.write(f"\n<!-- {ts} -->\n{note.strip()}\n")
 
     # ── Sessions ─────────────────────────────────────────────────────────────
 
@@ -77,21 +82,16 @@ class Workspace:
         with path.open("a", encoding="utf-8") as f:
             f.write(f"\n\n**[{ts}] {role.upper()}**\n\n{content.strip()}\n")
 
-    # ── Tools registry docs ──────────────────────────────────────────────────
+    # ── Tools registry ────────────────────────────────────────────────────────
 
     def update_tools_registry(self, schemas: list[dict]) -> None:
         out = self.root / "tools_registry" / "available_tools.md"
         lines = ["# Available Tools\n"]
         for t in schemas:
             fn = t.get("function", t)
-            lines.append(f"## `{fn['name']}`\n{fn.get('description','')}\n")
-            params = fn.get("parameters", {}).get("properties", {})
-            if params:
-                lines.append("**Parameters:**\n")
-                for k, v in params.items():
-                    req = k in fn.get("parameters", {}).get("required", [])
-                    lines.append(
-                        f"- `{k}` ({'required' if req else 'optional'}): {v.get('description','')}\n"
-                    )
+            lines.append(f"## `{fn['name']}`\n{fn.get('description', '')}\n")
+            for k, v in fn.get("parameters", {}).get("properties", {}).items():
+                req = k in fn.get("parameters", {}).get("required", [])
+                lines.append(f"- `{k}` ({'required' if req else 'optional'}): {v.get('description', '')}\n")
             lines.append("")
         out.write_text("\n".join(lines), encoding="utf-8")
