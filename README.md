@@ -1,22 +1,23 @@
 # Aria Agent
 
-A lean agent that runs against any OpenAI-compatible LLM endpoint — local
-(Ollama, LM Studio, llama.cpp) or cloud (Anthropic, OpenAI) — with persistent
-markdown workspace, pluggable tools, Telegram support, and a first-run setup wizard.
+A lean, multi-channel AI agent that runs against any OpenAI-compatible LLM
+endpoint — local (Ollama, LM Studio) or cloud (Anthropic, OpenAI) — with
+persistent markdown workspace, pluggable tools, and support for Telegram,
+WhatsApp, and scheduled tasks.
 
 ---
 
 ## Install
 
 ```bash
-# Terminal interface only
+# Terminal + Telegram
 pip install -e .
 
 # With Telegram bot support
 pip install -e ".[telegram]"
 ```
 
-> **Tip — if pip defaults to user install and things break:**
+> **If pip defaults to user install and things break:**
 > ```bash
 > pip install -e . --break-system-packages
 > # or use a virtualenv:
@@ -39,11 +40,37 @@ aria
 
 ## Configure
 
-Edit `~/.aria/.env`. Aria searches for `.env` in this order:
+Edit `~/.aria/.env`. Only the LLM block is required to get started.
+Everything else is optional and only needed for the features you use.
 
-1. `$ARIA_ENV` — explicit path override
-2. `~/.aria/.env` — default ← **put it here**
-3. `./.env` — current directory (dev convenience)
+```ini
+# ── LLM (required) ───────────────────────────────────────────────────────────
+LLM_BASE_URL=https://api.anthropic.com/v1
+LLM_API_KEY=sk-ant-...
+LLM_MODEL=claude-haiku-4-5-20251001
+AGENT_NAME=Aria
+
+# ── Telegram (required for aria-telegram and aria --notify) ──────────────────
+TELEGRAM_TOKEN=<from @BotFather>
+TELEGRAM_ALLOWED=<your chat ID from @userinfobot>
+
+# ── WhatsApp (required for aria-whatsapp, skip if not using) ─────────────────
+# ARIA_WA_PORT=7532
+# ARIA_WA_SECRET=pick-any-random-string
+# WHATSAPP_ALLOWED=34612345678    # international format, no +
+
+# ── Gmail / gog (required for the gmail tool) ────────────────────────────────
+GMAIL_CLI=gog
+GOG_ACCOUNT=you@gmail.com
+
+# ── Agent behaviour (optional, shown with defaults) ──────────────────────────
+# ARIA_MAX_LOOPS=20       # raise if agent hits loop limit on complex tasks
+# ARIA_MAX_HISTORY=60     # conversation turns kept in context
+
+# ── Path overrides (optional) ────────────────────────────────────────────────
+# ARIA_WORKSPACE=~/.aria/workspace
+# ARIA_TOOLS_DIR=~/.aria/tools
+```
 
 ### Recommended models
 
@@ -52,67 +79,25 @@ instruction-following. These models work well:
 
 | Provider | Model | Notes |
 |----------|-------|-------|
-| Ollama | `llama3.2`, `mistral`, `qwen2.5` | Best local option |
-| Anthropic | `claude-haiku-4-5`, `claude-sonnet-4-5` | Cloud, reliable |
-| OpenAI | `gpt-4o-mini`, `gpt-4o` | Cloud, reliable |
+| Anthropic | `claude-haiku-4-5-20251001` | Fast, reliable, recommended |
+| Anthropic | `claude-sonnet-4-5` | More capable, slower |
+| OpenAI | `gpt-4o-mini` | Good balance |
+| Ollama | `llama3.2`, `mistral`, `qwen2.5` | Best local options |
 
 > **Avoid:** on-device runtimes like MediaPipe/Gemma — limited context window
-> and no reliable structured output support.
-
-### Ollama example
-
-```bash
-ollama pull llama3.2
-```
-
-```ini
-LLM_BASE_URL=http://localhost:11434/v1
-LLM_API_KEY=ollama
-LLM_MODEL=llama3.2
-AGENT_NAME=Aria
-```
-
-### Anthropic example
-
-```ini
-LLM_BASE_URL=https://api.anthropic.com/v1
-LLM_API_KEY=sk-ant-...
-LLM_MODEL=claude-haiku-4-5-20251001
-AGENT_NAME=Aria
-```
-
-### OpenAI example
-
-```ini
-LLM_BASE_URL=https://api.openai.com/v1
-LLM_API_KEY=sk-...
-LLM_MODEL=gpt-4o-mini
-AGENT_NAME=Aria
-```
-
-### All config variables
-
-| Variable           | Default             | Description                          |
-|--------------------|---------------------|--------------------------------------|
-| `LLM_BASE_URL`     | *(required)*        | OpenAI-compatible endpoint           |
-| `LLM_API_KEY`      | `local`             | API key (any string for local LLMs)  |
-| `LLM_MODEL`        | `llama3.2`          | Model name                           |
-| `AGENT_NAME`       | `Agent`             | Display name in the terminal         |
-| `ARIA_WORKSPACE`   | `~/.aria/workspace` | Override workspace location          |
-| `ARIA_TOOLS_DIR`   | `~/.aria/tools`     | Directory for user-added tools       |
-| `TELEGRAM_TOKEN`   | —                   | Telegram bot token                   |
-| `TELEGRAM_ALLOWED` | —                   | Comma-separated allowed chat IDs     |
-| `GMAIL_CLI`        | `gog`               | Gmail CLI binary name                |
+> and unreliable structured output.
 
 ---
 
 ## Usage
 
 ```bash
-aria                                 # interactive REPL
-aria "how do I list hidden files?"   # single-shot, then exit
-aria-telegram                        # Telegram bot
-aria --notify "summarise my unread emails from today" # Will send output in the telegram default channel
+aria                                  # interactive REPL
+aria "query"                          # single-shot, prints to stdout
+aria --notify "query"                 # single-shot, sends result to Telegram
+aria --notify --chat 123 "query"      # send to a specific Telegram chat ID
+aria-telegram                         # Telegram bot (long-running)
+aria-whatsapp                         # WhatsApp bridge (long-running, needs Node.js)
 ```
 
 ### REPL commands
@@ -127,10 +112,67 @@ aria --notify "summarise my unread emails from today" # Will send output in the 
 
 ---
 
+## Channels
+
+Aria supports multiple messaging channels simultaneously. Each channel is
+independent — if you don't need one, simply don't configure or run it.
+Nothing will break.
+
+Sessions are keyed by `(channel, user_id)` so each user on each channel gets
+isolated conversation history, while the workspace (memory, tools) is shared.
+
+### Telegram
+
+1. Create a bot via [@BotFather](https://t.me/BotFather), copy the token.
+2. Get your chat ID from [@userinfobot](https://t.me/userinfobot).
+3. Add `TELEGRAM_TOKEN` and `TELEGRAM_ALLOWED` to `~/.aria/.env`.
+4. Run: `aria-telegram`
+
+Available bot commands: `/start` `/memory` `/tools` `/clear` `/save <note>`
+
+### WhatsApp
+
+Requires Node.js. Uses [whatsapp-web.js](https://github.com/pedroslopez/whatsapp-web.js).
+
+```bash
+# 1. Copy the Node.js bridge to ~/.aria/whatsapp/
+mkdir -p ~/.aria/whatsapp
+cp whatsapp/bridge.js whatsapp/package.json ~/.aria/whatsapp/
+cd ~/.aria/whatsapp && npm install
+
+# 2. Add WhatsApp vars to ~/.aria/.env
+# ARIA_WA_PORT=7532
+# ARIA_WA_SECRET=your-secret
+# WHATSAPP_ALLOWED=34612345678
+
+# 3. Start both processes
+nohup aria-whatsapp >> ~/.aria/whatsapp.log 2>&1 &
+nohup node ~/.aria/whatsapp/bridge.js >> ~/.aria/whatsapp-node.log 2>&1 &
+```
+
+On first run `bridge.js` shows a QR code — scan it with WhatsApp once.
+Auth is persisted in `~/.aria/whatsapp/.wwebjs_auth/`.
+
+### Scheduled tasks
+
+Use `aria --notify` from cron to run tasks and receive results on Telegram:
+
+```cron
+# Every morning at 8am
+0 8 * * * /home/$USER/.local/bin/aria --notify "summarise my unread emails"
+
+# Every Friday at 6pm
+0 18 * * 5 /home/$USER/.local/bin/aria --notify "weekly digest of my emails"
+```
+
+The agent can also schedule tasks itself using the `notify` tool to deliver
+results back to Telegram without any manual setup.
+
+---
+
 ## Tool protocol
 
-Aria does not use the OpenAI function-calling API — instead it uses a plain-text
-protocol that works with any LLM:
+Aria uses a plain-text protocol that works with any LLM:
 
 ```
 TOOL: file_access
@@ -139,46 +181,58 @@ INPUT: {"action": "list", "path": "~"}
 RESULT: Documents Downloads ...
 ```
 
-The agent also supports a `REMEMBER:` marker for saving facts to memory:
+For saving facts to memory:
 
 ```
 REMEMBER: User prefers dark mode.
 ```
 
-Both are intercepted by the Python layer — the model never needs to know about
-file paths or API calls.
-
----
-
-## Workspace
-
-All state is plain markdown, fully human-editable:
-
-```
-~/.aria/
-├── .env                          ← config
-├── tools/                        ← drop custom tool .py files here
-└── workspace/
-    ├── memory/
-    │   └── core.md               ← long-term memory (agent writes here)
-    ├── soul/
-    │   └── identity.md           ← agent persona (edit to customise)
-    ├── sessions/
-    │   └── session_YYYYMMDD_HHMMSS.md   ← per-session logs
-    └── tools_registry/
-        └── available_tools.md    ← auto-generated tool docs
-```
+Both are intercepted directly in Python — the LLM never needs to know about
+file paths or API internals.
 
 ---
 
 ## Built-in tools
 
-| Tool          | Description                                              |
-|---------------|----------------------------------------------------------|
-| `file_access` | Read, write, append, list, delete local files            |
-| `shell_run`   | Run shell commands (requires confirmation before running)|
-| `web_fetch`   | Fetch and extract text from a web page                   |
-| `gmail`       | List, read, search, send email via `gog` CLI             |
+| Tool          | Description                                                    |
+|---------------|----------------------------------------------------------------|
+| `file_access` | Read/write/append/patch/list/delete files. Supports base64 encoding and paginated reads for large files. |
+| `shell_run`   | Run shell commands. Pass `script` field to avoid JSON escaping issues. Supports `stdin`, `timeout`, and `interpreter`. |
+| `web_fetch`   | Fetch and extract text from a web page.                        |
+| `gmail`       | Search/read/send/mark-read Gmail via `gog` CLI.               |
+| `notify`      | Push a message to the user via Telegram.                       |
+
+### Writing scripts without escaping issues
+
+Use the `script` field in `shell_run` to pass code directly — no JSON
+escaping needed:
+
+```json
+{
+  "script": "#!/usr/bin/env python3\nprint('hello \"world\"')",
+  "interpreter": "python3"
+}
+```
+
+### Editing files without truncation
+
+Use `file_access` `patch` to replace a specific string without rewriting
+the whole file:
+
+```json
+{
+  "action": "patch",
+  "path": "~/script.py",
+  "old": "def old_function():",
+  "new": "def new_function():"
+}
+```
+
+Use `offset` and `limit` to read large files in chunks:
+
+```json
+{"action": "read", "path": "~/big_file.py", "offset": 100, "limit": 50}
+```
 
 ---
 
@@ -207,50 +261,71 @@ Restart `aria` — the tool is auto-discovered.
 
 ---
 
-## Telegram
+## Workspace
 
-1. Create a bot via [@BotFather](https://t.me/BotFather) and copy the token.
-2. Get your chat ID by messaging [@userinfobot](https://t.me/userinfobot).
-3. Add to `~/.aria/.env`:
+All state is plain markdown, fully human-editable:
 
-```ini
-TELEGRAM_TOKEN=<your bot token>
-TELEGRAM_ALLOWED=<your chat ID>
 ```
-
-4. Run:
-
-```bash
-aria-telegram
+~/.aria/
+├── .env                              ← config
+├── tools/                            ← custom tool .py files
+├── whatsapp/                         ← Node.js WhatsApp bridge
+└── workspace/
+    ├── memory/
+    │   └── core.md                   ← long-term memory (agent writes here)
+    ├── soul/
+    │   └── identity.md               ← agent persona (edit to customise)
+    ├── sessions/
+    │   └── session_YYYYMMDD_HHMMSS.md
+    └── tools_registry/
+        └── available_tools.md
 ```
-
-Each Telegram chat gets its own isolated agent (separate history and session log), but
-note that memory, sould and environment are not multi-user ready!
-
-Available bot commands: `/start`, `/memory`, `/tools`, `/clear`, `/save <note>`.
 
 ---
 
 ## Gmail setup
 
 ```bash
-gog auth login     # authenticate once
-```
+# Authenticate once
+gog auth credentials ~/Downloads/client_secret_....json
+gog auth add you@gmail.com
 
-Set `GMAIL_CLI=gog` and `GOG_ACCOUNT=your@email.com` in `~/.aria/.env`.
+# Add to ~/.aria/.env
+GOG_ACCOUNT=you@gmail.com
+GMAIL_CLI=gog
+```
 
 ---
 
-## Scheduled tasks
+## Running as a background service
 
-From cron (crontab -e):
+```bash
+# Start Telegram bot
+nohup aria-telegram >> ~/.aria/telegram.log 2>&1 &
 
+# Check logs
+tail -f ~/.aria/telegram.log
 ```
-cron# Every morning at 8am — email summary to Telegram
-0 8 * * * /home/carlos/.local/bin/aria --notify "list my unread emails and summarise them"
 
-# Every Friday at 6pm — weekly digest
-0 18 * * 5 /home/carlos/.local/bin/aria --notify "summarise what happened 
+For a more robust setup, use a systemd user service:
+
+```ini
+# ~/.config/systemd/user/aria-telegram.service
+[Unit]
+Description=Aria Telegram Bot
+
+[Service]
+ExecStart=/home/$USER/.local/bin/aria-telegram
+Restart=on-failure
+EnvironmentFile=/home/$USER/.aria/.env
+
+[Install]
+WantedBy=default.target
+```
+
+```bash
+systemctl --user enable --now aria-telegram
+journalctl --user -fu aria-telegram
 ```
 
 ---
@@ -261,19 +336,27 @@ cron# Every morning at 8am — email summary to Telegram
 aria_pkg/
 ├── pyproject.toml
 ├── README.md
+├── whatsapp/                        ← copy to ~/.aria/whatsapp/
+│   ├── package.json
+│   └── bridge.js
 └── src/
     └── aria/
         ├── __init__.py
-        ├── agent.py          ← ReAct loop, streaming, tool dispatch
-        ├── config.py         ← path resolution, .env loading
-        ├── main.py           ← terminal REPL entry point
-        ├── setup.py          ← first-run wizard
-        ├── telegram_bot.py   ← Telegram interface
-        ├── workspace.py      ← markdown persistence (memory, soul, sessions)
+        ├── agent.py                 ← ReAct loop, streaming, tool dispatch
+        ├── channel.py               ← multi-channel session registry
+        ├── config.py                ← path resolution, .env loading
+        ├── main.py                  ← CLI entry point
+        ├── setup.py                 ← first-run wizard
+        ├── telegram_bot.py          ← Telegram bot interface
+        ├── telegram_notify.py       ← push-only Telegram sender
+        ├── whatsapp_bridge.py       ← HTTP bridge for whatsapp-web.js
+        ├── workspace.py             ← markdown persistence
         └── tools/
-            ├── __init__.py   ← auto-loader & dispatcher
+            ├── __init__.py          ← auto-loader & dispatcher
+            ├── _env.py              ← subprocess env builder
             ├── file_access.py
             ├── gmail.py
+            ├── notify.py
             ├── shell_run.py
             └── web_fetch.py
 ```
