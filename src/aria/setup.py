@@ -32,6 +32,12 @@ AGENT_NAME=Aria
 # ── Gmail (optional) ─────────────────────────────────────────────────
 # CLI binary used for Gmail access. Run `gog auth login` to authenticate.
 # GMAIL_CLI=gog
+
+# ── Agent behaviour ──────────────────────────────────────────────────
+# Max tool-call loops per turn (raise if agent hits limit on complex tasks)
+# ARIA_MAX_LOOPS=20
+# Max conversation history turns kept in context
+# ARIA_MAX_HISTORY=60
 """
 
 _BANNER = """

@@ -29,8 +29,9 @@ _TOOL_RE = re.compile(
     re.DOTALL,
 )
 _REMEMBER_RE = re.compile(r"REMEMBER:\s*(?P<note>[^\n]+)")
-_MAX_LOOPS = 10
-_MAX_HISTORY = 40  # trim oldest non-seed turns to avoid context overflow
+# Both configurable via ~/.aria/.env
+_MAX_LOOPS   = int(os.environ.get("ARIA_MAX_LOOPS",   "20"))
+_MAX_HISTORY = int(os.environ.get("ARIA_MAX_HISTORY", "60"))
 
 
 class Agent:
@@ -92,8 +93,11 @@ REMEMBER: <the fact>
 - Never narrate before a tool call. Emit TOOL: immediately.
 - After RESULT, answer in plain text.
 - You already know your own tools from the list above — never call a tool to look them up.
-- shell_run: read-only commands and workspace file creation run automatically. Destructive commands (rm, mv, kill, etc.) outside the workspace will prompt the user for confirmation — or be auto-rejected if there is no terminal (e.g. Telegram).
-- When completing a task that was triggered non-interactively (cron, script), always call the notify tool to deliver the result to the user via Telegram.
+- shell_run: destructive commands (rm, mv, kill, etc.) outside the workspace ask for confirmation or are auto-rejected in non-interactive mode. Everything else runs freely.
+- shell_run 'script' field: use for Python/bash code with quotes, braces, or backslashes — bypasses JSON escaping. Set interpreter='python3' for Python.
+- file_access 'patch': replace a specific string in a file without rewriting it — safer for large files, avoids truncation.
+- file_access encoding='base64': encode content as base64 when writing files with special characters that break JSON.
+- file_access 'read' with offset/limit: page through large files in chunks.
 - Be concise.
 """
 
