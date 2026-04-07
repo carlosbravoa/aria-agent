@@ -253,7 +253,7 @@ class Agent:
         self._output(f"\n{self.name}: ")
 
         full_text    = ""
-        pending_line = ""   # tokens accumulating since last newline
+        line_buf     = ""    # accumulates tokens until a newline is received
         in_tool_call = False
 
         for chunk in stream:
@@ -263,43 +263,26 @@ class Agent:
                 full_text += token
 
                 if in_tool_call:
-                    # Already committed to suppressing — just accumulate
-                    continue
+                    continue  # suppressing — just accumulate into full_text
 
-                # Check if a complete line just ended
-                if "\n" in token:
-                    parts = (pending_line + token).split("\n")
-                    # All parts except the last are complete lines
-                    for line in parts[:-1]:
-                        if line.startswith("TOOL:"):
-                            in_tool_call = True
-                            break
-                        if line.startswith("REMEMBER:"):
-                            # Suppress this line, print nothing
-                            pass
-                        else:
-                            self._output(line + "\n")
-                    if not in_tool_call:
-                        pending_line = parts[-1]
-                else:
-                    pending_line += token
-                    # Print partial line immediately UNLESS it looks like a protocol marker
-                    if not (pending_line.startswith("TOOL:") or
-                            pending_line.startswith("REMEMBER:")):
-                        self._output(token)
-                    elif pending_line == token:
-                        # First token of a protocol line — erase the last print
-                        # (nothing to erase since we only print non-protocol tokens)
-                        pass
+                line_buf += token
 
-        # Flush any remaining partial line — but only if it wasn't already
-        # printed token-by-token above (i.e. it's a protocol line we held back)
-        if pending_line and not in_tool_call:
-            if pending_line.startswith("REMEMBER:"):
-                pass  # suppress — handled by _run_loop
-            elif pending_line.startswith("TOOL:"):
-                pass  # suppress — tool call, handled below
-            # else: already printed token-by-token, nothing to flush
+                # Process only when we have complete lines (split on \n)
+                while "\n" in line_buf:
+                    line, line_buf = line_buf.split("\n", 1)
+                    if line.startswith("TOOL:"):
+                        in_tool_call = True
+                        line_buf = ""  # discard rest
+                        break
+                    if line.startswith("REMEMBER:"):
+                        pass  # suppress silently
+                    else:
+                        self._output(line + "\n")
+
+        # Stream ended — flush any remaining partial line
+        if line_buf and not in_tool_call:
+            if not line_buf.startswith("REMEMBER:") and not line_buf.startswith("TOOL:"):
+                self._output(line_buf)
 
         tool_match = _TOOL_RE.search(full_text)
         if tool_match:
