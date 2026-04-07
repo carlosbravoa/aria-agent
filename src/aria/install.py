@@ -99,32 +99,45 @@ def _load_existing_env(path: Path) -> dict[str, str]:
 
 
 def _write_env(path: Path, values: dict[str, str]) -> None:
-    """Write values to .env, preserving comments from the template."""
+    """
+    Write values to .env safely.
+
+    Strategy:
+      1. Start with the template for comments and structure.
+      2. For every key=value line in the template, replace with the
+         collected value if non-empty, otherwise comment it out.
+      3. Append any extra keys that aren't in the template.
+
+    This ensures existing values are never silently dropped.
+    """
     from aria.setup import _ENV_TEMPLATE
 
-    lines = _ENV_TEMPLATE.splitlines()
-    output = []
-    for line in lines:
+    template_lines = _ENV_TEMPLATE.splitlines()
+    template_keys: set[str] = set()
+    output: list[str] = []
+
+    for line in template_lines:
         stripped = line.strip()
+        # Blank lines and comments pass through unchanged
         if not stripped or stripped.startswith("#"):
             output.append(line)
             continue
-        # Uncommented key=value line in template
+        # Uncommented key=value line
+        if "=" not in stripped:
+            output.append(line)
+            continue
         key = stripped.split("=")[0].strip()
-        if key in values and values[key]:
-            output.append(f"{key}={values[key]}")
+        template_keys.add(key)
+        val = values.get(key, "").strip()
+        if val:
+            output.append(f"{key}={val}")
         else:
-            # Comment it out if empty
-            output.append(f"# {line}" if not line.startswith("#") else line)
+            # No value — keep as a commented-out placeholder
+            output.append(f"# {key}=")
 
-    # Append any keys not in template
-    template_keys = {
-        l.split("=")[0].strip()
-        for l in lines
-        if l.strip() and not l.strip().startswith("#") and "=" in l
-    }
+    # Append keys that exist in values but not in the template
     for key, val in values.items():
-        if key not in template_keys and val:
+        if key not in template_keys and val.strip():
             output.append(f"{key}={val}")
 
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -325,35 +338,50 @@ def install_services(dry_run: bool = False) -> None:
 
     section("Detecting binaries")
 
-    services: dict[str, dict] = {}
-    for name, desc in [
-        ("aria-telegram",   "Aria Telegram Bot"),
-        ("aria-supervisor", "Aria Task Supervisor"),
-        ("aria-whatsapp",   "Aria WhatsApp Python Bridge"),
-    ]:
-        path = _aria_bin(name)
-        if path:
-            ok(f"{name}: {path}")
-            services[name] = {"description": desc, "exec": path}
-        else:
-            warn(f"{name}: not found — skipping")
+    # Read env to decide which services are actually configured
+    env_values = _load_existing_env(env_file)
 
-    node     = _node_bin()
+    def _configured(*keys: str) -> bool:
+        """Return True if all given env keys have non-empty values."""
+        return all(env_values.get(k, "").strip() for k in keys)
+
+    services: dict[str, dict] = {}
+    for name, desc, required_keys in [
+        ("aria-telegram",   "Aria Telegram Bot",            ("TELEGRAM_TOKEN", "TELEGRAM_ALLOWED")),
+        ("aria-supervisor", "Aria Task Supervisor",          ()),   # always install if binary exists
+        ("aria-whatsapp",   "Aria WhatsApp Python Bridge",  ("WHATSAPP_ALLOWED",)),
+    ]:
+        bin_path = _aria_bin(name)
+        if not bin_path:
+            warn(f"{name}: binary not found — skipping")
+            continue
+        if required_keys and not _configured(*required_keys):
+            warn(f"{name}: not configured in .env — skipping")
+            info(f"Missing: {', '.join(k for k in required_keys if not env_values.get(k, '').strip())}")
+            continue
+        ok(f"{name}: {bin_path}")
+        services[name] = {"description": desc, "exec": bin_path}
+
+    node      = _node_bin()
     wa_bridge = Path.home() / ".aria" / "whatsapp" / "bridge.js"
-    if "aria-whatsapp" in services and node and wa_bridge.exists():
-        ok(f"node: {node}")
-        services["aria-whatsapp-node"] = {
-            "description": "Aria WhatsApp Node.js Bridge",
-            "exec":        f"{node} {wa_bridge}",
-            "requires":    "aria-whatsapp.service",
-        }
-    elif "aria-whatsapp" in services:
-        warn("Node.js or bridge.js not found — aria-whatsapp-node skipped")
-        info(f"Expected: {wa_bridge}")
-        info("See README — WhatsApp section")
+    if "aria-whatsapp" in services:
+        if node and wa_bridge.exists():
+            ok(f"node: {node}")
+            services["aria-whatsapp-node"] = {
+                "description": "Aria WhatsApp Node.js Bridge",
+                "exec":        f"{node} {wa_bridge}",
+                "requires":    "aria-whatsapp.service",
+            }
+        else:
+            if not node:
+                warn("node: not found — aria-whatsapp-node skipped")
+            if not wa_bridge.exists():
+                warn(f"bridge.js not found at {wa_bridge}")
+                info("See README — WhatsApp section")
 
     if not services:
-        err("No aria binaries found. Run: pip install -e '.[telegram]'")
+        err("No services to install. Check your .env configuration.")
+        info("Run `aria-install` to configure, or `aria-install --services` to retry.")
         sys.exit(1)
 
     section(f"Installing {len(services)} service(s)")
