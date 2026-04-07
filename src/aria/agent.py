@@ -292,10 +292,14 @@ class Agent:
                         # (nothing to erase since we only print non-protocol tokens)
                         pass
 
-        # Flush any remaining partial line
+        # Flush any remaining partial line — but only if it wasn't already
+        # printed token-by-token above (i.e. it's a protocol line we held back)
         if pending_line and not in_tool_call:
-            if not pending_line.startswith("REMEMBER:"):
-                self._output(pending_line)
+            if pending_line.startswith("REMEMBER:"):
+                pass  # suppress — handled by _run_loop
+            elif pending_line.startswith("TOOL:"):
+                pass  # suppress — tool call, handled below
+            # else: already printed token-by-token, nothing to flush
 
         tool_match = _TOOL_RE.search(full_text)
         if tool_match:
