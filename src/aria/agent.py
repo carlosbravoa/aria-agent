@@ -252,30 +252,54 @@ class Agent:
 
         self._output(f"\n{self.name}: ")
 
-        full_text = ""
-        line_buf  = ""
-        buffering = False
+        full_text    = ""
+        pending_line = ""   # tokens accumulating since last newline
+        in_tool_call = False
 
         for chunk in stream:
             delta = chunk.choices[0].delta if chunk.choices else None
             if delta and delta.content:
-                token = delta.content
+                token      = delta.content
                 full_text += token
-                if not buffering:
-                    if "TOOL:" in full_text or "REMEMBER:" in full_text:
-                        buffering = True
-                        line_buf += token
-                    else:
-                        self._output(token)
+
+                if in_tool_call:
+                    # Already committed to suppressing — just accumulate
+                    continue
+
+                # Check if a complete line just ended
+                if "\n" in token:
+                    parts = (pending_line + token).split("\n")
+                    # All parts except the last are complete lines
+                    for line in parts[:-1]:
+                        if line.startswith("TOOL:"):
+                            in_tool_call = True
+                            break
+                        if line.startswith("REMEMBER:"):
+                            # Suppress this line, print nothing
+                            pass
+                        else:
+                            self._output(line + "\n")
+                    if not in_tool_call:
+                        pending_line = parts[-1]
                 else:
-                    line_buf += token
+                    pending_line += token
+                    # Print partial line immediately UNLESS it looks like a protocol marker
+                    if not (pending_line.startswith("TOOL:") or
+                            pending_line.startswith("REMEMBER:")):
+                        self._output(token)
+                    elif pending_line == token:
+                        # First token of a protocol line — erase the last print
+                        # (nothing to erase since we only print non-protocol tokens)
+                        pass
+
+        # Flush any remaining partial line
+        if pending_line and not in_tool_call:
+            if not pending_line.startswith("REMEMBER:"):
+                self._output(pending_line)
 
         tool_match = _TOOL_RE.search(full_text)
         if tool_match:
             self._output(f"\U0001f527 calling {tool_match.group('tool_name')}...\n")
-        elif buffering:
-            visible = re.sub(r"REMEMBER:[^\n]*\n?", "", line_buf).strip()
-            self._output((visible or "") + "\n")
         else:
             self._output("\n")
 

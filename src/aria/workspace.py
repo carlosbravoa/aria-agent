@@ -101,6 +101,44 @@ class Workspace:
         with path.open("a", encoding="utf-8") as f:
             f.write(f"\n\n**[{ts}] {role.upper()}**\n\n{content.strip()}\n")
 
+    # ── Reflection support ───────────────────────────────────────────────────
+
+    def unanalysed_sessions(self, watermark_file: str = "reflect_watermark") -> list[Path]:
+        """
+        Return session log files not yet analysed, sorted oldest-first.
+        Uses a watermark file to track the last-analysed session timestamp.
+        """
+        sessions_dir = self.root / "sessions"
+        watermark    = self.root / "memory" / watermark_file
+        all_sessions = sorted(sessions_dir.glob("session_*.md"))
+
+        if watermark.exists():
+            last_ts = watermark.read_text(encoding="utf-8").strip()
+            return [s for s in all_sessions if s.stem > last_ts]
+
+        return all_sessions  # first run — analyse everything
+
+    def update_watermark(self, session_path: Path, watermark_file: str = "reflect_watermark") -> None:
+        """Advance the watermark to this session so it won't be re-analysed."""
+        watermark = self.root / "memory" / watermark_file
+        watermark.write_text(session_path.stem, encoding="utf-8")
+
+    def save_patterns(self, patterns: str) -> None:
+        """
+        Overwrite memory/patterns.md with extracted patterns.
+        This file is loaded as part of the memory context on every session.
+        """
+        path = self.root / "memory" / "patterns.md"
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M")
+        path.write_text(
+            f"# Observed Patterns\n<!-- last updated {ts} -->\n\n{patterns.strip()}\n",
+            encoding="utf-8",
+        )
+
+    def load_patterns(self) -> str | None:
+        path = self.root / "memory" / "patterns.md"
+        return path.read_text(encoding="utf-8").strip() if path.exists() else None
+
     # ── Tools registry ────────────────────────────────────────────────────────
 
     def update_tools_registry(self, schemas: list[dict]) -> None:
