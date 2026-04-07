@@ -1,26 +1,18 @@
 """
 aria/reflect.py — Autonomous memory reflection engine.
 
-Scans unanalysed session logs, extracts behavioural patterns and insights
-using the LLM, and writes them to memory/patterns.md. Runs unsupervised.
+Two-phase process:
+  1. Extraction  — analyse only NEW session logs (watermark-gated), extract
+                   raw observations per batch
+  2. Consolidation — merge raw observations with existing patterns into a
+                   single pruned, high-signal output capped at MAX_PATTERN_LINES
 
-Can be triggered three ways:
-  1. CLI:       aria-reflect
-  2. Cron:      0 3 * * * aria-reflect   (daily at 3am)
-  3. On-demand: the `reflect` tool lets the agent trigger it mid-conversation
+This keeps patterns.md lean and signal-dense regardless of history length.
 
-Architecture:
-  sessions/session_*.md  (raw logs)
-       ↓  [batch analysis, LLM call per N sessions]
-  memory/patterns.md     (extracted patterns — loaded every session)
-  memory/reflect_watermark (tracks which sessions have been analysed)
-
-Patterns extracted:
-  - Recurring topics and domains the user cares about
-  - Preferred communication style and response format
-  - Common workflows and tool usage sequences
-  - Implicit preferences revealed through corrections or feedback
-  - Time-of-day / day-of-week activity patterns
+Triggered via:
+  - CLI:     aria-reflect
+  - Cron:    0 3 * * * aria-reflect
+  - Tool:    the `reflect` tool lets the agent trigger it mid-conversation
 """
 
 from __future__ import annotations
@@ -31,58 +23,76 @@ from pathlib import Path
 
 log = logging.getLogger(__name__)
 
-# Analyse sessions in batches to keep prompts manageable
-_BATCH_SIZE   = int(os.environ.get("ARIA_REFLECT_BATCH", "10"))
-# Max chars to read per session (avoid huge files dominating the prompt)
-_SESSION_CHARS = int(os.environ.get("ARIA_REFLECT_SESSION_CHARS", "3000"))
+_BATCH_SIZE        = int(os.environ.get("ARIA_REFLECT_BATCH",         "10"))
+_SESSION_CHARS     = int(os.environ.get("ARIA_REFLECT_SESSION_CHARS",  "3000"))
+_MAX_PATTERN_LINES = int(os.environ.get("ARIA_REFLECT_MAX_LINES",      "40"))
 
 
 def _read_session(path: Path) -> str:
-    """Read a session log, truncating if necessary."""
     text = path.read_text(encoding="utf-8", errors="replace")
     if len(text) > _SESSION_CHARS:
         text = text[:_SESSION_CHARS] + "\n… [truncated]"
     return text
 
 
-def _build_analysis_prompt(sessions: list[tuple[Path, str]], existing_patterns: str | None) -> str:
-    """Build the prompt for pattern extraction."""
+def _extraction_prompt(sessions: list[tuple[Path, str]]) -> str:
+    """Prompt for Phase 1: extract raw observations from new sessions."""
     session_block = "\n\n---\n\n".join(
         f"### {path.stem}\n{content}" for path, content in sessions
     )
-
-    existing_block = (
-        f"## Existing patterns (update/extend these, do not repeat verbatim)\n{existing_patterns}\n\n"
-        if existing_patterns else ""
+    return (
+        "Analyse these conversation logs and extract behavioural observations "
+        "about the user. Be specific and evidence-based — only include what "
+        "you actually observe, not inferences.\n\n"
+        "Focus on:\n"
+        "- Topics and domains that came up\n"
+        "- Communication preferences (length, tone, format)\n"
+        "- Workflows and tool usage patterns\n"
+        "- Corrections or refinements the user made\n"
+        "- Technical context (languages, tools, systems)\n\n"
+        "Output as concise bullet points. Omit categories with no evidence.\n\n"
+        "## Sessions\n\n"
+        f"{session_block}"
     )
 
+
+def _consolidation_prompt(new_observations: str, existing_patterns: str | None) -> str:
+    """
+    Prompt for Phase 2: merge new observations with existing patterns,
+    prune redundant/stale entries, cap output at MAX_PATTERN_LINES lines.
+    """
+    existing_block = (
+        f"## Existing patterns\n{existing_patterns}\n\n"
+        if existing_patterns else ""
+    )
     return (
-        "You are analysing conversation logs to extract behavioural patterns "
-        "about the user. Your output will be stored as memory and used to make "
-        "future interactions more personalised and efficient.\n\n"
+        "You are consolidating a user's behavioural pattern memory. "
+        "Your output will be injected into an AI assistant's system prompt on every session, "
+        "so it must be maximally signal-dense and concise.\n\n"
         f"{existing_block}"
-        "## Session logs to analyse\n\n"
-        f"{session_block}\n\n"
-        "## Instructions\n"
-        "Extract patterns across these dimensions (only include what you actually observe):\n"
-        "- **Topics & domains**: recurring subjects, projects, or areas of interest\n"
-        "- **Communication style**: preferred response length, tone, format (bullets vs prose)\n"
-        "- **Workflows**: common task sequences, tool combinations, repeated operations\n"
-        "- **Implicit preferences**: things the user corrected, refined, or reacted positively to\n"
-        "- **Temporal patterns**: when they tend to interact, urgency signals\n"
-        "- **Technical context**: languages, tools, systems mentioned repeatedly\n\n"
-        "Format as concise bullet points grouped by dimension. "
-        "Be specific — 'prefers Python' is better than 'has technical interests'. "
-        "Omit dimensions where no clear pattern exists. "
-        "Do not include personal names or sensitive data."
+        f"## New observations from recent sessions\n{new_observations}\n\n"
+        "## Task\n"
+        "Produce a single merged, pruned pattern list following these rules:\n"
+        f"1. Hard limit: {_MAX_PATTERN_LINES} bullet points total across all categories.\n"
+        "2. Merge duplicates — if new observations confirm existing patterns, strengthen "
+        "the existing entry rather than adding a new one.\n"
+        "3. Prune weak signals — remove patterns that appeared only once and haven't "
+        "been confirmed by new sessions.\n"
+        "4. Prioritise recency — if a new observation contradicts an existing pattern, "
+        "trust the new one.\n"
+        "5. Keep only high-confidence, actionable patterns. Vague generalities are noise.\n"
+        "6. Group under these headings (omit empty ones):\n"
+        "   - **Topics & domains**\n"
+        "   - **Communication style**\n"
+        "   - **Workflows & tools**\n"
+        "   - **Technical context**\n"
+        "   - **Preferences & corrections**\n\n"
+        "Output only the bullet list — no preamble, no explanation."
     )
 
 
 def run(notify: bool = False) -> str:
-    """
-    Run the reflection pass. Returns a status string.
-    If notify=True, sends result to Telegram.
-    """
+    """Run the reflection pass. Returns a status string."""
     from aria import config
     from aria.workspace import Workspace
     from openai import OpenAI
@@ -96,7 +106,7 @@ def run(notify: bool = False) -> str:
         log.info(msg)
         return msg
 
-    log.info("Reflection: analysing %d sessions in batches of %d", len(unanalysed), _BATCH_SIZE)
+    log.info("Reflection: %d new sessions, batches of %d", len(unanalysed), _BATCH_SIZE)
 
     client = OpenAI(
         base_url=os.environ["LLM_BASE_URL"],
@@ -104,39 +114,63 @@ def run(notify: bool = False) -> str:
     )
     model = os.environ.get("LLM_MODEL", "llama3.2")
 
-    existing_patterns = ws.load_patterns()
-    last_analysed: Path | None = None
-    total_analysed = 0
+    # ── Phase 1: extract raw observations from each batch ────────────────────
+    all_observations: list[str] = []
+    last_analysed: Path | None  = None
+    total_analysed              = 0
 
-    # Process in batches so no single prompt gets too large
     for i in range(0, len(unanalysed), _BATCH_SIZE):
-        batch = unanalysed[i : i + _BATCH_SIZE]
+        batch    = unanalysed[i : i + _BATCH_SIZE]
         sessions = [(p, _read_session(p)) for p in batch]
 
-        prompt = _build_analysis_prompt(sessions, existing_patterns)
-
-        log.info("Analysing batch %d-%d...", i + 1, i + len(batch))
+        log.info("Extracting batch %d–%d...", i + 1, i + len(batch))
         try:
             resp = client.chat.completions.create(
                 model=model,
-                messages=[{"role": "user", "content": prompt}],
+                messages=[{"role": "user", "content": _extraction_prompt(sessions)}],
                 stream=False,
             )
-            existing_patterns = resp.choices[0].message.content.strip()
+            all_observations.append(resp.choices[0].message.content.strip())
         except Exception as exc:
-            log.error("LLM call failed for batch %d: %s", i, exc)
-            break  # stop at failed batch, save progress so far
+            log.error("Extraction failed for batch %d: %s", i, exc)
+            break
 
-        last_analysed = batch[-1]
+        last_analysed   = batch[-1]
         total_analysed += len(batch)
 
-    if existing_patterns:
-        ws.save_patterns(existing_patterns)
+    if not all_observations:
+        return "Reflection: extraction failed — no patterns updated."
+
+    # ── Phase 2: consolidate new observations with existing patterns ──────────
+    new_observations    = "\n\n".join(all_observations)
+    existing_patterns   = ws.load_patterns()
+
+    log.info("Consolidating patterns (max %d lines)...", _MAX_PATTERN_LINES)
+    try:
+        resp = client.chat.completions.create(
+            model=model,
+            messages=[{
+                "role": "user",
+                "content": _consolidation_prompt(new_observations, existing_patterns),
+            }],
+            stream=False,
+        )
+        consolidated = resp.choices[0].message.content.strip()
+    except Exception as exc:
+        log.error("Consolidation failed: %s", exc)
+        # Save raw observations rather than losing them
+        consolidated = new_observations
+
+    ws.save_patterns(consolidated)
 
     if last_analysed:
         ws.update_watermark(last_analysed)
 
-    msg = f"Reflection complete: {total_analysed} sessions analysed, patterns updated."
+    line_count = len([l for l in consolidated.splitlines() if l.strip()])
+    msg = (
+        f"Reflection complete: {total_analysed} sessions analysed, "
+        f"patterns consolidated to {line_count} lines."
+    )
     log.info(msg)
 
     if notify:
@@ -144,7 +178,7 @@ def run(notify: bool = False) -> str:
             from aria.telegram_notify import send
             send(f"🧠 {msg}")
         except Exception as exc:
-            log.warning("Could not send Telegram notification: %s", exc)
+            log.warning("Telegram notification failed: %s", exc)
 
     return msg
 
@@ -161,16 +195,10 @@ def main() -> None:
         prog="aria-reflect",
         description="Analyse session logs and update memory patterns.",
     )
-    parser.add_argument(
-        "--notify", "-n",
-        action="store_true",
-        help="Send result to Telegram when done",
-    )
-    parser.add_argument(
-        "--verbose", "-v",
-        action="store_true",
-        help="Show debug output",
-    )
+    parser.add_argument("--notify", "-n", action="store_true",
+                        help="Send result to Telegram when done")
+    parser.add_argument("--verbose", "-v", action="store_true",
+                        help="Show debug output")
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -178,8 +206,7 @@ def main() -> None:
         format="%(message)s",
     )
 
-    result = run(notify=args.notify)
-    print(result)
+    print(run(notify=args.notify))
 
 
 if __name__ == "__main__":
