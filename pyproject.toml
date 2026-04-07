@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "aria-agent"
-version = "0.3.1"
+version = "0.1.0"
 description = "A lean local-LLM agent with persistent workspace and pluggable tools"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -12,10 +12,8 @@ dependencies = [
     "openai>=1.0.0",
     "python-dotenv>=1.0.0",
     "httpx>=0.27.0",
+    "python-telegram-bot>=21",
 ]
-
-[project.optional-dependencies]
-telegram = ["python-telegram-bot>=21"]
 
 [project.scripts]
 aria           = "aria.main:main"
@@ -23,6 +21,7 @@ aria-telegram  = "aria.telegram_bot:main"
 aria-whatsapp  = "aria.whatsapp_bridge:main"
 aria-reflect    = "aria.reflect:main"
 aria-supervisor = "aria.supervisor:main"
+aria-install    = "aria.install:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

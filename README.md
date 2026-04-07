@@ -49,13 +49,10 @@ cd aria_pkg
 # Option A — virtualenv (recommended)
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -e ".[telegram]"
+pip install -e .
 
 # Option B — user install
-pip install -e ".[telegram]" --break-system-packages
-
-# Option C — terminal only (no Telegram bot dependency)
-pip install -e .
+pip install -e . --break-system-packages
 ```
 
 After install, these commands are available in your shell:
@@ -67,6 +64,7 @@ After install, these commands are available in your shell:
 | `aria-whatsapp`    | WhatsApp HTTP bridge (long-running, needs Node.js) |
 | `aria-reflect`     | Analyse session history, update memory patterns    |
 | `aria-supervisor`  | Autonomous task queue supervisor (long-running)    |
+| `aria-install`     | Install and enable all services via systemd        |
 
 ---
 
@@ -521,45 +519,51 @@ GMAIL_CLI=gog
 
 ## Running as a background service
 
-### nohup (simple)
+### Recommended — install wizard
+
+After configuring `~/.aria/.env`, run the install wizard once:
+
+```bash
+aria-install
+```
+
+The wizard will:
+1. Detect all installed aria binaries and Node.js
+2. Write systemd user service files with correct paths
+3. Enable user lingering (services survive logout and auto-start on boot)
+4. Start all services immediately
+5. Verify each service is running and show log commands
+
+```bash
+# Preview what it would do without making changes
+aria-install --dry-run
+
+# Remove all services
+aria-install --uninstall
+```
+
+### Day-to-day management
+
+```bash
+# Check status
+systemctl --user status aria-telegram
+systemctl --user status aria-supervisor
+
+# Live logs
+journalctl --user -fu aria-telegram
+journalctl --user -fu aria-supervisor
+
+# Restart after a code update (git pull + pip install -e .)
+systemctl --user restart aria-telegram aria-supervisor aria-whatsapp aria-whatsapp-node
+```
+
+### nohup (alternative, no systemd required)
 
 ```bash
 nohup aria-telegram    >> ~/.aria/telegram.log    2>&1 &
 nohup aria-supervisor  >> ~/.aria/supervisor.log  2>&1 &
-
 tail -f ~/.aria/telegram.log
 ```
-
-### systemd (robust, auto-restart)
-
-Create a service file for each process you want to run:
-
-```ini
-# ~/.config/systemd/user/aria-telegram.service
-[Unit]
-Description=Aria Telegram Bot
-After=network.target
-
-[Service]
-ExecStart=/home/$USER/.local/bin/aria-telegram
-Restart=on-failure
-RestartSec=10
-EnvironmentFile=/home/$USER/.aria/.env
-
-[Install]
-WantedBy=default.target
-```
-
-```bash
-# Enable and start
-systemctl --user enable --now aria-telegram
-
-# Check status and logs
-systemctl --user status aria-telegram
-journalctl --user -fu aria-telegram
-```
-
-Repeat for `aria-supervisor` and `aria-whatsapp` as needed.
 
 ---
 
@@ -614,6 +618,7 @@ aria_pkg/
         ├── main.py                    ← CLI entry point (aria)
         ├── reflect.py                 ← memory reflection engine (aria-reflect)
         ├── setup.py                   ← first-run wizard
+        ├── install.py                 ← service installation wizard (aria-install)
         ├── supervisor.py              ← task queue supervisor (aria-supervisor)
         ├── task.py                    ← task data model and queue operations
         ├── telegram_bot.py            ← Telegram bot interface
