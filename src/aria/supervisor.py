@@ -1,21 +1,21 @@
 """
 aria/supervisor.py — Autonomous task supervisor.
 
-Polls ~/.aria/tasks/pending/ for due tasks, executes them through the agent,
-and routes results to Telegram or stdout.
+Responsibilities:
+  1. Poll ~/.aria/tasks/pending/ for due tasks and execute them.
+  2. Run built-in periodic jobs on a schedule (no crontab needed).
+
+Built-in periodic jobs (all configurable via ~/.aria/.env):
+  - Memory reflection: ARIA_REFLECT_EVERY=86400  (seconds, default 24h)
+
+Config:
+  ARIA_SUPERVISOR_INTERVAL=30   # poll interval in seconds (default 30)
+  ARIA_REFLECT_EVERY=86400      # seconds between reflection runs (0 = disabled)
+  ARIA_REFLECT_NOTIFY=true      # send Telegram notification after reflection
 
 Run as a background process:
   nohup aria-supervisor >> ~/.aria/supervisor.log 2>&1 &
-
-Or as a systemd user service (see README).
-
-Config via ~/.aria/.env:
-  ARIA_SUPERVISOR_INTERVAL=30   # seconds between polls (default 30)
-  ARIA_SUPERVISOR_WORKERS=2     # max concurrent tasks (default 1, sequential)
-
-The supervisor is intentionally single-threaded by default. Most tasks involve
-LLM calls which are already I/O-bound; parallelism adds complexity without
-meaningful throughput gains for a personal agent.
+  # or: aria-install  (sets up systemd service automatically)
 """
 
 from __future__ import annotations
@@ -28,14 +28,53 @@ from pathlib import Path
 
 log = logging.getLogger(__name__)
 
-_INTERVAL = int(os.environ.get("ARIA_SUPERVISOR_INTERVAL", "30"))
+_INTERVAL      = int(os.environ.get("ARIA_SUPERVISOR_INTERVAL", "30"))
+_REFLECT_EVERY = int(os.environ.get("ARIA_REFLECT_EVERY",       "86400"))  # 24h
+_REFLECT_NOTIFY = os.environ.get("ARIA_REFLECT_NOTIFY", "true").lower() == "true"
 
+
+# ── Periodic job registry ─────────────────────────────────────────────────────
+
+class _PeriodicJob:
+    """Runs a function every `interval` seconds. Skipped if interval is 0."""
+
+    def __init__(self, name: str, interval: int, fn) -> None:
+        self.name     = name
+        self.interval = interval
+        self.fn       = fn
+        self._last_run: float = 0.0  # run immediately on first tick
+
+    def tick(self, now: float) -> None:
+        if self.interval <= 0:
+            return
+        if now - self._last_run >= self.interval:
+            log.info("Periodic job: %s", self.name)
+            try:
+                self.fn()
+                self._last_run = now
+            except Exception as exc:
+                log.error("Periodic job %s failed: %s", self.name, exc)
+                self._last_run = now  # don't hammer on failure
+
+
+def _run_reflection() -> None:
+    from aria.reflect import run as reflect_run
+    result = reflect_run(notify=_REFLECT_NOTIFY)
+    log.info("Reflection: %s", result)
+
+
+# ── Supervisor ────────────────────────────────────────────────────────────────
 
 class Supervisor:
     def __init__(self) -> None:
         self._running = True
         signal.signal(signal.SIGTERM, self._handle_signal)
         signal.signal(signal.SIGINT,  self._handle_signal)
+
+        # Built-in periodic jobs — extend this list to add more
+        self._periodic: list[_PeriodicJob] = [
+            _PeriodicJob("reflection", _REFLECT_EVERY, _run_reflection),
+        ]
 
     def _handle_signal(self, signum: int, frame: object) -> None:
         log.info("Supervisor shutting down (signal %d)...", signum)
@@ -47,14 +86,27 @@ class Supervisor:
 
         config.load()
 
-        log.info("Supervisor started. Polling every %ds.", _INTERVAL)
+        log.info("Supervisor started. Poll interval: %ds.", _INTERVAL)
+        if _REFLECT_EVERY > 0:
+            log.info(
+                "Reflection: every %dh%s.",
+                _REFLECT_EVERY // 3600,
+                " (with Telegram notify)" if _REFLECT_NOTIFY else "",
+            )
+        else:
+            log.info("Reflection: disabled (ARIA_REFLECT_EVERY=0).")
         log.info("Task queue: %s", _tasks_dir())
 
         while self._running:
+            now = time.monotonic()
             try:
+                # 1. Built-in periodic jobs
+                for job in self._periodic:
+                    job.tick(now)
+                # 2. Task queue
                 self._tick(list_pending, claim, complete, fail)
             except Exception as exc:
-                log.error("Supervisor tick error: %s", exc)
+                log.error("Supervisor error: %s", exc)
             time.sleep(_INTERVAL)
 
         log.info("Supervisor stopped.")
@@ -65,18 +117,15 @@ class Supervisor:
             return
 
         log.info("%d task(s) due.", len(pending))
-
         for path, task in pending:
             running_path = claim(path, task)
             if running_path is None:
-                continue  # claimed by another process (future multi-worker support)
+                continue
 
             log.info(
                 "Running task %s [priority=%d source=%s]: %s",
-                task.task_id, task.priority, task.source,
-                task.prompt[:80],
+                task.task_id, task.priority, task.source, task.prompt[:80],
             )
-
             try:
                 result = _execute(task)
                 complete(running_path, task, result)
@@ -90,7 +139,7 @@ def _execute(task) -> str:
     """Run the task prompt through the agent and optionally notify."""
     from aria.agent import Agent
 
-    agent = Agent()
+    agent  = Agent()
     result = agent.chat_collect(task.prompt)
     agent.close()
 
@@ -124,18 +173,10 @@ def main() -> None:
 
     parser = argparse.ArgumentParser(
         prog="aria-supervisor",
-        description="Autonomous task supervisor — polls and executes pending tasks.",
+        description="Autonomous task supervisor — executes tasks and runs periodic jobs.",
     )
-    parser.add_argument(
-        "--once",
-        action="store_true",
-        help="Process pending tasks once and exit (useful for cron)",
-    )
-    parser.add_argument(
-        "--verbose", "-v",
-        action="store_true",
-        help="Show debug output",
-    )
+    parser.add_argument("--once",    action="store_true", help="Process pending tasks once and exit")
+    parser.add_argument("--verbose", "-v", action="store_true", help="Debug output")
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -145,7 +186,6 @@ def main() -> None:
     )
 
     if args.once:
-        # Single-pass mode — run due tasks and exit
         from aria import config
         from aria.task import list_pending, claim, complete, fail
         config.load()
