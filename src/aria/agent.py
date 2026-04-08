@@ -320,10 +320,26 @@ class Agent:
         if not transcript_lines:
             return None
 
+        # ── Short session heuristic ───────────────────────────────────────────
+        # Less than 3 exchanges (6 lines) is likely just a greeting or a very
+        # brief question. Skip the LLM call entirely:
+        #   - If there is only 1 user message, save it as a minimal context hook
+        #     so the next session knows what the last thing asked was.
+        #   - If there are 2-3 exchanges, do the same — not worth summarising.
+        # This avoids saving the LLM's meta-commentary ("nothing to summarise").
+        _MIN_EXCHANGES = 4  # lines = 2 user + 2 assistant turns minimum
+        if len(transcript_lines) < _MIN_EXCHANGES:
+            user_msgs = [l for l in transcript_lines if l.startswith("User:")]
+            if user_msgs:
+                last = user_msgs[-1].removeprefix("User:").strip()
+                return f"- Last message: {last[:200]}"
+            return None
+
         transcript = "\n".join(transcript_lines)
         prompt = (
             "Summarise this conversation in 3-5 bullet points. "
-            "Focus on decisions made, facts learned, and tasks completed. "
+            "Focus only on decisions made, facts learned, and tasks completed. "
+            "If there is nothing meaningful to summarise, respond with exactly: SKIP\n\n"
             "Be brief — this summary will be used as context for the next session.\n\n"
             + transcript
         )
@@ -334,15 +350,21 @@ class Agent:
                 messages=[{"role": "user", "content": prompt}],
                 stream=False,
             )
-            return resp.choices[0].message.content.strip()
+            result = resp.choices[0].message.content.strip()
+            # Model signalled nothing worth saving
+            if result.upper().startswith("SKIP"):
+                return None
+            return result
         except Exception:
             return None  # best-effort, never block on failure
 
     def close(self) -> None:
-        """Summarise this session and persist it for continuity next time."""
+        """Summarise this session and persist it — skips trivial sessions."""
         summary = self.summarise_session()
         if summary:
             self.ws.save_session_summary(summary)
+        # If nothing meaningful, leave last_session.md untouched so the
+        # previous session's context remains available next time.
 
     # ── Tool execution ────────────────────────────────────────────────────────
 
