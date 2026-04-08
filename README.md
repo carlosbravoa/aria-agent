@@ -1,17 +1,17 @@
 # Aria Agent
 
-A lean, multi-channel AI agent that runs against any OpenAI-compatible LLM
-endpoint — local (Ollama, LM Studio) or cloud (Anthropic, OpenAI) — with
-persistent markdown workspace, pluggable tools, session continuity, autonomous
-memory reflection, proactive task scheduling, and support for Telegram and WhatsApp.
+A lean AI agent that runs against any OpenAI-compatible LLM endpoint — local
+(Ollama, LM Studio) or cloud (Anthropic, OpenAI) — with persistent markdown
+workspace, pluggable tools, session continuity, and autonomous memory
+reflection. Optionally extends to Telegram, WhatsApp, and scheduled tasks.
 
 ---
 
 ## Table of contents
 
 1. [Requirements](#requirements)
-2. [Install](#install)
-3. [First run](#first-run)
+2. [Quickstart — CLI only](#quickstart--cli-only)
+3. [Quickstart — with services](#quickstart--with-services)
 4. [Configure](#configure)
 5. [CLI commands](#cli-commands)
 6. [Interactive REPL](#interactive-repl)
@@ -34,57 +34,92 @@ memory reflection, proactive task scheduling, and support for Telegram and Whats
 ## Requirements
 
 - Python 3.11+
-- An OpenAI-compatible LLM endpoint (see [Configure](#configure))
-- Node.js 18+ (only for WhatsApp)
+- An OpenAI-compatible LLM endpoint
+- Node.js 18+ *(only for WhatsApp)*
 
 ---
 
-## Install
+## Quickstart — CLI only
+
+The simplest setup. Just a terminal, no bots, no background services.
 
 ```bash
-# Clone the repo
+# 1. Clone and install
 git clone <repo-url>
 cd aria_pkg
-
-# Option A — virtualenv (recommended)
-python3 -m venv .venv
-source .venv/bin/activate
 pip install -e .
 
-# Option B — user install
-pip install -e . --break-system-packages
-```
-
-After install, these commands are available in your shell:
-
-| Command            | Description                                        |
-|--------------------|----------------------------------------------------|
-| `aria`             | Interactive REPL or single-shot query              |
-| `aria-telegram`    | Telegram bot (long-running)                        |
-| `aria-whatsapp`    | WhatsApp HTTP bridge (long-running, needs Node.js) |
-| `aria-reflect`     | Analyse session history, update memory patterns    |
-| `aria-supervisor`  | Autonomous task queue supervisor (long-running)    |
-| `aria-install`     | Install and enable all services via systemd        |
-
----
-
-## First run
-
-```bash
+# 2. Run — wizard creates ~/.aria/.env on first launch
 aria
 ```
 
-On first launch, a setup wizard creates `~/.aria/` with a `.env` template,
-prints step-by-step instructions, and exits. Edit the config file, then run
-`aria` again.
+The wizard will ask for your LLM endpoint and model. When it asks about
+Telegram, WhatsApp, Supervisor, and Gmail — answer **no** to all of them.
+
+```
+  Telegram bot? [Y/n]: n
+  WhatsApp bridge? [Y/n]: n
+  Autonomous supervisor? [Y/n]: n
+  Gmail & Calendar? [Y/n]: n
+```
+
+That's it. No services are installed. `aria` works from the terminal:
+
+```bash
+aria                              # interactive REPL
+aria "explain this error: ..."    # single-shot query
+aria-reflect                      # analyse past sessions, update memory
+```
+
+> **pip install fails?** Try:
+> ```bash
+> pip install -e . --break-system-packages
+> # or use a virtualenv:
+> python3 -m venv .venv && source .venv/bin/activate && pip install -e .
+> ```
+
+---
+
+## Quickstart — with services
+
+For Telegram notifications, WhatsApp, and autonomous background tasks.
+
+```bash
+# 1. Clone and install
+git clone <repo-url>
+cd aria_pkg
+pip install -e .
+
+# 2. Run the setup wizard
+aria-install
+```
+
+`aria-install` guides you through feature selection and configuration,
+then installs and starts everything as systemd services automatically.
+
+```
+  Telegram bot? [Y/n]: y           → asks for token + chat ID
+  WhatsApp bridge? [Y/n]: n        → skipped
+  Autonomous supervisor? [Y/n]: y  → asks for poll interval
+  Gmail & Calendar? [Y/n]: y       → asks for GOG_ACCOUNT
+```
+
+After the wizard completes, services start immediately and restart
+automatically on reboot. Re-run at any time to update configuration:
+
+```bash
+aria-install              # full wizard — reconfigure + reinstall
+aria-install --services   # reinstall services only (after git pull)
+aria-install --dry-run    # preview changes without applying
+aria-install --uninstall  # remove all services
+```
 
 ---
 
 ## Configure
 
-All configuration lives in `~/.aria/.env`. Only the LLM block is required.
-Everything else is optional — features that aren't configured simply won't
-load, and nothing breaks.
+All configuration lives in `~/.aria/.env`. The wizard creates and manages
+this file, but you can edit it directly at any time.
 
 ```ini
 # ── LLM (required) ────────────────────────────────────────────────────────────
@@ -94,36 +129,36 @@ LLM_MODEL=claude-haiku-4-5-20251001
 AGENT_NAME=Aria
 
 # ── Telegram ──────────────────────────────────────────────────────────────────
-# Required for: aria-telegram, aria --notify
-# Get TELEGRAM_TOKEN from @BotFather on Telegram
-# Get TELEGRAM_ALLOWED (your chat ID) from @userinfobot on Telegram
+# Required for: aria-telegram bot and aria --notify
+# Get TELEGRAM_TOKEN from @BotFather — get chat ID from @userinfobot
 TELEGRAM_TOKEN=<bot token>
 TELEGRAM_ALLOWED=<your chat ID>
 
 # ── WhatsApp ──────────────────────────────────────────────────────────────────
-# Required for: aria-whatsapp  (skip entirely if not using WhatsApp)
+# Required for: aria-whatsapp (skip entirely if not using)
 # ARIA_WA_PORT=7532
 # ARIA_WA_SECRET=pick-any-random-string
-# WHATSAPP_ALLOWED=34612345678        # your number, international format, no +
+# WHATSAPP_ALLOWED=34612345678      # international format, no +
 
-# ── Gmail & Calendar (gog CLI) ────────────────────────────────────────────────
+# ── Gmail & Calendar ──────────────────────────────────────────────────────────
 # Required for: gmail and calendar tools
-# See "Gmail & Calendar setup" section below
 # GMAIL_CLI=gog
 # GOG_ACCOUNT=you@gmail.com
 
 # ── Agent behaviour ───────────────────────────────────────────────────────────
-# ARIA_MAX_LOOPS=20              # max tool-call loops per turn
-# ARIA_MAX_HISTORY=60            # conversation turns kept in context
-# ARIA_CHANNEL_IDLE_MINUTES=60   # inactivity before Telegram/WhatsApp session summarised
-
-# ── Memory reflection ─────────────────────────────────────────────────────────
-# ARIA_REFLECT_BATCH=10          # sessions analysed per batch
-# ARIA_REFLECT_SESSION_CHARS=3000 # max chars read per session log
-# ARIA_REFLECT_MAX_LINES=40      # max bullet points in patterns.md
+# ARIA_MAX_LOOPS=20                # max tool-call loops per turn
+# ARIA_MAX_HISTORY=60              # conversation turns kept in context
+# ARIA_CHANNEL_IDLE_MINUTES=60     # idle minutes before channel session summarised
 
 # ── Supervisor ────────────────────────────────────────────────────────────────
-# ARIA_SUPERVISOR_INTERVAL=30    # seconds between task queue polls
+# ARIA_SUPERVISOR_INTERVAL=30      # seconds between task queue polls
+# ARIA_REFLECT_EVERY=86400         # seconds between reflection runs (0 = off)
+# ARIA_REFLECT_NOTIFY=true         # Telegram notification after reflection
+
+# ── Memory reflection ─────────────────────────────────────────────────────────
+# ARIA_REFLECT_BATCH=10            # sessions analysed per batch
+# ARIA_REFLECT_SESSION_CHARS=3000  # max chars read per session log
+# ARIA_REFLECT_MAX_LINES=40        # max bullet points in patterns.md
 
 # ── Path overrides ────────────────────────────────────────────────────────────
 # ARIA_WORKSPACE=~/.aria/workspace
@@ -132,9 +167,6 @@ TELEGRAM_ALLOWED=<your chat ID>
 
 ### Recommended models
 
-Aria uses a plain-text `TOOL:` / `INPUT:` protocol requiring solid
-instruction-following. These models work well:
-
 | Provider  | Model                        | Notes                       |
 |-----------|------------------------------|-----------------------------|
 | Anthropic | `claude-haiku-4-5-20251001`  | Fast, reliable, recommended |
@@ -142,8 +174,8 @@ instruction-following. These models work well:
 | OpenAI    | `gpt-4o-mini`                | Good balance                |
 | Ollama    | `llama3.2`, `mistral`, `qwen2.5` | Best local options      |
 
-> **Avoid** on-device runtimes like MediaPipe/Gemma — they have limited context
-> windows and unreliable structured output, causing tool-call failures.
+> **Avoid** on-device runtimes like MediaPipe/Gemma — limited context window
+> and unreliable structured output cause tool-call failures.
 
 ---
 
@@ -154,29 +186,26 @@ instruction-following. These models work well:
 aria
 
 # Single-shot — run a query and exit
-aria "what's the weather in Santiago?"
+aria "summarise this error log"
 
-# Single-shot — run query and send result to Telegram
+# Single-shot — send result to Telegram (requires Telegram config)
 aria --notify "summarise my unread emails"
-
-# Single-shot — send to a specific Telegram chat ID
 aria --notify --chat 123456789 "daily briefing"
-
-# Start the Telegram bot (long-running)
-aria-telegram
-
-# Start the WhatsApp bridge (long-running, needs Node.js side too)
-aria-whatsapp
 
 # Analyse session history and update memory patterns
 aria-reflect
-aria-reflect --notify          # send result to Telegram
+aria-reflect --notify          # Telegram notification when done
 aria-reflect --verbose         # debug output
 
-# Start the autonomous task supervisor (long-running)
+# Task supervisor (requires supervisor config)
 aria-supervisor
 aria-supervisor --once         # process pending tasks once and exit
-aria-supervisor --verbose      # debug output
+
+# Install / manage services
+aria-install                   # full wizard
+aria-install --services        # reinstall services only
+aria-install --dry-run         # preview changes
+aria-install --uninstall       # remove all services
 ```
 
 ---
@@ -196,154 +225,116 @@ aria
 | `/help`        | Show command list                      |
 | `/quit`        | Exit (saves session summary)           |
 
-On exit, a brief session summary is automatically saved to
-`memory/last_session.md` and loaded into the next session for continuity.
+On exit, a brief session summary is saved to `memory/last_session.md` and
+loaded into the next session for lightweight continuity.
 
 ---
 
 ## Telegram
 
-1. Message [@BotFather](https://t.me/BotFather) → `/newbot` → copy the token
-2. Message [@userinfobot](https://t.me/userinfobot) → copy your chat ID
-3. Add to `~/.aria/.env`:
+1. Create a bot via [@BotFather](https://t.me/BotFather) → `/newbot` → copy the token.
+2. Get your chat ID from [@userinfobot](https://t.me/userinfobot).
+3. Run `aria-install` and answer **yes** to Telegram, or add to `~/.aria/.env`:
    ```ini
    TELEGRAM_TOKEN=<token>
    TELEGRAM_ALLOWED=<chat ID>
    ```
-4. Start the bot:
-   ```bash
-   nohup aria-telegram >> ~/.aria/telegram.log 2>&1 &
-   ```
+4. Start: `nohup aria-telegram >> ~/.aria/telegram.log 2>&1 &`
 
-**Bot commands:** `/start` `/memory` `/tools` `/clear` `/save <note>`
+Bot commands: `/start` `/memory` `/tools` `/clear` `/save <note>`
 
-Sessions are summarised automatically after `ARIA_CHANNEL_IDLE_MINUTES` of
-inactivity so the agent maintains context across conversations.
+Sessions are summarised after `ARIA_CHANNEL_IDLE_MINUTES` of inactivity
+so the agent has context when you return.
 
 ---
 
 ## WhatsApp
 
-Requires Node.js 18+. Uses [whatsapp-web.js](https://github.com/pedroslopez/whatsapp-web.js).
+Requires Node.js 18+.
 
-**Step 1 — Python bridge:**
 ```bash
-# Add to ~/.aria/.env
+# 1. Copy the Node.js bridge
+mkdir -p ~/.aria/whatsapp
+cp whatsapp/bridge.js whatsapp/package.json ~/.aria/whatsapp/
+cd ~/.aria/whatsapp && npm install
+
+# 2. Run aria-install and answer yes to WhatsApp, or add to ~/.aria/.env:
 # ARIA_WA_PORT=7532
 # ARIA_WA_SECRET=your-secret
 # WHATSAPP_ALLOWED=34612345678
 
-# Start the Python bridge
+# 3. Start both processes
 nohup aria-whatsapp >> ~/.aria/whatsapp.log 2>&1 &
+nohup node ~/.aria/whatsapp/bridge.js >> ~/.aria/whatsapp-node.log 2>&1 &
 ```
 
-**Step 2 — Node.js bridge:**
-```bash
-mkdir -p ~/.aria/whatsapp
-cp whatsapp/bridge.js whatsapp/package.json ~/.aria/whatsapp/
-cd ~/.aria/whatsapp
-npm install
-nohup node bridge.js >> ~/.aria/whatsapp-node.log 2>&1 &
-```
-
-On first run, `bridge.js` prints a QR code — scan it with WhatsApp once.
-Auth is persisted in `~/.aria/whatsapp/.wwebjs_auth/` so you won't need
-to scan again.
+On first run `bridge.js` shows a QR code — scan with WhatsApp once.
+Auth persists in `~/.aria/whatsapp/.wwebjs_auth/`.
 
 ---
 
 ## Scheduled tasks
 
-Use `aria --notify` from cron to run tasks on a schedule and receive
-results on Telegram:
-
-```bash
-crontab -e
-```
+Use `aria --notify` from cron (requires Telegram):
 
 ```cron
 # Daily email summary at 8am
-0 8 * * * /home/$USER/.local/bin/aria --notify "summarise my unread emails from today"
+0 8 * * * /home/$USER/.local/bin/aria --notify "summarise my unread emails"
 
 # Weekly digest every Friday at 6pm
-0 18 * * 5 /home/$USER/.local/bin/aria --notify "give me a weekly summary of my emails and calendar"
-
-# Daily memory reflection at 3am
-0 3 * * * /home/$USER/.local/bin/aria-reflect --notify
+0 18 * * 5 /home/$USER/.local/bin/aria --notify "weekly email and calendar digest"
 ```
 
-> **Tip:** Use `aria-supervisor --once` in cron instead of `aria` if you want
-> tasks to survive process crashes and support retries.
+The supervisor handles memory reflection automatically — no cron entry needed
+for that if `aria-supervisor` is running.
 
 ---
 
 ## Autonomous supervisor
 
-The supervisor polls `~/.aria/tasks/pending/` for due tasks, executes them
-through the agent, and routes results to Telegram.
+The supervisor runs in the background, executing queued tasks and running
+memory reflection on a schedule. Enable it via `aria-install` or start manually:
 
 ```bash
-# Start as a long-running background process
-nohup aria-supervisor >> ~/.aria/supervisor.log 2>&1 &
-
-# Or process pending tasks once (useful in cron)
-aria-supervisor --once
+aria-supervisor
 ```
 
 ### Task file format
 
-Tasks are plain text files dropped into `~/.aria/tasks/pending/`:
+Drop a `.task` file into `~/.aria/tasks/pending/`:
 
 ```ini
-prompt: summarise my unread emails and check today's calendar
+prompt: check my calendar for conflicts tomorrow and notify me
 notify: true
 priority: 3
 run_after: 2026-04-10T08:00:00
 max_retries: 2
-source: cron
+source: user
 ```
 
-**Fields:**
+| Field         | Default | Description                               |
+|---------------|---------|-------------------------------------------|
+| `prompt`      | —       | What to ask the agent (required)          |
+| `notify`      | `true`  | Send result via Telegram                  |
+| `priority`    | `5`     | 1 (urgent) to 10 (low)                    |
+| `run_after`   | now     | ISO datetime: `2026-04-10T08:00:00`       |
+| `max_retries` | `2`     | Retry count on failure                    |
+| `source`      | `user`  | `cron`, `agent`, `user`, or `script`      |
 
-| Field         | Default | Description                                          |
-|---------------|---------|------------------------------------------------------|
-| `prompt`      | —       | What to ask the agent (required)                     |
-| `notify`      | `true`  | Send result via Telegram                             |
-| `priority`    | `5`     | 1 (urgent) to 10 (low) — lower runs first            |
-| `run_after`   | now     | ISO datetime: `2026-04-10T08:00:00`                  |
-| `max_retries` | `2`     | Retry count on failure                               |
-| `source`      | `user`  | Who created it: `cron`, `agent`, `user`, `script`    |
-
-### Creating tasks from Python
-
-```python
-from aria.task import Task, enqueue
-
-enqueue(Task(
-    prompt    = "check my emails and summarise anything urgent",
-    run_after = "2026-04-10T08:00:00",
-    notify    = True,
-    priority  = 3,
-))
-```
-
-### Agent-created tasks
-
-The agent can schedule its own follow-up work using the `schedule` tool:
+The agent can also schedule tasks itself using the `schedule` tool:
 
 ```
-You: remind me to follow up on the PR tomorrow at 9am
+You: remind me to follow up on that PR tomorrow at 9am
 Aria: 🔧 calling schedule...
-      Task a3f8c21b queued at 2026-04-10T09:00:00: follow up on the PR
+      Task a3f8c21b queued at 2026-04-10T09:00:00
 ```
 
-### Task queue states
-
+Task queue states:
 ```
 ~/.aria/tasks/
 ├── pending/    ← waiting to run
-├── running/    ← currently executing (crash-safe hand-off)
-├── done/       ← completed, result appended to file
+├── running/    ← currently executing
+├── done/       ← completed (result appended)
 └── failed/     ← retries exhausted
 ```
 
@@ -351,60 +342,39 @@ Aria: 🔧 calling schedule...
 
 ## Memory reflection
 
-`aria-reflect` scans new session logs, extracts behavioural patterns, and
-writes a concise consolidated list to `memory/patterns.md`. This is loaded
-into every session so the agent progressively learns your preferences.
+Scans session logs, extracts behavioural patterns, and writes them to
+`memory/patterns.md` which is loaded into every session.
+
+If the supervisor is running, reflection happens automatically every 24 hours
+(`ARIA_REFLECT_EVERY=86400`). Run manually at any time:
 
 ```bash
-aria-reflect                  # analyse new sessions
-aria-reflect --notify         # same + Telegram notification
-aria-reflect --verbose        # with debug output
+aria-reflect
+aria-reflect --notify    # Telegram notification when done
+aria-reflect --verbose   # debug output
 ```
+
+The agent can also trigger it mid-conversation via the `reflect` tool.
 
 **Two-phase process:**
-1. **Extraction** — analyses only new sessions (watermark-gated, never re-processes old ones)
-2. **Consolidation** — merges with existing patterns, prunes redundant entries, enforces a hard cap (`ARIA_REFLECT_MAX_LINES=40`)
-
-**What it extracts** (only from actual evidence):
-- Recurring topics and domains
-- Preferred response style and format
-- Common workflows and tool sequences
-- Implicit preferences from corrections and feedback
-- Technical context — languages, tools, systems
-
-**Automate with cron:**
-```cron
-0 3 * * * /home/$USER/.local/bin/aria-reflect --notify
-```
-
-The agent can also trigger reflection on demand:
-```
-You: analyse our past conversations and update your memory
-Aria: 🔧 calling reflect...
-      Reflection complete: 8 sessions analysed, patterns consolidated to 23 lines.
-```
+1. **Extraction** — analyses only new sessions (watermark prevents re-processing)
+2. **Consolidation** — merges with existing patterns, prunes weak signals, caps at `ARIA_REFLECT_MAX_LINES` bullet points
 
 ---
 
 ## Session continuity
 
-At the end of each session, a 3–5 bullet LLM summary is saved to
-`memory/last_session.md`. This is loaded into the `## Previous Session`
-block of the system prompt on the next session.
+At the end of each session a 3–5 bullet summary is saved to
+`memory/last_session.md`. The next session loads it under
+`## Previous Session` in the system prompt — no full history replay needed.
 
-This works across all interfaces — REPL, single-shot, Telegram, WhatsApp —
-so a conversation started on Telegram can be continued in the terminal
-without losing context.
-
-For Telegram and WhatsApp, summaries are saved automatically after
-`ARIA_CHANNEL_IDLE_MINUTES` of inactivity (default 60 minutes), and also
-on clean shutdown of the bot process.
+Works across all interfaces: REPL, single-shot, Telegram, WhatsApp.
 
 ---
 
 ## Tool protocol
 
-Aria uses a plain-text protocol that works with any LLM:
+Aria uses plain text that any LLM can produce:
 
 ```
 TOOL: file_access
@@ -413,14 +383,13 @@ INPUT: {"action": "list", "path": "~"}
 RESULT: Documents Downloads projects
 ```
 
-For saving facts to memory:
+For saving facts:
 ```
-REMEMBER: User prefers responses in bullet points.
+REMEMBER: User prefers bullet-point responses.
 ```
 
-Both are intercepted directly in Python — the LLM never needs to know
-about file paths or API internals. Tools are auto-discovered at startup
-from `src/aria/tools/` and `~/.aria/tools/`.
+Tools are auto-discovered from `src/aria/tools/` and `~/.aria/tools/`
+at startup — no registration needed.
 
 ---
 
@@ -428,11 +397,11 @@ from `src/aria/tools/` and `~/.aria/tools/`.
 
 | Tool          | Description                                                               |
 |---------------|---------------------------------------------------------------------------|
-| `file_access` | Read, write, append, patch, list, delete files. Supports `base64` encoding and paginated reads (`offset`/`limit`) for large files. |
-| `shell_run`   | Run shell commands. Pass `script` to avoid JSON escaping. Supports `stdin`, `timeout`, `interpreter`. |
-| `web_fetch`   | Fetch and extract readable text from a web page.                          |
+| `file_access` | Read, write, append, patch, list, delete files. Supports `base64` encoding and paginated reads (`offset`/`limit`). |
+| `shell_run`   | Run shell commands. Pass `script` field to avoid JSON escaping issues.    |
+| `web_fetch`   | Fetch readable text from a web page.                                      |
 | `gmail`       | Search, read, send, mark-read via `gog` CLI.                              |
-| `calendar`    | List, create, update, delete, RSVP to Google Calendar events via `gog`.   |
+| `calendar`    | List, create, update, delete, RSVP Google Calendar events via `gog`.      |
 | `notify`      | Push a message to the user via Telegram.                                  |
 | `schedule`    | Queue a task for the supervisor to execute at a given time.               |
 | `reflect`     | Trigger memory reflection on demand.                                      |
@@ -440,20 +409,15 @@ from `src/aria/tools/` and `~/.aria/tools/`.
 ### Writing scripts without escaping issues
 
 ```json
-{
-  "script": "#!/usr/bin/env python3\nprint('hello \"world\"')",
-  "interpreter": "python3"
-}
+{"script": "print('hello \"world\"')", "interpreter": "python3"}
 ```
 
 ### Editing large files safely
 
-Replace a specific string without rewriting the whole file:
 ```json
 {"action": "patch", "path": "~/script.py", "old": "def old():", "new": "def new():"}
 ```
 
-Read a large file in chunks:
 ```json
 {"action": "read", "path": "~/big_file.py", "offset": 100, "limit": 50}
 ```
@@ -462,8 +426,7 @@ Read a large file in chunks:
 
 ## Adding custom tools
 
-Drop a `.py` file into `~/.aria/tools/` — it's auto-discovered on next start.
-No registration needed.
+Drop a `.py` file into `~/.aria/tools/` — auto-discovered on next start:
 
 ```python
 DEFINITION = {
@@ -472,10 +435,7 @@ DEFINITION = {
     "parameters": {
         "type": "object",
         "properties": {
-            "input": {
-                "type": "string",
-                "description": "The input value.",
-            }
+            "input": {"type": "string", "description": "The input value."}
         },
         "required": ["input"],
     },
@@ -485,32 +445,25 @@ def execute(args: dict) -> str:
     return f"Result: {args['input']}"
 ```
 
-The `DEFINITION` description is injected into the system prompt verbatim,
-so write it as clear instructions the agent can act on.
-
 ---
 
 ## Gmail & Calendar setup
 
-Both tools use the [gogcli](https://github.com/steipete/gogcli) (`gog`) CLI.
+Both tools use [gogcli](https://github.com/steipete/gogcli):
 
 ```bash
-# 1. Install gog
-#    macOS:
-brew install steipete/tap/gogcli
-#    Linux: download from https://github.com/steipete/gogcli/releases
+# Install gog
+# macOS:  brew install steipete/tap/gogcli
+# Linux:  download from https://github.com/steipete/gogcli/releases
 
-# 2. Get OAuth credentials from Google Cloud Console
-#    (APIs & Services → Credentials → Create → Desktop app)
+# Authenticate
 gog auth credentials ~/Downloads/client_secret_....json
-
-# 3. Authenticate your account
 gog auth add you@gmail.com
 
-# 4. Verify
+# Verify
 gog gmail search 'is:unread' --max 3
 
-# 5. Add to ~/.aria/.env
+# Add to ~/.aria/.env
 GOG_ACCOUNT=you@gmail.com
 GMAIL_CLI=gog
 ```
@@ -519,30 +472,28 @@ GMAIL_CLI=gog
 
 ## Running as a background service
 
-### Recommended — install wizard
-
-After configuring `~/.aria/.env`, run the install wizard once:
+### Install wizard (recommended)
 
 ```bash
 aria-install
 ```
 
-The wizard will:
-1. Detect all installed aria binaries and Node.js
-2. Write systemd user service files with correct paths
-3. Enable user lingering (services survive logout and auto-start on boot)
-4. Start all services immediately
-5. Verify each service is running and show log commands
+Detects binaries, writes service files, enables lingering, starts everything.
 
 ```bash
-# Preview what it would do without making changes
-aria-install --dry-run
-
-# Remove all services
-aria-install --uninstall
+aria-install --services    # reinstall after git pull + pip install -e .
+aria-install --uninstall   # remove all services
 ```
 
-### Day-to-day management
+### Manual — nohup
+
+```bash
+nohup aria-telegram    >> ~/.aria/telegram.log    2>&1 &
+nohup aria-supervisor  >> ~/.aria/supervisor.log  2>&1 &
+tail -f ~/.aria/telegram.log
+```
+
+### Manual — systemd
 
 ```bash
 # Check status
@@ -551,39 +502,28 @@ systemctl --user status aria-supervisor
 
 # Live logs
 journalctl --user -fu aria-telegram
-journalctl --user -fu aria-supervisor
 
-# Restart after a code update (git pull + pip install -e .)
-systemctl --user restart aria-telegram aria-supervisor aria-whatsapp aria-whatsapp-node
-```
-
-### nohup (alternative, no systemd required)
-
-```bash
-nohup aria-telegram    >> ~/.aria/telegram.log    2>&1 &
-nohup aria-supervisor  >> ~/.aria/supervisor.log  2>&1 &
-tail -f ~/.aria/telegram.log
+# Restart after code update
+systemctl --user restart aria-telegram aria-supervisor
 ```
 
 ---
 
 ## Workspace layout
 
-All state is plain markdown — fully human-readable and editable:
-
 ```
 ~/.aria/
 ├── .env                                      ← configuration
-├── tools/                                    ← custom tool .py files (auto-discovered)
+├── tools/                                    ← custom tool .py files
 ├── whatsapp/                                 ← Node.js WhatsApp bridge
 │   ├── package.json
 │   ├── bridge.js
 │   └── .wwebjs_auth/                         ← WhatsApp session (auto-created)
 ├── tasks/                                    ← supervisor task queue
-│   ├── pending/                              ← tasks waiting to run
-│   ├── running/                              ← currently executing
-│   ├── done/                                 ← completed (with result)
-│   └── failed/                               ← retries exhausted
+│   ├── pending/
+│   ├── running/
+│   ├── done/
+│   └── failed/
 └── workspace/
     ├── memory/
     │   ├── core.md                           ← explicit facts (REMEMBER: lines)
@@ -593,7 +533,7 @@ All state is plain markdown — fully human-readable and editable:
     ├── soul/
     │   └── identity.md                       ← agent persona (edit freely)
     ├── sessions/
-    │   └── session_YYYYMMDD_HHMMSS.md        ← per-session conversation logs
+    │   └── session_YYYYMMDD_HHMMSS.md        ← per-session logs
     └── tools_registry/
         └── available_tools.md                ← auto-generated tool reference
 ```
@@ -615,13 +555,13 @@ aria_pkg/
         ├── agent.py                   ← ReAct loop, streaming, session continuity
         ├── channel.py                 ← multi-channel registry, idle timer
         ├── config.py                  ← path resolution, .env loading
+        ├── install.py                 ← setup wizard (aria-install)
         ├── main.py                    ← CLI entry point (aria)
         ├── reflect.py                 ← memory reflection engine (aria-reflect)
         ├── setup.py                   ← first-run wizard
-        ├── install.py                 ← service installation wizard (aria-install)
-        ├── supervisor.py              ← task queue supervisor (aria-supervisor)
+        ├── supervisor.py              ← task supervisor (aria-supervisor)
         ├── task.py                    ← task data model and queue operations
-        ├── telegram_bot.py            ← Telegram bot interface
+        ├── telegram_bot.py            ← Telegram bot
         ├── telegram_notify.py         ← push-only Telegram sender
         ├── whatsapp_bridge.py         ← HTTP bridge for whatsapp-web.js
         ├── workspace.py               ← markdown persistence layer
