@@ -202,11 +202,23 @@ def configure_env(dry_run: bool = False) -> tuple[dict[str, str], set[str]]:
     # ── Gmail / Calendar ──────────────────────────────────────────────────────
     if "gmail" in features:
         section("Gmail & Calendar")
-        info("Setup: gog auth credentials ~/client_secret.json && gog auth add you@gmail.com")
-        values["GMAIL_CLI"]   = _ask("GMAIL_CLI",   e("GMAIL_CLI")   or "gog", hint="CLI binary name")
-        values["GOG_ACCOUNT"] = _ask("GOG_ACCOUNT", e("GOG_ACCOUNT"), required=True, hint="Your Gmail address")
+        info("Before continuing, run these once in your terminal:")
+        info("  gog auth credentials ~/Downloads/client_secret_....json")
+        info("  gog auth keyring file")
+        info("  gog auth add you@gmail.com --services gmail,calendar")
+        info("  (pick a passphrase when prompted — enter it below)")
+        print()
+        values["GMAIL_CLI"]   = _ask("GMAIL_CLI",   e("GMAIL_CLI")   or "gog",
+                                      hint="CLI binary name (usually 'gog')")
+        values["GOG_ACCOUNT"] = _ask("GOG_ACCOUNT", e("GOG_ACCOUNT"), required=True,
+                                      hint="Your Gmail address")
+        values["GOG_KEYRING_BACKEND"]  = "file"
+        values["GOG_KEYRING_PASSWORD"] = _ask(
+            "GOG_KEYRING_PASSWORD", e("GOG_KEYRING_PASSWORD"), secret=True, required=True,
+            hint="Passphrase you chose when running 'gog auth keyring file'",
+        )
     else:
-        for k in ("GMAIL_CLI", "GOG_ACCOUNT"):
+        for k in ("GMAIL_CLI", "GOG_ACCOUNT", "GOG_KEYRING_BACKEND", "GOG_KEYRING_PASSWORD"):
             values[k] = e(k)
 
     # ── Supervisor ────────────────────────────────────────────────────────────
