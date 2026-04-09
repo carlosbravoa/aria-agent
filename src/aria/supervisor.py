@@ -143,15 +143,10 @@ def _execute(task) -> str:
     result = agent.chat_collect(task.prompt)
     agent.close()
 
-    # Strip the "<name>: " prefix chat_collect includes
-    prefix = f"\n{agent.name}: "
-    if result.startswith(prefix.strip()):
-        result = result[len(prefix.strip()):].strip()
-
     if task.notify and result:
         try:
             from aria.telegram_notify import send
-            send(f"📋 Task result:\n{result}")
+            send(result)
         except Exception as exc:
             log.warning("Telegram notify failed: %s", exc)
 

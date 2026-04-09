@@ -132,12 +132,6 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     loop = asyncio.get_event_loop()
     reply = await loop.run_in_executor(None, handle, CHANNEL, chat_id, user_text)
 
-    # Strip "<agent name>: " prefix that chat_collect adds
-    agent = get_session(CHANNEL, chat_id)
-    prefix = f"\n{agent.name}: "
-    if reply.startswith(prefix.strip()):
-        reply = reply[len(prefix.strip()):].strip()
-
     for chunk in _split(reply):
         if chunk.strip():
             await update.message.reply_text(chunk)  # type: ignore[union-attr]
@@ -169,7 +163,11 @@ def main() -> None:
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_message))
 
     log.info("Telegram bot starting...")
-    app.run_polling(drop_pending_updates=True)
+    try:
+        app.run_polling(drop_pending_updates=True)
+    finally:
+        from aria.channel import shutdown
+        shutdown()
 
 
 if __name__ == "__main__":
