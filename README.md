@@ -449,16 +449,18 @@ def execute(args: dict) -> str:
 
 ## Gmail & Calendar setup
 
-Both tools use [gogcli](https://github.com/steipete/gogcli):
+Both tools use [gogcli](https://github.com/steipete/gogcli).
 
 ```bash
 # Install gog
 # macOS:  brew install steipete/tap/gogcli
 # Linux:  download from https://github.com/steipete/gogcli/releases
 
-# Authenticate
+# Store OAuth credentials (download Desktop app JSON from Google Cloud Console)
 gog auth credentials ~/Downloads/client_secret_....json
-gog auth add you@gmail.com
+
+# Authenticate
+gog auth add you@gmail.com --services gmail,calendar
 
 # Verify
 gog gmail search 'is:unread' --max 3
@@ -468,7 +470,9 @@ GOG_ACCOUNT=you@gmail.com
 GMAIL_CLI=gog
 ```
 
----
+> **Running as a systemd service?** Re-run `aria-install --services` after authenticating
+> to regenerate service files — they now include `PassEnvironment` to forward the
+> keyring session so gog can access stored tokens without any extra config.
 
 ## Running as a background service
 

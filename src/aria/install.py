@@ -281,10 +281,14 @@ def _service(description: str, exec_start: str, env_file: str,
              after: str = "network-online.target", wants: str = "network-online.target",
              requires: str = "") -> str:
     req = f"Requires={requires}\n" if requires else ""
+    # PassEnvironment forwards the user's keychain/keyring session so tools
+    # like gog can access stored OAuth tokens without extra config.
     return (
         f"[Unit]\nDescription={description}\nAfter={after}\nWants={wants}\n{req}\n"
         f"[Service]\nExecStart={exec_start}\nRestart=on-failure\nRestartSec=10\n"
-        f"EnvironmentFile={env_file}\n\n[Install]\nWantedBy=default.target\n"
+        f"EnvironmentFile={env_file}\n"
+        "PassEnvironment=DBUS_SESSION_BUS_ADDRESS GNOME_KEYRING_CONTROL SSH_AUTH_SOCK\n"
+        f"\n[Install]\nWantedBy=default.target\n"
     )
 
 
