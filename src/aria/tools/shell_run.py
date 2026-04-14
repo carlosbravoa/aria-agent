@@ -102,29 +102,40 @@ def _confirm(command: str) -> bool:
     return answer in ("y", "yes")
 
 
+# Interpreters allowed for the script field — no shell metacharacters possible
+# since we pass [interpreter, tmp_path] as a list, bypassing the shell entirely.
+_ALLOWED_INTERPRETERS = {
+    "bash", "sh", "python3", "python", "node", "ruby", "perl", "raku",
+}
+
+
 def execute(args: dict) -> str:
     script_content = args.get("script", "").strip()
     command        = args.get("command", "").strip()
-    interpreter    = args.get("interpreter", "bash")
+    interpreter    = args.get("interpreter", "bash").strip()
     stdin_text     = args.get("stdin")
     cwd            = args.get("cwd")
     timeout        = int(args.get("timeout", 60))
 
     # ── Script mode ───────────────────────────────────────────────────────
     if script_content:
-        suffix = ".py" if "python" in interpreter else ".sh"
+        # Whitelist interpreter — prevent injection via metacharacters
+        interp_bin = interpreter.split()[0]  # e.g. "python3" from "python3 -u"
+        if interp_bin not in _ALLOWED_INTERPRETERS:
+            return (
+                f"[shell_run] Interpreter not allowed: '{interp_bin}'. "
+                f"Allowed: {', '.join(sorted(_ALLOWED_INTERPRETERS))}"
+            )
+        suffix = ".py" if "python" in interp_bin else ".sh"
         with tempfile.NamedTemporaryFile(
             mode="w", suffix=suffix, delete=False, encoding="utf-8"
         ) as tmp:
             tmp.write(script_content)
             tmp_path = tmp.name
         try:
-            return _run_cmd(
-                f"{interpreter} {tmp_path}",
-                stdin_text=stdin_text,
-                cwd=cwd,
-                timeout=timeout,
-            )
+            # Pass as a list — shell=False, no metacharacter risk
+            return _run_script([interpreter, tmp_path],
+                               stdin_text=stdin_text, cwd=cwd, timeout=timeout)
         finally:
             Path(tmp_path).unlink(missing_ok=True)
 
@@ -160,15 +171,48 @@ def execute(args: dict) -> str:
         if not _confirm(command):
             return "[shell_run] Cancelled by user."
 
-    return _run_cmd(command, stdin_text=stdin_text, cwd=cwd, timeout=timeout)
+    return _run_shell(command, stdin_text=stdin_text, cwd=cwd, timeout=timeout)
 
 
-def _run_cmd(
+def _run_script(
+    argv: list[str],
+    stdin_text: str | None,
+    cwd: str | None,
+    timeout: int,
+) -> str:
+    """Run a script via an explicit argv list — shell=False, no injection risk."""
+    try:
+        result = subprocess.run(
+            argv,
+            shell=False,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            cwd=cwd,
+            env=build_env(),
+            input=stdin_text,
+        )
+        out = result.stdout.strip()
+        err = result.stderr.strip()
+        parts = []
+        if out:
+            parts.append(out)
+        if err:
+            parts.append(f"[stderr] {err}")
+        return "\n".join(parts) or "(no output)"
+    except subprocess.TimeoutExpired:
+        return f"[shell_run error] Script timed out after {timeout}s."
+    except Exception as exc:
+        return f"[shell_run error] {exc}"
+
+
+def _run_shell(
     command: str,
     stdin_text: str | None,
     cwd: str | None,
     timeout: int,
 ) -> str:
+    """Run a shell command string — shell=True intentional for pipes, &&, redirects."""
     try:
         result = subprocess.run(
             command,
