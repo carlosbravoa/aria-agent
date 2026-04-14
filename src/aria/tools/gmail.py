@@ -104,15 +104,13 @@ def execute(args: dict) -> str:
             query = args.get("query", "")
             if not query:
                 return "[gmail] 'query' is required for search."
-            # Quote the query safely
-            safe_q = query.replace("'", "\\'")
-            return _run(f"{_CLI} gmail search '{safe_q}' --max {n}")
+            return _run(f"{_CLI} gmail search {shlex.quote(query)} --max {n}")
 
         case "read":
             thread_id = args.get("query", "")
             if not thread_id:
                 return "[gmail] 'query' must contain a thread ID for 'read'."
-            return _run(f"{_CLI} gmail get {thread_id}")
+            return _run(f"{_CLI} gmail get {shlex.quote(thread_id)}")
 
         case "send":
             to      = args.get("to", "")
@@ -120,20 +118,18 @@ def execute(args: dict) -> str:
             body    = args.get("body", "")
             if not (to and subject):
                 return "[gmail] 'to' and 'subject' are required for send."
-            # Use shlex.quote for safety
-            import shlex as _shlex
             return _run(
                 f"{_CLI} gmail send"
-                f" --to {_shlex.quote(to)}"
-                f" --subject {_shlex.quote(subject)}"
-                f" --body {_shlex.quote(body)}"
+                f" --to {shlex.quote(to)}"
+                f" --subject {shlex.quote(subject)}"
+                f" --body {shlex.quote(body)}"
             )
 
         case "mark_read":
             thread_id = args.get("query", "")
             if not thread_id:
                 return "[gmail] 'query' must contain a thread ID for 'mark_read'."
-            return _run(f"{_CLI} gmail thread modify {thread_id} --remove UNREAD")
+            return _run(f"{_CLI} gmail thread modify {shlex.quote(thread_id)} --remove UNREAD")
 
         case _:
             return f"[gmail] Unknown action: {action}"
