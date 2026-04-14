@@ -139,8 +139,17 @@ def _execute(task) -> str:
     """Run the task prompt through the agent and optionally notify."""
     from aria.agent import Agent
 
+    # Wrap the prompt so the agent knows notification is handled externally.
+    # This prevents the agent from calling the notify tool itself, which would
+    # cause double-notification and pollute the result with tool call noise.
+    wrapped = (
+        f"{task.prompt}\n\n"
+        "(This is an automated task. Do NOT call the notify tool — "
+        "your response will be delivered automatically when you are done.)"
+    )
+
     agent  = Agent()
-    result = agent.chat_collect(task.prompt)
+    result = agent.chat_collect(wrapped)
     agent.close()
 
     if task.notify and result:

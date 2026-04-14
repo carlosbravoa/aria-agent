@@ -1,7 +1,7 @@
 """
 aria/task.py — Task data model and queue file operations.
 
-Tasks are plain TOML-like text files stored under ~/.aria/tasks/:
+Tasks are stored as JSON files under ~/.aria/tasks/:
 
   pending/   ← ready to run (or scheduled for later)
   running/   ← being executed right now (crash-safe hand-off)
@@ -9,21 +9,12 @@ Tasks are plain TOML-like text files stored under ~/.aria/tasks/:
   failed/    ← failed after retries exhausted
 
 File format (task_<id>.task):
-
-  prompt: check my unread emails and summarise them
-  notify: true
-  priority: 5
-  run_after: 2026-04-10T08:00:00
-  max_retries: 2
-  created: 2026-04-09T22:00:00
-  retries: 0
-  source: cron
+  JSON object — handles any content in prompts without truncation issues.
 """
 
 from __future__ import annotations
 
-import re
-import time
+import json
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -47,37 +38,54 @@ class Task:
     # ── Serialisation ─────────────────────────────────────────────────────────
 
     def to_text(self) -> str:
-        lines = [
-            f"prompt: {self.prompt}",
-            f"notify: {str(self.notify).lower()}",
-            f"priority: {self.priority}",
-            f"run_after: {self.run_after}",
-            f"max_retries: {self.max_retries}",
-            f"created: {self.created}",
-            f"retries: {self.retries}",
-            f"source: {self.source}",
-            f"id: {self.task_id}",
-        ]
-        return "\n".join(lines) + "\n"
+        return json.dumps({
+            "prompt":      self.prompt,
+            "notify":      self.notify,
+            "priority":    self.priority,
+            "run_after":   self.run_after,
+            "max_retries": self.max_retries,
+            "created":     self.created,
+            "retries":     self.retries,
+            "source":      self.source,
+            "id":          self.task_id,
+        }, indent=2, ensure_ascii=False)
 
     @staticmethod
     def from_text(text: str) -> "Task":
-        kv: dict[str, str] = {}
-        for line in text.splitlines():
-            if ":" in line:
-                key, _, val = line.partition(":")
-                kv[key.strip()] = val.strip()
-        return Task(
-            prompt      = kv.get("prompt", ""),
-            notify      = kv.get("notify", "true").lower() == "true",
-            priority    = int(kv.get("priority", "5")),
-            run_after   = kv.get("run_after", ""),
-            max_retries = int(kv.get("max_retries", "2")),
-            created     = kv.get("created", _now()),
-            retries     = int(kv.get("retries", "0")),
-            source      = kv.get("source", "user"),
-            task_id     = kv.get("id", uuid.uuid4().hex[:8]),
-        )
+        """Parse a task file. Supports both JSON (current) and legacy key: value format."""
+        text = text.strip()
+        if text.startswith("{"):
+            # JSON format
+            d = json.loads(text)
+            return Task(
+                prompt      = d.get("prompt", ""),
+                notify      = bool(d.get("notify", True)),
+                priority    = int(d.get("priority", 5)),
+                run_after   = d.get("run_after", ""),
+                max_retries = int(d.get("max_retries", 2)),
+                created     = d.get("created", _now()),
+                retries     = int(d.get("retries", 0)),
+                source      = d.get("source", "user"),
+                task_id     = d.get("id", uuid.uuid4().hex[:8]),
+            )
+        else:
+            # Legacy key: value format — kept for backwards compatibility
+            kv: dict[str, str] = {}
+            for line in text.splitlines():
+                if ":" in line:
+                    key, _, val = line.partition(":")
+                    kv[key.strip()] = val.strip()
+            return Task(
+                prompt      = kv.get("prompt", ""),
+                notify      = kv.get("notify", "true").lower() == "true",
+                priority    = int(kv.get("priority", "5")),
+                run_after   = kv.get("run_after", ""),
+                max_retries = int(kv.get("max_retries", "2")),
+                created     = kv.get("created", _now()),
+                retries     = int(kv.get("retries", "0")),
+                source      = kv.get("source", "user"),
+                task_id     = kv.get("id", uuid.uuid4().hex[:8]),
+            )
 
     def is_due(self) -> bool:
         """Return True if the task is ready to run right now."""
@@ -123,8 +131,9 @@ def list_pending() -> list[tuple[Path, Task]]:
             task = Task.from_text(p.read_text(encoding="utf-8"))
             if task.is_due():
                 results.append((p, task))
-        except Exception:
-            pass  # skip malformed files
+        except Exception as exc:
+            import logging
+            logging.getLogger(__name__).warning("Skipping malformed task %s: %s", p.name, exc)
     return results
 
 
@@ -144,25 +153,29 @@ def claim(path: Path, task: Task) -> Path | None:
 def complete(path: Path, task: Task, result: str) -> None:
     """Move a finished task to done/ and append the result."""
     done_dir = _queue_dir("done")
-    text = task.to_text() + f"\nresult: {result[:500]}\ncompleted: {_now()}\n"
+    # Store as JSON with result appended
+    d = json.loads(task.to_text())
+    d["result"]    = result[:500]
+    d["completed"] = _now()
     dest = done_dir / path.name
-    dest.write_text(text, encoding="utf-8")
+    dest.write_text(json.dumps(d, indent=2, ensure_ascii=False), encoding="utf-8")
     path.unlink(missing_ok=True)
 
 
 def fail(path: Path, task: Task, error: str) -> None:
-    """
-    Either requeue with incremented retry count, or move to failed/.
-    """
+    """Either requeue with incremented retry count, or move to failed/."""
     task.retries += 1
     if task.retries <= task.max_retries:
-        # Requeue to pending with updated retry count
         path.unlink(missing_ok=True)
         enqueue(task)
     else:
         failed_dir = _queue_dir("failed")
-        text = task.to_text() + f"\nerror: {error[:500]}\nfailed_at: {_now()}\n"
-        (failed_dir / path.name).write_text(text, encoding="utf-8")
+        d = json.loads(task.to_text())
+        d["error"]     = error[:500]
+        d["failed_at"] = _now()
+        (failed_dir / path.name).write_text(
+            json.dumps(d, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
         path.unlink(missing_ok=True)
 
 
