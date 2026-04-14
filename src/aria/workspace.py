@@ -4,22 +4,59 @@ aria/workspace.py — Persistent markdown storage.
 Layout (all under the configured root, default ~/.aria/workspace/):
   memory/           long-term facts, user prefs, last-session summary
   soul/             agent identity and persona
-  sessions/         per-session conversation logs
+  sessions/         per-session conversation logs (chmod 700, files 600)
   tools_registry/   auto-generated tool docs
 """
 
 from __future__ import annotations
 
 import os
+import re
 from datetime import datetime
 from pathlib import Path
+
+
+# ── Secret redaction ──────────────────────────────────────────────────────────
+# Applied to all session log writes. Conservative patterns only — high
+# confidence to avoid false positives on legitimate content.
+_SECRET_RE = re.compile(
+    r"""(?ix)
+    # KEY=value or KEY: value patterns
+    (?:password|passwd|secret|token|api[_\-]?key|auth[_\-]?key|
+       access[_\-]?key|private[_\-]?key|bearer)
+    \s*[=:]\s*\S+
+    # AWS access key IDs
+    | (?:AKIA|AGPA|AIDA|AROA|AIPA|ANPA|ANVA|ASIA)[A-Z0-9]{16}
+    # OpenAI / Anthropic key prefix
+    | sk-[a-zA-Z0-9]{20,}
+    # GitHub PAT
+    | ghp_[a-zA-Z0-9]{36}
+    # Slack token
+    | xox[baprs]-[a-zA-Z0-9\-]+
+    """
+)
+
+
+def _redact(text: str) -> str:
+    """Replace secret-shaped strings with [REDACTED] in log output."""
+    return _SECRET_RE.sub("[REDACTED]", text)
+
+
+def _secure_write(path: Path, content: str) -> None:
+    """Write text to path with owner-only permissions (0o600)."""
+    path.write_text(content, encoding="utf-8")
+    path.chmod(0o600)
 
 
 class Workspace:
     def __init__(self, root: Path | str = "./workspace") -> None:
         self.root = Path(root).expanduser().resolve()
         for sub in ("memory", "soul", "sessions", "tools_registry"):
-            (self.root / sub).mkdir(parents=True, exist_ok=True)
+            d = self.root / sub
+            d.mkdir(parents=True, exist_ok=True)
+        # Restrict sensitive directories to owner-only (rwx------)
+        for sub in ("memory", "soul", "sessions"):
+            (self.root / sub).chmod(0o700)
         self._bootstrap(agent_name=os.environ.get("AGENT_NAME", "Agent"))
 
     # ── Bootstrap ────────────────────────────────────────────────────────────
@@ -45,9 +82,9 @@ class Workspace:
             )
         memory_file = self.root / "memory" / "core.md"
         if not memory_file.exists():
-            memory_file.write_text(
+            _secure_write(
+                memory_file,
                 "# Core Memory\n\n_Nothing stored yet._\n",
-                encoding="utf-8",
             )
 
     # ── Soul ─────────────────────────────────────────────────────────────────
@@ -67,6 +104,7 @@ class Workspace:
         ts = datetime.now().strftime("%Y-%m-%d %H:%M")
         with path.open("a", encoding="utf-8") as f:
             f.write(f"\n<!-- {ts} -->\n{note.strip()}\n")
+        path.chmod(0o600)
 
     # ── Session summaries ─────────────────────────────────────────────────────
 
@@ -84,10 +122,10 @@ class Workspace:
         lines = [
             "# Last Session Summary\n",
             f"<!-- {ts} -->\n\n",
-            summary.strip(),
+            _redact(summary.strip()),
             "\n",
         ]
-        path.write_text("".join(lines), encoding="utf-8")
+        _secure_write(path, "".join(lines))
 
     # ── Session logs ──────────────────────────────────────────────────────────
 
@@ -97,26 +135,24 @@ class Workspace:
 
     def log_session(self, path: Path, role: str, content: str) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
+        # Create with owner-only permissions before first write
+        if not path.exists():
+            path.touch(mode=0o600)
         ts = datetime.now().strftime("%H:%M:%S")
         with path.open("a", encoding="utf-8") as f:
-            f.write(f"\n\n**[{ts}] {role.upper()}**\n\n{content.strip()}\n")
+            f.write(f"\n\n**[{ts}] {role.upper()}**\n\n{_redact(content.strip())}\n")
 
     # ── Reflection support ───────────────────────────────────────────────────
 
     def unanalysed_sessions(self, watermark_file: str = "reflect_watermark") -> list[Path]:
-        """
-        Return session log files not yet analysed, sorted oldest-first.
-        Uses a watermark file to track the last-analysed session timestamp.
-        """
+        """Return session log files not yet analysed, sorted oldest-first."""
         sessions_dir = self.root / "sessions"
         watermark    = self.root / "memory" / watermark_file
         all_sessions = sorted(sessions_dir.glob("session_*.md"))
-
         if watermark.exists():
             last_ts = watermark.read_text(encoding="utf-8").strip()
             return [s for s in all_sessions if s.stem > last_ts]
-
-        return all_sessions  # first run — analyse everything
+        return all_sessions
 
     def update_watermark(self, session_path: Path, watermark_file: str = "reflect_watermark") -> None:
         """Advance the watermark to this session so it won't be re-analysed."""
@@ -124,16 +160,15 @@ class Workspace:
         watermark.write_text(session_path.stem, encoding="utf-8")
 
     def save_patterns(self, patterns: str) -> None:
-        """
-        Overwrite memory/patterns.md with extracted patterns.
-        This file is loaded as part of the memory context on every session.
-        """
+        """Overwrite memory/patterns.md with extracted patterns."""
         path = self.root / "memory" / "patterns.md"
         ts = datetime.now().strftime("%Y-%m-%d %H:%M")
-        path.write_text(
-            f"# Observed Patterns\n<!-- last updated {ts} -->\n\n{patterns.strip()}\n",
-            encoding="utf-8",
-        )
+        lines = [
+            "# Observed Patterns\n",
+            f"<!-- last updated {ts} -->\n\n",
+            f"{patterns.strip()}\n",
+        ]
+        _secure_write(path, "".join(lines))
 
     def load_patterns(self) -> str | None:
         path = self.root / "memory" / "patterns.md"
