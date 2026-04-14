@@ -90,25 +90,8 @@ _DESTRUCTIVE_RE = re.compile(
 _PYTHON_REPL_RE = re.compile(r"^\s*python3?\s*$")
 
 
-def _workspace_root() -> Path:
-    from aria import config
-    return config.workspace_dir()
-
-
 def _is_interactive() -> bool:
     return os.isatty(0)
-
-
-def _targets_workspace(command: str) -> bool:
-    ws = str(_workspace_root())
-    paths = re.findall(r'[\w./~-]+', command)
-    file_paths = [p for p in paths if '/' in p or p.startswith('~')]
-    if not file_paths:
-        return False
-    return all(
-        str(Path(p).expanduser().resolve()).startswith(ws)
-        for p in file_paths
-    )
 
 
 def _confirm(command: str) -> bool:
@@ -165,13 +148,14 @@ def execute(args: dict) -> str:
             "Use a non-interactive alternative."
         )
 
-    # Confirmation for destructive commands
-    destructive = bool(_DESTRUCTIVE_RE.match(command))
-    if destructive and not _targets_workspace(command):
+    # Destructive commands always require confirmation.
+    # Non-interactive mode (Telegram, WhatsApp, supervisor) always rejects them —
+    # there is no safe way to confirm, and silent destruction is never acceptable.
+    if _DESTRUCTIVE_RE.match(command):
         if not _is_interactive():
             return (
-                f"[shell_run] Destructive command requires confirmation but "
-                f"no terminal is available: `{command}` — cancelled for safety."
+                f"[shell_run] Destructive command rejected in non-interactive mode: "
+                f"`{command}` — run it manually in a terminal if intended."
             )
         if not _confirm(command):
             return "[shell_run] Cancelled by user."
