@@ -25,8 +25,9 @@ reflection. Optionally extends to Telegram, WhatsApp, and scheduled tasks.
 14. [Built-in tools](#built-in-tools)
 15. [Adding custom tools](#adding-custom-tools)
 16. [Gmail & Calendar setup](#gmail--calendar-setup)
-17. [Running as a background service](#running-as-a-background-service)
-18. [Workspace layout](#workspace-layout)
+17. [Jira setup](#jira-setup)
+19. [Running as a background service](#running-as-a-background-service)
+19. [Workspace layout](#workspace-layout)
 19. [Project structure](#project-structure)
 
 ---
@@ -405,6 +406,7 @@ at startup — no registration needed.
 | `notify`      | Push a message to the user via Telegram.                                  |
 | `schedule`    | Queue a task for the supervisor to execute at a given time.               |
 | `reflect`     | Trigger memory reflection on demand.                                      |
+| `jira`        | Create, search, comment, transition Jira issues via REST API.             |
 
 ### Writing scripts without escaping issues
 
@@ -473,6 +475,36 @@ GMAIL_CLI=gog
 > **Running as a systemd service?** Re-run `aria-install --services` after authenticating
 > to regenerate service files — they now include `PassEnvironment` to forward the
 > keyring session so gog can access stored tokens without any extra config.
+
+## Jira setup
+
+The `jira` tool uses the Jira REST API directly — no extra binary needed,
+`httpx` is already a project dependency.
+
+```bash
+# 1. Get an API token
+#    https://id.atlassian.com/manage-profile/security/api-tokens
+
+# 2. Add to ~/.aria/.env
+JIRA_BASE_URL=https://yourcompany.atlassian.net
+JIRA_EMAIL=you@yourcompany.com
+JIRA_API_TOKEN=your-api-token
+JIRA_DEFAULT_PROJECT=PROJ        # optional — used when project not specified
+```
+
+That's it — the tool is auto-discovered on next start. If any var is missing
+it returns a clear error message with instructions.
+
+Supported actions: `create`, `get`, `search` (JQL), `comment`, `transition`,
+`assign`, `list_projects`. Useful JQL examples the agent knows:
+
+```
+assignee = currentUser() AND statusCategory != Done   # my open tickets
+project = PROJ AND issuetype = Bug AND status != Done # open bugs
+duedate <= 7d AND statusCategory != Done              # due this week
+```
+
+---
 
 ## Running as a background service
 
