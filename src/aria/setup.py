@@ -29,15 +29,53 @@ AGENT_NAME=Aria
 # ARIA_WORKSPACE=~/.aria/workspace
 # ARIA_TOOLS_DIR=~/.aria/tools
 
+# ── File access security ─────────────────────────────────────────────
+# Directories the agent can READ (colon-separated, workspace always included)
+# ARIA_FILE_READ_DIRS=~/Documents:~/Downloads:~/projects
+# Directories the agent can WRITE (colon-separated, workspace always included)
+# ARIA_FILE_WRITE_DIRS=~/projects
+# Delete is always restricted to workspace only.
+
 # ── Gmail (optional) ─────────────────────────────────────────────────
 # CLI binary used for Gmail access. Run `gog auth login` to authenticate.
 # GMAIL_CLI=gog
+# GOG_ACCOUNT=you@gmail.com
+# GOG_KEYRING_BACKEND=file
+# GOG_KEYRING_PASSWORD=your-passphrase
+# Keyring config for headless/background operation (required after re-auth below)
+# GOG_KEYRING_BACKEND=file
+# GOG_KEYRING_PASSWORD=pick-a-strong-passphrase
 
 # ── Agent behaviour ──────────────────────────────────────────────────
 # Max tool-call loops per turn (raise if agent hits limit on complex tasks)
 # ARIA_MAX_LOOPS=20
 # Max conversation history turns kept in context
 # ARIA_MAX_HISTORY=60
+# Minutes of inactivity before a Telegram/WhatsApp session is summarised
+# ARIA_CHANNEL_IDLE_MINUTES=60
+
+# ── Memory reflection ────────────────────────────────────────────────
+# Sessions to analyse per reflection batch
+# ARIA_REFLECT_BATCH=10
+# Max chars read per session log during reflection
+# ARIA_REFLECT_SESSION_CHARS=3000
+# Max bullet points kept in patterns.md after consolidation
+# ARIA_REFLECT_MAX_LINES=40
+
+# ── Supervisor ───────────────────────────────────────────────────────
+# Seconds between task queue polls
+# ── Jira (optional) ──────────────────────────────────────────────────
+# JIRA_BASE_URL=https://yourcompany.atlassian.net
+# JIRA_EMAIL=you@yourcompany.com
+# JIRA_API_TOKEN=your-api-token
+# JIRA_DEFAULT_PROJECT=PROJ
+
+# ── Supervisor ───────────────────────────────────────────────────────
+# ARIA_SUPERVISOR_INTERVAL=30
+# Seconds between reflection runs (0 = disabled, default = 86400 = 24h)
+# ARIA_REFLECT_EVERY=86400
+# Send Telegram notification after each reflection run
+# ARIA_REFLECT_NOTIFY=true
 """
 
 _BANNER = """
