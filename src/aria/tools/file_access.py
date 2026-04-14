@@ -1,31 +1,121 @@
 """
 aria/tools/file_access.py — Read, write, append, list, patch, and delete local files.
 
-Encoding options for write/append:
-  - encoding="utf-8"   (default) — plain text content field
-  - encoding="base64"  — content field is base64-encoded bytes.
-    Use this when writing scripts or code that contains quotes, braces,
-    or backslashes that would break JSON escaping.
+Security model:
+  All paths are resolved and checked against an allow-list before any operation.
+  Sensitive paths (~/.ssh, ~/.gnupg, ~/.aria/.env, etc.) are always blocked.
 
-Patch action:
-  - Replaces the first occurrence of `old` with `new` in the file.
-    Safer than rewriting a whole file when only a small section changes,
-    and avoids truncation of large files.
+  Read / list:
+    - Workspace (always allowed)
+    - ARIA_FILE_READ_DIRS  — colon-separated extra dirs (default: ~/Documents:~/Downloads:~/projects)
 
-Read with offset:
-  - offset and limit params let you page through large files without
-    returning the whole thing (avoiding context-window truncation).
+  Write / append / patch:
+    - Workspace (always allowed)
+    - ARIA_FILE_WRITE_DIRS — colon-separated extra dirs (default: none)
+
+  Delete:
+    - Workspace only, always. Never outside.
+
+Configure in ~/.aria/.env:
+  ARIA_FILE_READ_DIRS=~/Documents:~/projects:~/code
+  ARIA_FILE_WRITE_DIRS=~/projects
 """
 
 from __future__ import annotations
 
 import base64
+import os
 from pathlib import Path
+
+# ── Sensitive paths — always blocked regardless of allow-list ──────────────────
+_BLOCKED = [
+    "~/.ssh",
+    "~/.gnupg",
+    "~/.aria/.env",
+    "~/.config/gogcli",
+    "~/.aws",
+    "~/.azure",
+    "~/.gcloud",
+    "~/.netrc",
+    "/etc",
+    "/proc",
+    "/sys",
+    "/dev",
+    "/boot",
+]
+
+
+def _blocked_paths() -> list[Path]:
+    return [Path(p).expanduser().resolve() for p in _BLOCKED]
+
+
+def _workspace() -> Path:
+    from aria import config
+    return config.workspace_dir().resolve()
+
+
+def _allow_list(env_var: str, defaults: list[str]) -> list[Path]:
+    raw = os.environ.get(env_var, "")
+    dirs = [d.strip() for d in raw.split(":") if d.strip()] if raw else defaults
+    result = [_workspace()]  # workspace always included
+    for d in dirs:
+        try:
+            result.append(Path(d).expanduser().resolve())
+        except Exception:
+            pass
+    return result
+
+
+def _read_allow() -> list[Path]:
+    return _allow_list(
+        "ARIA_FILE_READ_DIRS",
+        [
+            str(Path.home() / "Documents"),
+            str(Path.home() / "Downloads"),
+            str(Path.home() / "projects"),
+        ],
+    )
+
+
+def _write_allow() -> list[Path]:
+    return _allow_list("ARIA_FILE_WRITE_DIRS", [])
+
+
+def _safe_path(raw: str, allow: list[Path]) -> Path:
+    """
+    Resolve path and verify it:
+      1. Does not escape into a blocked sensitive directory.
+      2. Falls within at least one allowed directory.
+    Raises ValueError with a clear message if either check fails.
+    """
+    p = Path(raw).expanduser().resolve()
+    p_str = str(p)
+
+    # 1. Block sensitive paths
+    for blocked in _blocked_paths():
+        if p_str == str(blocked) or p_str.startswith(str(blocked) + "/"):
+            raise ValueError(f"Access denied — path is in a protected location: {p}")
+
+    # 2. Must be within an allowed directory
+    for allowed in allow:
+        if p_str == str(allowed) or p_str.startswith(str(allowed) + "/"):
+            return p
+
+    allowed_str = ", ".join(str(a) for a in allow)
+    raise ValueError(
+        f"Access denied — path is outside allowed directories.\n"
+        f"  Path: {p}\n"
+        f"  Allowed: {allowed_str}\n"
+        f"  To expand access, set ARIA_FILE_READ_DIRS or ARIA_FILE_WRITE_DIRS in ~/.aria/.env"
+    )
+
 
 DEFINITION = {
     "name": "file_access",
     "description": (
         "Read, write, append, patch, list, or delete local files. "
+        "Operations are restricted to the workspace and configured directories "
+        "(ARIA_FILE_READ_DIRS, ARIA_FILE_WRITE_DIRS in ~/.aria/.env). "
         "Use encoding='base64' for write/append when content contains special characters. "
         "Use action='patch' to replace a specific string in a file without rewriting it. "
         "Use offset/limit for reading large files in chunks."
@@ -86,13 +176,26 @@ def _decode_content(args: dict) -> str:
 
 def execute(args: dict) -> str:
     action: str = args["action"]
-    path = Path(args["path"]).expanduser()
+    raw_path: str = args.get("path", "")
+
+    try:
+        if action in ("read", "list"):
+            path = _safe_path(raw_path, _read_allow())
+        elif action == "delete":
+            # Delete restricted to workspace only — never outside
+            path = _safe_path(raw_path, [_workspace()])
+        else:
+            # write, append, patch
+            path = _safe_path(raw_path, _write_allow())
+    except ValueError as e:
+        return f"[file_access] {e}"
 
     match action:
+
         case "read":
             if not path.exists():
                 return f"[file_access] Not found: {path}"
-            text = path.read_text(encoding="utf-8")
+            text = path.read_text(encoding="utf-8", errors="replace")
             lines = text.splitlines(keepends=True)
             total = len(lines)
 
@@ -106,7 +209,6 @@ def execute(args: dict) -> str:
                 header = f"[lines {start+1}–{min(end, total)} of {total}]\n"
                 return header + "".join(lines)
 
-            # Warn if the file is large so the model knows to use offset/limit
             if total > 300:
                 return (
                     f"[file_access] File has {total} lines. "
@@ -144,7 +246,7 @@ def execute(args: dict) -> str:
             if not path.exists():
                 return f"[file_access] Not found: {path}"
             if path.is_file():
-                size = path.stat().st_size
+                size  = path.stat().st_size
                 lines = sum(1 for _ in path.open(encoding="utf-8", errors="replace"))
                 return f"{path}  ({lines} lines, {size} bytes)"
             entries = sorted(path.iterdir(), key=lambda p: (p.is_file(), p.name))
