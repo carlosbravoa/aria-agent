@@ -93,6 +93,11 @@ class Task:
             return True
         try:
             run_at = datetime.fromisoformat(self.run_after)
+            # If run_after has timezone info, compare against aware now.
+            # If naive, compare against naive now. Never mix the two.
+            if run_at.tzinfo is not None:
+                from datetime import timezone
+                return datetime.now(timezone.utc) >= run_at
             return datetime.now() >= run_at
         except ValueError:
             return True  # malformed date → run immediately
