@@ -75,7 +75,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     agent = get_session(CHANNEL, str(update.effective_chat.id))  # type: ignore[union-attr]
     await update.message.reply_text(  # type: ignore[union-attr]
         f"✦ {agent.name} ready.\n\n"
-        "Commands: /memory /tools /clear /save <note>"
+        "Commands: /memory /tools /clear /save <note> /version"
     )
 
 
@@ -101,6 +101,14 @@ async def cmd_clear(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     agent = get_session(CHANNEL, str(update.effective_chat.id))  # type: ignore[union-attr]
     agent.history = agent._few_shot_examples()
     await update.message.reply_text("History cleared.")  # type: ignore[union-attr]
+
+
+async def cmd_version(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _is_allowed(update):
+        return
+    from aria import __version__
+    agent = get_session(CHANNEL, str(update.effective_chat.id))  # type: ignore[union-attr]
+    await update.message.reply_text(f"{agent.name} {__version__}")  # type: ignore[union-attr]
 
 
 async def cmd_save(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -159,6 +167,7 @@ def main() -> None:
     app.add_handler(CommandHandler("memory", cmd_memory))
     app.add_handler(CommandHandler("tools",  cmd_tools))
     app.add_handler(CommandHandler("clear",  cmd_clear))
+    app.add_handler(CommandHandler("version", cmd_version))
     app.add_handler(CommandHandler("save",   cmd_save, has_args=True))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_message))
 

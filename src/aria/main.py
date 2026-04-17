@@ -22,6 +22,7 @@ if is_first_run():
 from aria import config
 config.load()
 
+from aria import __version__
 from aria.agent import Agent  # noqa: E402
 
 
@@ -32,11 +33,12 @@ Commands:
   /clear       Clear conversation history (keeps memory)
   /save <note> Append a note to core memory
   /quit        Exit
+  /version     Show version
 """
 
 
 def repl(agent: Agent) -> None:
-    print(f"\n✦ {agent.name} ready  (workspace: {agent.ws.root})\n"
+    print(f"\n✦ {agent.name} {__version__}  (workspace: {agent.ws.root})\n"
           "  Type /help for commands.\n")
     while True:
         try:
@@ -63,6 +65,8 @@ def repl(agent: Agent) -> None:
             case ["/clear"]:
                 agent.history = agent._few_shot_examples()
                 print("History cleared.")
+            case ["/version"]:
+                print(f"  {agent.name} {__version__}")
             case ["/save", note]:
                 agent.ws.append_memory(note)
                 print("Saved to memory.")
