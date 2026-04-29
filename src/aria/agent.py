@@ -279,15 +279,17 @@ class Agent:
             stream=True,
         )
 
+        full_text    = ""
+        line_buf     = ""
+        in_tool_call = False
+        streamed_lines: list[str] = []  # track what we printed for terminal erase
+
         if self._is_terminal:
             from rich.console import Console
-            Console(highlight=False).print(f"\n  [bold green]{self.name}[/bold green] ", end="")
+            _con = Console(highlight=False)
+            _con.print(f"\n  [bold green]{self.name}[/bold green] ", end="")
         else:
             self._output(f"\n{self.name}: ")
-
-        full_text    = ""
-        line_buf     = ""    # accumulates tokens until a newline is received
-        in_tool_call = False
 
         for chunk in stream:
             delta = chunk.choices[0].delta if chunk.choices else None
@@ -296,28 +298,32 @@ class Agent:
                 full_text += token
 
                 if in_tool_call:
-                    continue  # suppressing — just accumulate into full_text
+                    continue
 
                 line_buf += token
 
-                # Process only when we have complete lines (split on \n)
                 while "\n" in line_buf:
                     line, line_buf = line_buf.split("\n", 1)
                     if line.startswith("TOOL:"):
                         in_tool_call = True
-                        line_buf = ""  # discard rest
+                        line_buf = ""
                         break
                     if line.startswith("REMEMBER:"):
-                        pass  # suppress silently
+                        pass  # suppress
                     else:
                         self._output(line + "\n")
+                        if self._is_terminal:
+                            streamed_lines.append(line)
 
-        # Stream ended — flush any remaining partial line
+        # Flush remaining partial line
         if line_buf and not in_tool_call:
             if not line_buf.startswith("REMEMBER:") and not line_buf.startswith("TOOL:"):
                 self._output(line_buf)
+                if self._is_terminal:
+                    streamed_lines.append(line_buf)
 
         tool_match = _TOOL_RE.search(full_text)
+
         if tool_match:
             if self._is_terminal:
                 from rich.console import Console
@@ -326,58 +332,118 @@ class Agent:
                 self._output(f"⚙ calling {tool_match.group('tool_name')}...\n")
         else:
             self._output("\n")
+            # ── Option A: erase streamed text and re-render as Markdown ──────
+            if self._is_terminal and streamed_lines:
+                self._render_markdown_replace(streamed_lines, full_text)
 
         self.history.append({"role": "assistant", "content": full_text})
         return full_text
+
+    def _render_markdown_replace(self, streamed_lines: list[str], full_text: str) -> None:
+        """
+        Erase the raw streamed text and re-render as rich Markdown (Option A).
+
+        Moves the cursor up by the number of lines we printed, clears them,
+        then renders the full response through rich's Markdown renderer.
+
+        Only called in terminal mode after a non-tool response.
+        """
+        from rich.console import Console
+        from rich.markdown import Markdown
+        from rich.theme import Theme
+
+        # Override default heading styles — rich centers headings and adds
+        # decorative rules by default. We want plain left-aligned bold text.
+        _MD_THEME = Theme({
+            "markdown.h1":         "bold green",
+            "markdown.h1.border":  "none",
+            "markdown.h2":         "bold cyan",
+            "markdown.h2.border":  "none",
+            "markdown.h3":         "bold",
+            "markdown.h4":         "bold dim",
+            "markdown.h5":         "dim",
+            "markdown.h6":         "dim",
+        })
+
+        # Clean the response — strip REMEMBER: lines before rendering
+        clean = re.sub(r"REMEMBER:[^\n]*\n?", "", full_text).strip()
+        if not clean:
+            return
+
+        # Count how many terminal lines the streamed text occupied.
+        # Each streamed line may wrap if wider than the terminal.
+        con = Console(highlight=False, theme=_MD_THEME)
+        terminal_width = con.width or 80
+        # +2 for the "  Name " prefix on the first line
+        lines_to_erase = 1  # the "Name " prefix line
+        for i, line in enumerate(streamed_lines):
+            visible_len = len(line) + (len(self.name) + 3 if i == 0 else 0)
+            lines_to_erase += max(1, (visible_len + terminal_width - 1) // terminal_width)
+
+        # Move cursor up and clear each line
+        import sys
+        for _ in range(lines_to_erase):
+            sys.stdout.write("\033[1A\033[2K")
+        sys.stdout.flush()
+
+        # Re-render with name prefix + Markdown
+        con.print(f"  [bold green]{self.name}[/bold green]")
+        con.print(Markdown(clean), soft_wrap=True)
 
     # ── Session continuity ────────────────────────────────────────────────────
 
     def summarise_session(self) -> str | None:
         """
-        One-shot (non-streaming) LLM call producing a 3-5 bullet summary.
-        Skips RESULT: blocks to keep the transcript compact.
-        Returns None if there were no real exchanges this session.
+        Summarise the current session for continuity in the next one.
+
+        Strategy:
+        - 0 real turns → None (nothing happened)
+        - 1-2 turns → save last user message + last assistant answer verbatim
+          (cheap, no LLM call, preserves actual content)
+        - 3+ turns → LLM summarises into bullet points
+
+        Never returns None for a session that had real exchanges — always
+        saves something so last_session.md stays current.
         """
         seed_len = len(self._seed)
         real = self.history[seed_len:]
         if not real:
             return None
 
-        transcript_lines = []
+        # Build transcript — skip RESULT: blocks (tool output noise)
+        turns: list[tuple[str, str]] = []  # (role, content)
         for msg in real:
             role    = msg["role"]
-            content = msg.get("content") or ""
+            content = (msg.get("content") or "").strip()
+            if not content:
+                continue
             if role == "user" and content.startswith("RESULT:"):
                 continue
-            if role in ("user", "assistant"):
-                prefix  = "User" if role == "user" else self.name
-                snippet = content[:300] + ("\u2026" if len(content) > 300 else "")
-                transcript_lines.append(f"{prefix}: {snippet}")
+            if role in ("user", "assistant") and not content.startswith("TOOL:"):
+                turns.append((role, content))
 
-        if not transcript_lines:
+        if not turns:
             return None
 
-        # ── Short session heuristic ───────────────────────────────────────────
-        # Less than 3 exchanges (6 lines) is likely just a greeting or a very
-        # brief question. Skip the LLM call entirely:
-        #   - If there is only 1 user message, save it as a minimal context hook
-        #     so the next session knows what the last thing asked was.
-        #   - If there are 2-3 exchanges, do the same — not worth summarising.
-        # This avoids saving the LLM's meta-commentary ("nothing to summarise").
-        _MIN_EXCHANGES = 4  # lines = 2 user + 2 assistant turns minimum
-        if len(transcript_lines) < _MIN_EXCHANGES:
-            user_msgs = [l for l in transcript_lines if l.startswith("User:")]
-            if user_msgs:
-                last = user_msgs[-1].removeprefix("User:").strip()
-                return f"- Last message: {last[:200]}"
-            return None
+        # ── Short session: save verbatim snippet, no LLM call ─────────────────
+        if len(turns) <= 2:
+            lines = []
+            for role, content in turns:
+                label   = "User asked" if role == "user" else f"{self.name} answered"
+                snippet = content[:400] + ("…" if len(content) > 400 else "")
+                lines.append(f"- {label}: {snippet}")
+            return "\n".join(lines)
 
-        transcript = "\n".join(transcript_lines)
+        # ── Longer session: LLM summary ───────────────────────────────────────
+        transcript = "\n".join(
+            f"{'User' if r == 'user' else self.name}: {c[:300]}{'…' if len(c) > 300 else ''}"
+            for r, c in turns
+        )
         prompt = (
-            "Summarise this conversation in 3-5 bullet points. "
-            "Focus only on decisions made, facts learned, and tasks completed. "
-            "If there is nothing meaningful to summarise, respond with exactly: SKIP\n\n"
-            "Be brief — this summary will be used as context for the next session.\n\n"
+            "Summarise this conversation in 3-5 bullet points for use as context "
+            "in the next session. Include: what the user asked, what was found or "
+            "done, and any key content or facts from the answers. Be specific — "
+            "include actual content, not just meta-descriptions like 'user asked about X'.\n\n"
             + transcript
         )
 
@@ -387,28 +453,28 @@ class Agent:
                 messages=[{"role": "user", "content": prompt}],
                 stream=False,
             )
-            result = resp.choices[0].message.content.strip()
-            # Model signalled nothing worth saving
-            if result.upper().startswith("SKIP"):
-                return None
-            return result
+            return resp.choices[0].message.content.strip() or None
         except Exception:
-            return None  # best-effort, never block on failure
+            # Fallback: save verbatim snippet rather than losing the session
+            lines = []
+            for role, content in turns[-4:]:  # last 2 exchanges
+                label   = "User asked" if role == "user" else f"{self.name} answered"
+                snippet = content[:400] + ("…" if len(content) > 400 else "")
+                lines.append(f"- {label}: {snippet}")
+            return "\n".join(lines)
 
     def close(self) -> None:
-        """Summarise this session and persist it.
-        Always writes to last_session.md so the model never recalls
-        a stale older session after a series of trivial ones.
+        """Summarise this session and persist it to last_session.md.
+        Always writes — never leaves a stale older summary in place.
         """
         summary = self.summarise_session()
         if summary:
             self.ws.save_session_summary(summary)
         else:
-            # Nothing meaningful happened but we still record a timestamp
-            # so the next session knows this was a short/empty interaction.
-            self.ws.save_session_summary(
-                f"- Brief or empty session — nothing significant to summarise."
-            )
+            # No real exchanges this session — record a minimal timestamp
+            # marker so the model knows the file is current.
+            ts = __import__("datetime").datetime.now().strftime("%Y-%m-%d %H:%M")
+            self.ws.save_session_summary(f"- No exchange recorded ({ts}).")
 
     # ── Tool execution ────────────────────────────────────────────────────────
 
