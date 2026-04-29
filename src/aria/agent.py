@@ -123,8 +123,8 @@ class Agent:
             {"role": "assistant", "content": "/tmp contains: notes.txt, report.pdf."},
             {"role": "user", "content": "What is 2+2?"},
             {"role": "assistant", "content": "4."},
-            {"role": "user", "content": "My name is Alice."},
-            {"role": "assistant", "content": "REMEMBER: User name is Alice.\nNice to meet you, Alice!"},
+            {"role": "user", "content": "My name is <username>."},
+            {"role": "assistant", "content": "REMEMBER: User name is <username>.\nNice to meet you, <username>!"},
             {"role": "user", "content": "scheduled task: summarise top stories from https://news.ycombinator.com"},
             {"role": "assistant", "content": 'TOOL: web_fetch\nINPUT: {"url": "https://news.ycombinator.com", "max_chars": 2000}'},
             {"role": "user", "content": "RESULT: 1. Story A\n2. Story B\n3. Story C"},
@@ -396,12 +396,19 @@ class Agent:
             return None  # best-effort, never block on failure
 
     def close(self) -> None:
-        """Summarise this session and persist it — skips trivial sessions."""
+        """Summarise this session and persist it.
+        Always writes to last_session.md so the model never recalls
+        a stale older session after a series of trivial ones.
+        """
         summary = self.summarise_session()
         if summary:
             self.ws.save_session_summary(summary)
-        # If nothing meaningful, leave last_session.md untouched so the
-        # previous session's context remains available next time.
+        else:
+            # Nothing meaningful happened but we still record a timestamp
+            # so the next session knows this was a short/empty interaction.
+            self.ws.save_session_summary(
+                f"- Brief or empty session — nothing significant to summarise."
+            )
 
     # ── Tool execution ────────────────────────────────────────────────────────
 
