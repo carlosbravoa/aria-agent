@@ -27,9 +27,10 @@ scheduled background tasks.
 15. [Adding custom tools](#adding-custom-tools)
 16. [Gmail & Calendar setup](#gmail--calendar-setup)
 17. [Jira setup](#jira-setup)
-18. [Running as a background service](#running-as-a-background-service)
-19. [Workspace layout](#workspace-layout)
-20. [Project structure](#project-structure)
+18. [IMAP setup](#imap-setup)
+19. [Running as a background service](#running-as-a-background-service)
+20. [Workspace layout](#workspace-layout)
+21. [Project structure](#project-structure)
 
 ---
 
@@ -149,6 +150,13 @@ TELEGRAM_ALLOWED=<your chat ID>
 # GOG_ACCOUNT=you@gmail.com
 # GOG_KEYRING_BACKEND=file
 # GOG_KEYRING_PASSWORD=your-passphrase  # required for headless/service use
+
+# ── IMAP (optional — any non-Gmail provider) ─────────────────────────────────
+# IMAP_DEFAULT_HOST=imap.fastmail.com
+# IMAP_DEFAULT_USER=you@fastmail.com
+# IMAP_DEFAULT_PASSWORD=app-password
+# IMAP_DEFAULT_PORT=993              # optional, default 993
+# Additional accounts: IMAP_WORK_HOST=... IMAP_WORK_USER=... IMAP_WORK_PASSWORD=...
 
 # ── Jira ──────────────────────────────────────────────────────────────────────
 # Optional — configured at runtime, not via installer
@@ -456,6 +464,7 @@ at startup — no registration needed.
 | `schedule`    | Create, list, and cancel scheduled tasks for the supervisor.              |
 | `reflect`     | Trigger memory reflection on demand.                                      |
 | `jira`        | Create, search, comment, transition Jira issues via REST API.             |
+| `imap`        | List, search, read, move, delete emails on any IMAP provider.             |
 
 ### Writing scripts without JSON escaping issues
 
@@ -574,6 +583,53 @@ duedate <= 7d AND statusCategory != Done              # due this week
 
 ---
 
+## IMAP setup
+
+The `imap` tool uses `imaplib` from the Python standard library — no extra dependencies.
+
+```ini
+# Default account
+IMAP_DEFAULT_HOST=imap.fastmail.com
+IMAP_DEFAULT_USER=you@fastmail.com
+IMAP_DEFAULT_PASSWORD=your-app-password
+
+# Second account (any prefix works)
+IMAP_WORK_HOST=outlook.office365.com
+IMAP_WORK_USER=me@company.com
+IMAP_WORK_PASSWORD=your-app-password
+```
+
+Use the `account` parameter to select which account:
+```
+You: check my work emails
+Aria: 🔧 calling imap...
+      {"action": "list", "account": "WORK"}
+```
+
+Provider reference:
+
+| Provider       | Host                        | Port |
+|----------------|-----------------------------|------|
+| Gmail          | `imap.gmail.com`            | 993  |
+| Outlook/O365   | `outlook.office365.com`     | 993  |
+| iCloud         | `imap.mail.me.com`          | 993  |
+| Fastmail       | `imap.fastmail.com`         | 993  |
+| Yahoo          | `imap.mail.yahoo.com`       | 993  |
+| ProtonMail     | `127.0.0.1` (Bridge)        | 1143 |
+
+> Most providers require an **app password** when 2FA is enabled — generate one in your account security settings, not your regular login password.
+
+Search shorthands the agent understands:
+```
+"unread"                    → UNSEEN
+"today"                     → SINCE today's date
+"from:boss@company.com"     → FROM "boss@company.com"
+"subject:invoice"           → SUBJECT "invoice"
+"unread from:bank today"    → combined
+```
+
+---
+
 ## Running as a background service
 
 ### Install wizard (recommended)
@@ -678,6 +734,7 @@ aria-agent/
             ├── calendar.py            ← Google Calendar via gog
             ├── file_access.py         ← read/write/patch with path security
             ├── gmail.py               ← Gmail via gog
+            ├── imap.py                ← IMAP email for any provider
             ├── jira.py                ← Jira REST API via httpx
             ├── notify.py              ← Telegram push notification
             ├── reflect.py             ← on-demand memory reflection

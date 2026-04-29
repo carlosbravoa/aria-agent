@@ -38,6 +38,14 @@ AGENT_NAME=Aria
 
 # ── Gmail (optional) ─────────────────────────────────────────────────
 # CLI binary used for Gmail access. Run `gog auth login` to authenticate.
+# ── IMAP (optional — any non-Gmail provider) ─────────────────────────
+# IMAP_DEFAULT_HOST=imap.example.com
+# IMAP_DEFAULT_USER=you@example.com
+# IMAP_DEFAULT_PASSWORD=app-password
+# IMAP_DEFAULT_PORT=993
+# Additional accounts: IMAP_WORK_HOST, IMAP_WORK_USER, etc.
+
+# ── Gmail / gog ──────────────────────────────────────────────────────
 # GMAIL_CLI=gog
 # GOG_ACCOUNT=you@gmail.com
 # GOG_KEYRING_BACKEND=file
