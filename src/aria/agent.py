@@ -148,67 +148,53 @@ class Agent:
         Suppresses all status output (tool calls, memory saves, name prefix)
         — safe for Telegram, WhatsApp, supervisor tasks.
 
-        Finds the last assistant message that precedes any trailing tool calls.
-        This handles two patterns correctly:
-
-          Pattern A (answer then side-effects):
-            user → assistant: "I'll set a reminder"  ← RETURN THIS
-                → TOOL: schedule → RESULT → assistant: "Done."
-
-          Pattern B (tools then answer then side-effects):
-            user → TOOL: gmail → RESULT → TOOL: calendar → RESULT
-                → assistant: "Here is your summary..."  ← RETURN THIS
-                → TOOL: notify → RESULT → assistant: "Sent."
+        Only inspects messages added during this specific call, not the
+        full history, so repeated calls on a long-lived agent (Telegram/
+        WhatsApp channel sessions) always return the current response.
         """
         buf: list[str] = []
         orig = self._output
         self._output = buf.append
+
+        # Snapshot history length before this turn
+        history_before = len(self.history)
+
         try:
             self.chat(user_input)
         finally:
             self._output = orig
 
-        seed_len = len(self._seed)
-        real = self.history[seed_len:]
+        # Only look at messages added during this call
+        new_messages = self.history[history_before:]
 
-        # Walk backwards to find where the trailing tool-call chain starts.
-        # Skip: assistant closing lines after tools, RESULT: blocks, TOOL: calls.
-        # Stop at the first assistant message that precedes a tool call or is
-        # the only substantive message.
-        #
-        # Strategy: collect all (index, content) for non-tool assistant messages,
-        # then find the last one that is followed by at least one TOOL: call,
-        # OR the last one if no tool calls follow it at all.
+        # Find the last assistant message that precedes any trailing tool calls.
+        # Pattern A — answer then side-effects:
+        #   [assistant: answer] [TOOL:...] [RESULT] [assistant: "Done."]
+        # Pattern B — tools then answer then side-effects:
+        #   [TOOL:...] [RESULT] [assistant: summary] [TOOL: notify] [RESULT] [assistant: "Sent."]
+        # In both cases: last assistant message followed by a RESULT: is the one we want.
 
         non_tool_assistant: list[tuple[int, str]] = []
-        has_trailing_tools = False
-
-        for i, msg in enumerate(real):
+        for i, msg in enumerate(new_messages):
             if msg["role"] == "assistant":
                 content = msg.get("content", "").strip()
-                if not content:
-                    continue
-                if content.startswith("TOOL:"):
-                    continue
-                non_tool_assistant.append((i, content))
+                if content and not content.startswith("TOOL:"):
+                    non_tool_assistant.append((i, content))
 
         if not non_tool_assistant:
             return ""
 
-        # Find the last assistant message that is followed by a TOOL: call
-        # — that message is the one before the side-effect chain.
+        # Return the last assistant message that has a RESULT: block after it
         for idx, content in reversed(non_tool_assistant):
-            # Check if any message after this one is a tool call
-            rest = real[idx + 1:]
-            has_tool_after = any(
-                m["role"] == "assistant" and (m.get("content") or "").strip().startswith("TOOL:")
-                or m["role"] == "user" and (m.get("content") or "").strip().startswith("RESULT:")
+            rest = new_messages[idx + 1:]
+            has_result_after = any(
+                m["role"] == "user" and (m.get("content") or "").startswith("RESULT:")
                 for m in rest
             )
-            if has_tool_after:
+            if has_result_after:
                 return content
 
-        # No trailing tools found — return the last non-tool assistant message
+        # No trailing tool calls — return the last non-tool assistant message
         return non_tool_assistant[-1][1]
 
     def _trim_history(self) -> None:
