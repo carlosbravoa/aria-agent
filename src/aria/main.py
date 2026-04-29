@@ -120,9 +120,15 @@ def _print_banner(agent: Agent) -> None:
 
 
 def _prompt(agent: Agent) -> str:
-    """Read a line with readline support (arrow keys, history, tab completion)."""
+    """Read a line with readline support (arrow keys, history, tab completion).
+    Uses a rich-styled prompt so the user's input is visually distinct.
+    """
+    # Print the styled prompt prefix via rich (no newline),
+    # then use plain input() so readline works correctly.
+    # rich.Prompt bypasses readline — we do it manually instead.
+    console.print("  [bold cyan]You ›[/bold cyan] ", end="", soft_wrap=True)
     try:
-        return input("  You › ").strip()
+        return input("").strip()
     except EOFError:
         raise
 

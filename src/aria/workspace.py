@@ -96,7 +96,14 @@ class Workspace:
     # ── Memory ───────────────────────────────────────────────────────────────
 
     def load_memory(self) -> str:
-        parts = [f.read_text(encoding="utf-8") for f in sorted((self.root / "memory").glob("*.md"))]
+        # Exclude last_session.md — it is loaded separately as ## Previous Session
+        # to avoid it appearing twice in the system prompt.
+        excluded = {"last_session.md"}
+        parts = [
+            f.read_text(encoding="utf-8")
+            for f in sorted((self.root / "memory").glob("*.md"))
+            if f.name not in excluded
+        ]
         return "\n\n---\n\n".join(parts)
 
     def append_memory(self, note: str, filename: str = "core.md") -> None:
