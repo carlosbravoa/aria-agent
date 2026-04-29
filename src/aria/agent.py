@@ -40,7 +40,10 @@ _MAX_HISTORY = int(os.environ.get("ARIA_MAX_HISTORY", "60"))
 
 class Agent:
     def __init__(self, output_callback=None) -> None:
+        # Default output: plain print for streaming tokens.
+        # Rich is used for status lines (tool calls, memory saves) via console.print.
         self._output = output_callback or (lambda t: print(t, end="", flush=True))
+        self._is_terminal = output_callback is None
         self.client = OpenAI(
             base_url=os.environ["LLM_BASE_URL"],
             api_key=os.environ.get("LLM_API_KEY", "local"),
@@ -206,7 +209,11 @@ class Agent:
                 note = m.group("note").strip()
                 if note:
                     self.ws.append_memory(f"- {note}")
-                    self._output(f"  \U0001f4be saved: {note}\n")
+                    if self._is_terminal:
+                        from rich.console import Console
+                        Console().print(f"  [dim]💾 saved: {note}[/dim]")
+                    else:
+                        self._output(f"  💾 saved: {note}\n")
 
             tool_match = _TOOL_RE.search(response)
 
@@ -248,14 +255,19 @@ class Agent:
                 self.history.append({"role": "assistant", "content": response})
             self.history.append({"role": "user", "content": f"RESULT: {result}"})
 
-        self._output(f"\n[{self.name}] Hit loop limit ({_MAX_LOOPS}).\n")
+        if self._is_terminal:
+            from rich.console import Console
+            Console().print(f"\n  [yellow]⚠ Hit loop limit ({_MAX_LOOPS}).[/yellow]")
+        else:
+            self._output(f"[{self.name}] Hit loop limit ({_MAX_LOOPS}).\n")
 
     # ── Streaming ────────────────────────────────────────────────────────────
 
     def _stream_response(self) -> str:
         now        = datetime.now(timezone.utc).astimezone()
         time_ctx   = f"Current date and time: {now.strftime('%A, %Y-%m-%d %H:%M %Z')}"
-        sys_prompt = self.system_prompt + f"\n\n## Context\n{time_ctx}\n"
+        from aria import __version__
+        sys_prompt = self.system_prompt + f"\n\n## Context\n{time_ctx}\nVersion: {__version__}\n"
         messages   = [{"role": "system", "content": sys_prompt}] + self.history
 
         while messages and messages[-1]["role"] == "assistant":
@@ -267,7 +279,11 @@ class Agent:
             stream=True,
         )
 
-        self._output(f"\n{self.name}: ")
+        if self._is_terminal:
+            from rich.console import Console
+            Console(highlight=False).print(f"\n  [bold green]{self.name}[/bold green] ", end="")
+        else:
+            self._output(f"\n{self.name}: ")
 
         full_text    = ""
         line_buf     = ""    # accumulates tokens until a newline is received
@@ -303,7 +319,11 @@ class Agent:
 
         tool_match = _TOOL_RE.search(full_text)
         if tool_match:
-            self._output(f"\U0001f527 calling {tool_match.group('tool_name')}...\n")
+            if self._is_terminal:
+                from rich.console import Console
+                Console().print(f"  [dim]⚙ calling [bold]{tool_match.group('tool_name')}[/bold]...[/dim]")
+            else:
+                self._output(f"⚙ calling {tool_match.group('tool_name')}...\n")
         else:
             self._output("\n")
 
