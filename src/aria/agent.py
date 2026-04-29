@@ -144,14 +144,21 @@ class Agent:
 
     def chat_collect(self, user_input: str) -> str:
         """
-        Run a chat turn and return the substantive response text.
+        Run a chat turn and return the response intended for the user.
         Suppresses all status output (tool calls, memory saves, name prefix)
         — safe for Telegram, WhatsApp, supervisor tasks.
 
-        Returns the longest non-tool assistant message from the session.
-        This correctly handles cases where the agent calls notify/schedule
-        after producing the main response — the confirmation line
-        ("Resumen enviado") is short, the actual content is long.
+        Finds the last assistant message that precedes any trailing tool calls.
+        This handles two patterns correctly:
+
+          Pattern A (answer then side-effects):
+            user → assistant: "I'll set a reminder"  ← RETURN THIS
+                → TOOL: schedule → RESULT → assistant: "Done."
+
+          Pattern B (tools then answer then side-effects):
+            user → TOOL: gmail → RESULT → TOOL: calendar → RESULT
+                → assistant: "Here is your summary..."  ← RETURN THIS
+                → TOOL: notify → RESULT → assistant: "Sent."
         """
         buf: list[str] = []
         orig = self._output
@@ -164,20 +171,45 @@ class Agent:
         seed_len = len(self._seed)
         real = self.history[seed_len:]
 
-        # Collect all assistant messages that aren't raw tool calls
-        candidates = []
-        for msg in real:
+        # Walk backwards to find where the trailing tool-call chain starts.
+        # Skip: assistant closing lines after tools, RESULT: blocks, TOOL: calls.
+        # Stop at the first assistant message that precedes a tool call or is
+        # the only substantive message.
+        #
+        # Strategy: collect all (index, content) for non-tool assistant messages,
+        # then find the last one that is followed by at least one TOOL: call,
+        # OR the last one if no tool calls follow it at all.
+
+        non_tool_assistant: list[tuple[int, str]] = []
+        has_trailing_tools = False
+
+        for i, msg in enumerate(real):
             if msg["role"] == "assistant":
                 content = msg.get("content", "").strip()
-                if content and not content.startswith("TOOL:"):
-                    candidates.append(content)
+                if not content:
+                    continue
+                if content.startswith("TOOL:"):
+                    continue
+                non_tool_assistant.append((i, content))
 
-        if not candidates:
+        if not non_tool_assistant:
             return ""
 
-        # Return the longest — the actual answer is always longer than
-        # trailing confirmations like "Done. Sent." or "Tarea programada."
-        return max(candidates, key=len)
+        # Find the last assistant message that is followed by a TOOL: call
+        # — that message is the one before the side-effect chain.
+        for idx, content in reversed(non_tool_assistant):
+            # Check if any message after this one is a tool call
+            rest = real[idx + 1:]
+            has_tool_after = any(
+                m["role"] == "assistant" and (m.get("content") or "").strip().startswith("TOOL:")
+                or m["role"] == "user" and (m.get("content") or "").strip().startswith("RESULT:")
+                for m in rest
+            )
+            if has_tool_after:
+                return content
+
+        # No trailing tools found — return the last non-tool assistant message
+        return non_tool_assistant[-1][1]
 
     def _trim_history(self) -> None:
         """Compress old RESULT blocks and drop oldest turns to stay within limits."""
