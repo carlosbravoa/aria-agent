@@ -144,12 +144,15 @@ class Agent:
 
     def chat_collect(self, user_input: str) -> str:
         """
-        Run a chat turn and return only the final response text.
+        Run a chat turn and return the substantive response text.
         Suppresses all status output (tool calls, memory saves, name prefix)
         — safe for Telegram, WhatsApp, supervisor tasks.
+
+        Returns the longest non-tool assistant message from the session.
+        This correctly handles cases where the agent calls notify/schedule
+        after producing the main response — the confirmation line
+        ("Resumen enviado") is short, the actual content is long.
         """
-        # Capture everything but discard it — we only want the final answer
-        # which _run_loop writes to self.history[-1]["content"].
         buf: list[str] = []
         orig = self._output
         self._output = buf.append
@@ -157,18 +160,24 @@ class Agent:
             self.chat(user_input)
         finally:
             self._output = orig
-        # Extract the clean final answer directly from history,
-        # bypassing all the status noise captured in buf.
+
         seed_len = len(self._seed)
         real = self.history[seed_len:]
-        # Find the last assistant message that isn't a tool call
-        for msg in reversed(real):
+
+        # Collect all assistant messages that aren't raw tool calls
+        candidates = []
+        for msg in real:
             if msg["role"] == "assistant":
                 content = msg.get("content", "").strip()
-                # Skip raw tool call lines — the final answer never starts with TOOL:
-                if not content.startswith("TOOL:"):
-                    return content
-        return ""
+                if content and not content.startswith("TOOL:"):
+                    candidates.append(content)
+
+        if not candidates:
+            return ""
+
+        # Return the longest — the actual answer is always longer than
+        # trailing confirmations like "Done. Sent." or "Tarea programada."
+        return max(candidates, key=len)
 
     def _trim_history(self) -> None:
         """Compress old RESULT blocks and drop oldest turns to stay within limits."""
