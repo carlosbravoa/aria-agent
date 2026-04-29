@@ -34,6 +34,7 @@ class Task:
     retries:     int        = 0
     source:      str        = "user"        # cron | agent | user | script
     task_id:     str        = field(default_factory=lambda: uuid.uuid4().hex[:8])
+    recur:       str        = ""            # "", "daily", "weekly", "weekdays", or "<N>m" (every N minutes)
 
     # ── Serialisation ─────────────────────────────────────────────────────────
 
@@ -48,6 +49,7 @@ class Task:
             "retries":     self.retries,
             "source":      self.source,
             "id":          self.task_id,
+            "recur":       self.recur,
         }, indent=2, ensure_ascii=False)
 
     @staticmethod
@@ -55,7 +57,6 @@ class Task:
         """Parse a task file. Supports both JSON (current) and legacy key: value format."""
         text = text.strip()
         if text.startswith("{"):
-            # JSON format
             d = json.loads(text)
             return Task(
                 prompt      = d.get("prompt", ""),
@@ -67,9 +68,10 @@ class Task:
                 retries     = int(d.get("retries", 0)),
                 source      = d.get("source", "user"),
                 task_id     = d.get("id", uuid.uuid4().hex[:8]),
+                recur       = d.get("recur", ""),
             )
         else:
-            # Legacy key: value format — kept for backwards compatibility
+            # Legacy key: value format
             kv: dict[str, str] = {}
             for line in text.splitlines():
                 if ":" in line:
@@ -85,7 +87,45 @@ class Task:
                 retries     = int(kv.get("retries", "0")),
                 source      = kv.get("source", "user"),
                 task_id     = kv.get("id", uuid.uuid4().hex[:8]),
+                recur       = kv.get("recur", ""),
             )
+
+    def next_run_after(self) -> str:
+        """
+        Compute the next run_after value for a recurring task.
+        Returns an ISO datetime string, or "" if not recurring.
+
+        Supported recur values:
+          "daily"    — same time tomorrow
+          "weekly"   — same time next week
+          "weekdays" — same time next weekday (Mon–Fri)
+          "<N>m"     — every N minutes (e.g. "60m")
+        """
+        if not self.recur:
+            return ""
+
+        from datetime import timedelta
+        base = datetime.fromisoformat(self.run_after) if self.run_after else datetime.now()
+        # Strip timezone for consistent naive arithmetic
+        if hasattr(base, "tzinfo") and base.tzinfo is not None:
+            base = base.replace(tzinfo=None)
+
+        recur = self.recur.strip().lower()
+
+        if recur == "daily":
+            nxt = base + timedelta(days=1)
+        elif recur == "weekly":
+            nxt = base + timedelta(weeks=1)
+        elif recur == "weekdays":
+            nxt = base + timedelta(days=1)
+            while nxt.weekday() >= 5:  # skip Sat=5, Sun=6
+                nxt += timedelta(days=1)
+        elif recur.endswith("m") and recur[:-1].isdigit():
+            nxt = base + timedelta(minutes=int(recur[:-1]))
+        else:
+            return ""
+
+        return nxt.strftime("%Y-%m-%dT%H:%M:%S")
 
     def is_due(self) -> bool:
         """Return True if the task is ready to run right now."""
@@ -156,15 +196,31 @@ def claim(path: Path, task: Task) -> Path | None:
 
 
 def complete(path: Path, task: Task, result: str) -> None:
-    """Move a finished task to done/ and append the result."""
+    """Move a finished task to done/ and requeue if recurring."""
     done_dir = _queue_dir("done")
-    # Store as JSON with result appended
     d = json.loads(task.to_text())
     d["result"]    = result[:500]
     d["completed"] = _now()
     dest = done_dir / path.name
     dest.write_text(json.dumps(d, indent=2, ensure_ascii=False), encoding="utf-8")
     path.unlink(missing_ok=True)
+
+    # Auto-requeue recurring tasks with a fresh task_id and updated run_after
+    if task.recur:
+        next_run = task.next_run_after()
+        if next_run:
+            import uuid as _uuid
+            next_task = Task(
+                prompt      = task.prompt,
+                notify      = task.notify,
+                priority    = task.priority,
+                run_after   = next_run,
+                max_retries = task.max_retries,
+                source      = task.source,
+                recur       = task.recur,
+                task_id     = _uuid.uuid4().hex[:8],
+            )
+            enqueue(next_task)
 
 
 def fail(path: Path, task: Task, error: str) -> None:
