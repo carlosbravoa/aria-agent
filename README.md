@@ -36,9 +36,33 @@ scheduled background tasks.
 
 ## Requirements
 
-- Python 3.11+
-- An OpenAI-compatible LLM endpoint
-- Node.js 18+ *(only for WhatsApp)*
+### Always required
+
+| Requirement | Notes |
+|-------------|-------|
+| Python 3.11+ | `python3 --version` to check |
+| pip | Usually bundled with Python |
+| An OpenAI-compatible LLM endpoint | Anthropic, OpenAI, Ollama, LM Studio, etc. |
+
+### Per feature
+
+| Feature | External requirement | Install |
+|---------|---------------------|---------|
+| **Telegram bot** (`aria-telegram`) | Telegram bot token | Free — create via [@BotFather](https://t.me/BotFather) |
+| **Gmail tool** | `gog` (gogcli) binary + Google OAuth | See [Gmail & Calendar setup](#gmail--calendar-setup) |
+| **Calendar tool** | `gog` (gogcli) binary + Google OAuth | Same as Gmail |
+| **Google Drive tool** | `gog` (gogcli) binary + Google OAuth | Same as Gmail |
+| **IMAP tool** | None — stdlib only | Just add credentials to `.env` |
+| **Jira tool** | None — REST API via `httpx` | Just add credentials to `.env` |
+| **WhatsApp bridge** | Node.js 18+ and `npm` | `node --version` to check |
+| **Background services** | systemd (Linux) | Pre-installed on most Linux distros |
+
+> **No binary needed for Jira or IMAP** — they call REST APIs directly using
+> `httpx` (already a project dependency) and Python's standard `imaplib`.
+> Just add the credentials to `~/.aria/.env` and the tools are ready.
+
+> **gog is a single binary** — no npm, no pip, no runtime required.
+> Download once, authenticate once, works for Gmail, Calendar, and Drive.
 
 ---
 
