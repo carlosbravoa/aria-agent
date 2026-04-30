@@ -46,7 +46,7 @@ AGENT_NAME=Aria
 # Additional accounts: IMAP_WORK_HOST, IMAP_WORK_USER, etc.
 
 # ── Gmail / gog ──────────────────────────────────────────────────────
-# GMAIL_CLI=gog
+# GMAIL_CLI=gog                  # also used for Drive, Calendar
 # GOG_ACCOUNT=you@gmail.com
 # GOG_KEYRING_BACKEND=file
 # GOG_KEYRING_PASSWORD=your-passphrase

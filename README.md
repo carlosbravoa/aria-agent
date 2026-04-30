@@ -465,6 +465,7 @@ at startup — no registration needed.
 | `reflect`     | Trigger memory reflection on demand.                                      |
 | `jira`        | Create, search, comment, transition Jira issues via REST API.             |
 | `imap`        | List, search, read, move, delete emails on any IMAP provider.             |
+| `drive`       | List, search, read, download, upload, organise Google Drive files via gog. |
 
 ### Writing scripts without JSON escaping issues
 
@@ -734,6 +735,7 @@ aria-agent/
             ├── calendar.py            ← Google Calendar via gog
             ├── file_access.py         ← read/write/patch with path security
             ├── gmail.py               ← Gmail via gog
+            ├── drive.py               ← Google Drive via gog
             ├── imap.py                ← IMAP email for any provider
             ├── jira.py                ← Jira REST API via httpx
             ├── notify.py              ← Telegram push notification
