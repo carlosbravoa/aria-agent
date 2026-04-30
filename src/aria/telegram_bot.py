@@ -142,7 +142,9 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
     for chunk in _split(reply):
         if chunk.strip():
-            await update.message.reply_text(chunk)  # type: ignore[union-attr]
+            await update.message.reply_text(  # type: ignore[union-attr]
+                _md_to_html(chunk), parse_mode="HTML"
+            )
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
