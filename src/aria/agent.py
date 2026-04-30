@@ -59,7 +59,8 @@ class Agent:
         self.system_prompt = self._build_system_prompt()
         self._seed = self._few_shot_examples()
         self.history: list[dict[str, Any]] = list(self._seed)
-        self.session_log = self.ws.new_session_path()
+        self.session_log    = self.ws.new_session_path()
+        self._last_response = ""  # set by _run_loop, read by chat_collect
 
     # ── System prompt ────────────────────────────────────────────────────────
 
@@ -148,54 +149,24 @@ class Agent:
         Suppresses all status output (tool calls, memory saves, name prefix)
         — safe for Telegram, WhatsApp, supervisor tasks.
 
-        Only inspects messages added during this specific call, not the
-        full history, so repeated calls on a long-lived agent (Telegram/
-        WhatsApp channel sessions) always return the current response.
+        Reads self._last_response which is set explicitly by _run_loop
+        at every exit point — no history scanning, no heuristics.
+        This is the definitive fix: the loop knows what the final
+        user-facing response is; we just expose it directly.
         """
+        # Suppress terminal output — channel callers don't want streamed tokens
         buf: list[str] = []
         orig = self._output
         self._output = buf.append
-
-        # Snapshot history length before this turn
-        history_before = len(self.history)
-
+        orig_is_terminal  = self._is_terminal
+        self._is_terminal = False  # suppress rich rendering too
+        self._last_response = ""
         try:
             self.chat(user_input)
         finally:
-            self._output = orig
-
-        # Only look at messages added during this call
-        new_messages = self.history[history_before:]
-
-        # Find the last assistant message that precedes any trailing tool calls.
-        # Pattern A — answer then side-effects:
-        #   [assistant: answer] [TOOL:...] [RESULT] [assistant: "Done."]
-        # Pattern B — tools then answer then side-effects:
-        #   [TOOL:...] [RESULT] [assistant: summary] [TOOL: notify] [RESULT] [assistant: "Sent."]
-        # In both cases: last assistant message followed by a RESULT: is the one we want.
-
-        non_tool_assistant: list[tuple[int, str]] = []
-        for i, msg in enumerate(new_messages):
-            if msg["role"] == "assistant":
-                content = msg.get("content", "").strip()
-                if content and not content.startswith("TOOL:"):
-                    non_tool_assistant.append((i, content))
-
-        if not non_tool_assistant:
-            return ""
-
-        # Return the last assistant message that has a RESULT: block after it
-        for idx, content in reversed(non_tool_assistant):
-            rest = new_messages[idx + 1:]
-            has_result_after = any(
-                m["role"] == "user" and (m.get("content") or "").startswith("RESULT:")
-                for m in rest
-            )
-            if has_result_after:
-                return content
-
-        # No trailing tool calls — return the last non-tool assistant message
-        return non_tool_assistant[-1][1]
+            self._output      = orig
+            self._is_terminal = orig_is_terminal
+        return self._last_response
 
     def _trim_history(self) -> None:
         """Compress old RESULT blocks and drop oldest turns to stay within limits."""
@@ -250,6 +221,7 @@ class Agent:
                 self.ws.log_session(self.session_log, self.name, display)
                 if self.history and self.history[-1]["role"] == "assistant":
                     self.history[-1]["content"] = display
+                self._last_response = display
                 return
 
             tool_name = tool_match.group("tool_name")
@@ -262,6 +234,7 @@ class Agent:
                 self.ws.log_session(self.session_log, self.name, msg)
                 if self.history and self.history[-1]["role"] == "assistant":
                     self.history[-1]["content"] = msg
+                self._last_response = msg
                 return
             seen_calls.append(call_sig)
 
