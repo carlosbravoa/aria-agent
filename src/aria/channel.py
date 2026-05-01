@@ -37,10 +37,10 @@ class _Session:
         self._lock     = threading.Lock()
         self._reset_timer()
 
-    def handle(self, text: str) -> str:
+    def handle(self, text: str) -> list[str]:
         with self._lock:
             self._reset_timer()
-            return self.agent.chat_collect(text)
+            return self.agent.chat_yield(text)
 
     def _reset_timer(self) -> None:
         """Restart the inactivity countdown."""
@@ -80,10 +80,10 @@ def get_session(channel: str, user_id: str) -> Agent:
     return _sessions[key].agent
 
 
-def handle(channel: str, user_id: str, text: str) -> str:
+def handle(channel: str, user_id: str, text: str) -> list[str]:
     """
-    Process one user message and return the agent's response.
-    Resets the inactivity timer on every message.
+    Process one user message and return a list of response strings.
+    Each string should be sent as a separate message for natural timing.
     """
     key = (channel, user_id)
     if key not in _sessions:

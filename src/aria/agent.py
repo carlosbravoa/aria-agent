@@ -60,7 +60,8 @@ class Agent:
         self._seed = self._few_shot_examples()
         self.history: list[dict[str, Any]] = list(self._seed)
         self.session_log    = self.ws.new_session_path()
-        self._last_response = ""  # set by _run_loop, read by chat_collect
+        self._last_response = ""  # last clean text response
+        self._responses:    list[str] = []  # all clean text responses this turn
 
     # ── System prompt ────────────────────────────────────────────────────────
 
@@ -145,22 +146,17 @@ class Agent:
 
     def chat_collect(self, user_input: str) -> str:
         """
-        Run a chat turn and return the response intended for the user.
-        Suppresses all status output (tool calls, memory saves, name prefix)
-        — safe for Telegram, WhatsApp, supervisor tasks.
-
-        Reads self._last_response which is set explicitly by _run_loop
-        at every exit point — no history scanning, no heuristics.
-        This is the definitive fix: the loop knows what the final
-        user-facing response is; we just expose it directly.
+        Run a chat turn and return all clean text responses joined.
+        Used by supervisor tasks where a single string result is needed.
+        For Telegram/WhatsApp use chat_yield() instead.
         """
-        # Suppress terminal output — channel callers don't want streamed tokens
         buf: list[str] = []
         orig = self._output
         self._output = buf.append
         orig_is_terminal  = self._is_terminal
-        self._is_terminal = False  # suppress rich rendering too
+        self._is_terminal = False
         self._last_response = ""
+        self._responses     = []
         try:
             self.chat(user_input)
         except Exception as exc:
@@ -168,11 +164,42 @@ class Agent:
             logging.getLogger(__name__).error(
                 "chat_collect exception: %s", exc, exc_info=True
             )
-            self._last_response = f"[{self.name}] Error: {exc}"
+            return f"[{self.name}] Error: {exc}"
         finally:
             self._output      = orig
             self._is_terminal = orig_is_terminal
+
+        if self._responses:
+            return "\n\n".join(self._responses)
         return self._last_response or f"[{self.name}] No response generated."
+
+    def chat_yield(self, user_input: str) -> list[str]:
+        """
+        Run a chat turn and return all clean text responses in order.
+        Each entry should be sent as a separate message — no joining.
+        Used by Telegram/WhatsApp so each response arrives immediately
+        as the agent produces it, with natural timing between messages.
+        """
+        buf: list[str] = []
+        orig = self._output
+        self._output = buf.append
+        orig_is_terminal  = self._is_terminal
+        self._is_terminal = False
+        self._last_response = ""
+        self._responses     = []
+        try:
+            self.chat(user_input)
+        except Exception as exc:
+            import logging
+            logging.getLogger(__name__).error(
+                "chat_yield exception: %s", exc, exc_info=True
+            )
+            return [f"[{self.name}] Error: {exc}"]
+        finally:
+            self._output      = orig
+            self._is_terminal = orig_is_terminal
+
+        return self._responses or [self._last_response] or [f"[{self.name}] No response generated."]
 
     def _trim_history(self) -> None:
         """Compress old RESULT blocks and drop oldest turns to stay within limits."""
@@ -201,15 +228,50 @@ class Agent:
 
         self.history = self._seed + real
 
+    def _classify_side_effect_tools(self) -> set[str]:
+        """
+        Classify loaded tools as side-effect or data tools based on their
+        descriptions. No LLM call, no user metadata — the agent decides.
+
+        Side-effect tools: send, notify, deliver, push, post, publish,
+                           schedule, queue, remind, alert, message, email (send).
+        Data tools: everything else — read, search, fetch, list, get, create
+                    (files/issues/events), analyse.
+
+        This runs once per _run_loop call and is O(n tools) — negligible cost.
+        Custom tools in ~/.aria/tools/ are classified automatically by the same
+        rules — no configuration needed from the tool author.
+        """
+        # Keywords that indicate a tool delivers output externally or schedules work.
+        # Checked against the tool name and first sentence of its description.
+        _SIDE_EFFECT_KEYWORDS = {
+            "send", "notify", "deliver", "push", "post", "publish",
+            "schedule", "queue", "remind", "alert", "dispatch", "broadcast",
+        }
+
+        side_effects: set[str] = set()
+        for t in self.tool_schemas:
+            fn   = t["function"]
+            name = fn["name"].lower()
+            desc = fn.get("description", "").lower()
+            # Take only the first sentence of the description to avoid
+            # false positives (e.g. "search and send results" is a data tool)
+            first_sentence = desc.split(".")[0]
+
+            if any(kw in name or kw in first_sentence for kw in _SIDE_EFFECT_KEYWORDS):
+                side_effects.add(fn["name"])
+
+        return side_effects
+
     # ── ReAct loop ───────────────────────────────────────────────────────────
 
     def _run_loop(self) -> None:
+        """
+        ReAct loop. Collects all clean text responses into self._responses.
+        Tool call syntax and RESULT: blocks are never included.
+        Callers receive every piece of text the agent produced for the user.
+        """
         seen_calls: list[str] = []
-        # Side-effect tools — their execution means the agent is done composing
-        # the answer and is now delivering/scheduling it. A text response after
-        # these tools is a confirmation line, not the user-facing answer.
-        _SIDE_EFFECT_TOOLS = {"notify", "schedule"}
-        side_effect_has_run = False
 
         for _ in range(_MAX_LOOPS):
             response = self._stream_response()
@@ -227,18 +289,24 @@ class Agent:
             tool_match = _TOOL_RE.search(response)
 
             if not tool_match:
-                # Pure text response — no tool call in this iteration.
+                # Pure text response — no tool call — collect it
                 clean   = re.sub(r"REMEMBER:[^\n]*\n?", "", response).strip()
                 display = clean or response.strip() or "(no response)"
                 self.ws.log_session(self.session_log, self.name, display)
                 if self.history and self.history[-1]["role"] == "assistant":
                     self.history[-1]["content"] = display
-                if not side_effect_has_run:
-                    # No side-effect tool has run yet — this is the user-facing answer.
-                    # Could be a simple reply, or the summary produced after data fetching.
-                    self._last_response = display
-                # After side-effect tools, text is a confirmation — do not deliver.
+                self._responses.append(display)
+                # Also keep _last_response for backwards compat (summarise_session etc.)
+                self._last_response = display
                 return
+
+            # Text before TOOL: marker — collect it if non-empty
+            pre_tool = response[:tool_match.start()].strip()
+            pre_tool = re.sub(r"REMEMBER:[^\n]*\n?", "", pre_tool).strip()
+            if pre_tool:
+                self._responses.append(pre_tool)
+                self._last_response = pre_tool
+                self.ws.log_session(self.session_log, self.name, pre_tool)
 
             tool_name = tool_match.group("tool_name")
             raw_args  = tool_match.group("args")
@@ -250,7 +318,6 @@ class Agent:
                 self.ws.log_session(self.session_log, self.name, msg)
                 if self.history and self.history[-1]["role"] == "assistant":
                     self.history[-1]["content"] = msg
-                self._last_response = msg
                 return
             seen_calls.append(call_sig)
 
@@ -270,25 +337,12 @@ class Agent:
             if not (self.history and self.history[-1]["role"] == "assistant"):
                 self.history.append({"role": "assistant", "content": response})
             self.history.append({"role": "user", "content": f"RESULT: {result}"})
-            # Mark if a side-effect tool just ran — responses after this are confirmations
-            if tool_name in _SIDE_EFFECT_TOOLS:
-                side_effect_has_run = True
 
         if self._is_terminal:
             from rich.console import Console
             Console().print(f"\n  [yellow]⚠ Hit loop limit ({_MAX_LOOPS}).[/yellow]")
         else:
             self._output(f"[{self.name}] Hit loop limit ({_MAX_LOOPS}).\n")
-        # Ensure _last_response is set even when loop limit is hit.
-        # Use the last clean assistant message from history as fallback.
-        if not self._last_response:
-            seed_len = len(self._seed)
-            for msg in reversed(self.history[seed_len:]):
-                if msg["role"] == "assistant":
-                    content = (msg.get("content") or "").strip()
-                    if content and not content.startswith("TOOL:"):
-                        self._last_response = content
-                        break
 
     # ── Streaming ────────────────────────────────────────────────────────────
 
