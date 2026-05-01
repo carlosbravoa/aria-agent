@@ -205,6 +205,11 @@ class Agent:
 
     def _run_loop(self) -> None:
         seen_calls: list[str] = []
+        # Side-effect tools — their execution means the agent is done composing
+        # the answer and is now delivering/scheduling it. A text response after
+        # these tools is a confirmation line, not the user-facing answer.
+        _SIDE_EFFECT_TOOLS = {"notify", "schedule"}
+        side_effect_has_run = False
 
         for _ in range(_MAX_LOOPS):
             response = self._stream_response()
@@ -222,12 +227,17 @@ class Agent:
             tool_match = _TOOL_RE.search(response)
 
             if not tool_match:
-                clean   = re.sub(r"TOOL:.*", "", response, flags=re.DOTALL).strip()
+                # Pure text response — no tool call in this iteration.
+                clean   = re.sub(r"REMEMBER:[^\n]*\n?", "", response).strip()
                 display = clean or response.strip() or "(no response)"
                 self.ws.log_session(self.session_log, self.name, display)
                 if self.history and self.history[-1]["role"] == "assistant":
                     self.history[-1]["content"] = display
-                self._last_response = display
+                if not side_effect_has_run:
+                    # No side-effect tool has run yet — this is the user-facing answer.
+                    # Could be a simple reply, or the summary produced after data fetching.
+                    self._last_response = display
+                # After side-effect tools, text is a confirmation — do not deliver.
                 return
 
             tool_name = tool_match.group("tool_name")
@@ -260,6 +270,9 @@ class Agent:
             if not (self.history and self.history[-1]["role"] == "assistant"):
                 self.history.append({"role": "assistant", "content": response})
             self.history.append({"role": "user", "content": f"RESULT: {result}"})
+            # Mark if a side-effect tool just ran — responses after this are confirmations
+            if tool_name in _SIDE_EFFECT_TOOLS:
+                side_effect_has_run = True
 
         if self._is_terminal:
             from rich.console import Console
