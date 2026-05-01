@@ -138,13 +138,29 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     )
 
     loop = asyncio.get_event_loop()
-    reply = await loop.run_in_executor(None, handle, CHANNEL, chat_id, user_text)
+    try:
+        reply = await loop.run_in_executor(None, handle, CHANNEL, chat_id, user_text)
+    except Exception as exc:
+        log.error("handle() raised exception for chat %s: %s", chat_id, exc, exc_info=True)
+        reply = f"Sorry, something went wrong: {exc}"
+
+    if not reply or not reply.strip():
+        log.warning("Empty reply for chat %s input: %r", chat_id, user_text[:80])
+        reply = "(no response)"
 
     for chunk in _split(reply):
         if chunk.strip():
-            await update.message.reply_text(  # type: ignore[union-attr]
-                _md_to_html(chunk), parse_mode="HTML"
-            )
+            try:
+                await update.message.reply_text(  # type: ignore[union-attr]
+                    _md_to_html(chunk), parse_mode="HTML"
+                )
+            except Exception as exc:
+                log.error("reply_text failed for chat %s: %s", chat_id, exc)
+                # Fallback: send as plain text without parse_mode
+                try:
+                    await update.message.reply_text(chunk)  # type: ignore[union-attr]
+                except Exception as exc2:
+                    log.error("plain reply also failed: %s", exc2)
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────

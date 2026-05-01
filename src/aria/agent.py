@@ -163,10 +163,16 @@ class Agent:
         self._last_response = ""
         try:
             self.chat(user_input)
+        except Exception as exc:
+            import logging
+            logging.getLogger(__name__).error(
+                "chat_collect exception: %s", exc, exc_info=True
+            )
+            self._last_response = f"[{self.name}] Error: {exc}"
         finally:
             self._output      = orig
             self._is_terminal = orig_is_terminal
-        return self._last_response
+        return self._last_response or f"[{self.name}] No response generated."
 
     def _trim_history(self) -> None:
         """Compress old RESULT blocks and drop oldest turns to stay within limits."""
@@ -260,6 +266,16 @@ class Agent:
             Console().print(f"\n  [yellow]⚠ Hit loop limit ({_MAX_LOOPS}).[/yellow]")
         else:
             self._output(f"[{self.name}] Hit loop limit ({_MAX_LOOPS}).\n")
+        # Ensure _last_response is set even when loop limit is hit.
+        # Use the last clean assistant message from history as fallback.
+        if not self._last_response:
+            seed_len = len(self._seed)
+            for msg in reversed(self.history[seed_len:]):
+                if msg["role"] == "assistant":
+                    content = (msg.get("content") or "").strip()
+                    if content and not content.startswith("TOOL:"):
+                        self._last_response = content
+                        break
 
     # ── Streaming ────────────────────────────────────────────────────────────
 
