@@ -161,6 +161,10 @@ def repl(agent: Agent) -> None:
             console.print("  [meta]Bye.[/]")
             break
 
+        elif cmd == "/discard":
+            console.print("  [meta]Bye. (session not saved)[/]")
+            return  # skip the close() block below
+
         elif cmd == "/help":
             console.print(_HELP_TEXT)
 
