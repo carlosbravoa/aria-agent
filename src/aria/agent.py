@@ -60,8 +60,76 @@ class Agent:
         self._seed = self._few_shot_examples()
         self.history: list[dict[str, Any]] = list(self._seed)
         self.session_log    = self.ws.new_session_path()
-        self._last_response = ""  # last clean text response
+        self._last_response   = ""  # last clean text response
+        self._active_profile  = "default"
         self._responses:    list[str] = []  # all clean text responses this turn
+
+    # ── Model profiles ───────────────────────────────────────────────────────
+
+    def list_profiles(self) -> list[dict]:
+        """
+        Return all configured model profiles.
+        Scans LLM_PROFILE1_MODEL through LLM_PROFILE9_MODEL in .env.
+        Each profile inherits LLM_BASE_URL and LLM_API_KEY if not overridden.
+        The default profile always appears first.
+        """
+        profiles = [{
+            "key":     "default",
+            "name":    "default",
+            "model":   os.environ.get("LLM_MODEL", "llama3.2"),
+            "base_url": os.environ.get("LLM_BASE_URL", ""),
+            "active":  self._active_profile == "default",
+        }]
+        for i in range(1, 10):
+            model = os.environ.get(f"LLM_PROFILE{i}_MODEL", "")
+            if not model:
+                continue
+            name = os.environ.get(f"LLM_PROFILE{i}_NAME", f"profile{i}").lower().strip()
+            profiles.append({
+                "key":     name,
+                "name":    name,
+                "model":   model,
+                "base_url": os.environ.get(f"LLM_PROFILE{i}_BASE_URL",
+                                            os.environ.get("LLM_BASE_URL", "")),
+                "active":  self._active_profile == name,
+            })
+        return profiles
+
+    def switch_profile(self, name: str) -> str:
+        """
+        Switch to a named model profile. Rebuilds the OpenAI client and
+        updates self.model. History and memory are unaffected.
+        Returns a confirmation string.
+        """
+        name = name.strip().lower()
+
+        if name == "default":
+            self.client = OpenAI(
+                base_url=os.environ["LLM_BASE_URL"],
+                api_key=os.environ.get("LLM_API_KEY", "local"),
+            )
+            self.model = os.environ.get("LLM_MODEL", "llama3.2")
+            self._active_profile = "default"
+            return f"Switched to default ({self.model})"
+
+        for i in range(1, 10):
+            model = os.environ.get(f"LLM_PROFILE{i}_MODEL", "")
+            if not model:
+                continue
+            profile_name = os.environ.get(f"LLM_PROFILE{i}_NAME",
+                                           f"profile{i}").lower().strip()
+            if profile_name == name:
+                base_url = os.environ.get(f"LLM_PROFILE{i}_BASE_URL",
+                                           os.environ.get("LLM_BASE_URL", ""))
+                api_key  = os.environ.get(f"LLM_PROFILE{i}_API_KEY",
+                                           os.environ.get("LLM_API_KEY", "local"))
+                self.client = OpenAI(base_url=base_url, api_key=api_key)
+                self.model  = model
+                self._active_profile = name
+                return f"Switched to {name} ({model})"
+
+        available = [p["name"] for p in self.list_profiles()]
+        return f"Profile '{name}' not found. Available: {', '.join(available)}"
 
     # ── System prompt ────────────────────────────────────────────────────────
 
@@ -276,6 +344,12 @@ class Agent:
         for _ in range(_MAX_LOOPS):
             response = self._stream_response()
 
+            # Network/API errors return an [error] sentinel — surface and stop
+            if response.startswith("[error]"):
+                self._responses.append(response)
+                self._last_response = response
+                return
+
             for m in _REMEMBER_RE.finditer(response):
                 note = m.group("note").strip()
                 if note:
@@ -356,11 +430,31 @@ class Agent:
         while messages and messages[-1]["role"] == "assistant":
             messages = messages[:-1]
 
-        stream = self.client.chat.completions.create(
-            model=self.model,
-            messages=messages,
-            stream=True,
-        )
+        try:
+            stream = self.client.chat.completions.create(
+                model=self.model,
+                messages=messages,
+                stream=True,
+            )
+        except Exception as exc:
+            # Network down, timeout, API error — surface clearly, don't crash
+            err_type = type(exc).__name__
+            msg = str(exc)
+            # Simplify common cases
+            if "Connection" in err_type or "connect" in msg.lower():
+                friendly = "No connection to LLM — check your network and LLM_BASE_URL."
+            elif "timeout" in msg.lower() or "Timeout" in err_type:
+                friendly = "LLM request timed out — the server may be overloaded."
+            elif "401" in msg or "403" in msg or "Unauthorized" in msg:
+                friendly = "LLM authentication failed — check LLM_API_KEY in ~/.aria/.env."
+            else:
+                friendly = f"LLM error ({err_type}): {msg}"
+            if self._is_terminal:
+                from rich.console import Console
+                Console().print(f"\n  [red]⚠ {friendly}[/red]")
+            else:
+                self._output(f"\n⚠ {friendly}\n")
+            return f"[error] {friendly}"
 
         full_text    = ""
         line_buf     = ""

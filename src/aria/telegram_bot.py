@@ -75,7 +75,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     agent = get_session(CHANNEL, str(update.effective_chat.id))  # type: ignore[union-attr]
     await update.message.reply_text(  # type: ignore[union-attr]
         f"✦ {agent.name} ready.\n\n"
-        "Commands: /memory /tools /clear /save <note> /version"
+        "Commands: /memory /tools /clear /save <note> /version /model [name]"
     )
 
 
@@ -109,6 +109,26 @@ async def cmd_version(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     from aria import __version__
     agent = get_session(CHANNEL, str(update.effective_chat.id))  # type: ignore[union-attr]
     await update.message.reply_text(f"{agent.name} {__version__}")  # type: ignore[union-attr]
+
+
+async def cmd_model(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _is_allowed(update):
+        return
+    chat_id = str(update.effective_chat.id)  # type: ignore[union-attr]
+    agent   = get_session(CHANNEL, chat_id)
+    args    = context.args or []
+    if not args:
+        # List profiles
+        lines = []
+        for p in agent.list_profiles():
+            active = " ✓" if p["active"] else ""
+            lines.append(f"<code>{p['name']:12}</code> {p['model']}{active}")
+        await update.message.reply_text(  # type: ignore[union-attr]
+            "\n".join(lines), parse_mode="HTML"
+        )
+    else:
+        result = agent.switch_profile(args[0])
+        await update.message.reply_text(result)  # type: ignore[union-attr]
 
 
 async def cmd_save(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -189,6 +209,7 @@ def main() -> None:
     app.add_handler(CommandHandler("tools",  cmd_tools))
     app.add_handler(CommandHandler("clear",  cmd_clear))
     app.add_handler(CommandHandler("version", cmd_version))
+    app.add_handler(CommandHandler("model",   cmd_model))
     app.add_handler(CommandHandler("save",   cmd_save, has_args=True))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_message))
 

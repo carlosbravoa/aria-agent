@@ -26,6 +26,23 @@ AGENT_NAME=Aria
 
 # ── Optional overrides ────────────────────────────────────────────────
 # Uncomment to move the workspace or custom tools directory elsewhere
+# ── Model profiles (optional) ────────────────────────────────────────
+# Switch with /model <name> in REPL or Telegram
+# Unset fields inherit from LLM_BASE_URL / LLM_API_KEY above
+# LLM_PROFILE1_NAME=fast
+# LLM_PROFILE1_MODEL=claude-haiku-4-5-20251001
+# LLM_PROFILE1_BASE_URL=   # optional
+# LLM_PROFILE1_API_KEY=    # optional
+#
+# LLM_PROFILE2_NAME=local
+# LLM_PROFILE2_MODEL=llama3.2
+# LLM_PROFILE2_BASE_URL=http://localhost:11434/v1
+# LLM_PROFILE2_API_KEY=ollama
+#
+# LLM_PROFILE3_NAME=strong
+# LLM_PROFILE3_MODEL=claude-opus-4-6
+
+# ── Path overrides ───────────────────────────────────────────────────
 # ARIA_WORKSPACE=~/.aria/workspace
 # ARIA_TOOLS_DIR=~/.aria/tools
 

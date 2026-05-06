@@ -167,6 +167,24 @@ def repl(agent: Agent) -> None:
         elif cmd == "/version":
             console.print(f"  [agent]{agent.name}[/] [meta]v{__version__}[/]")
 
+        elif cmd == "/models":
+            console.rule("[meta]Model profiles[/]")
+            for p in agent.list_profiles():
+                active = " ← active" if p["active"] else ""
+                console.print(
+                    f"  [cmd]{p['name']:12}[/] [meta]{p['model']}[/][success]{active}[/]"
+                )
+            console.rule()
+
+        elif cmd == "/model":
+            if not rest:
+                # Show current model
+                active = next(p for p in agent.list_profiles() if p["active"])
+                console.print(f"  [agent]{active['name']}[/] [meta]{active['model']}[/]")
+            else:
+                result = agent.switch_profile(rest.strip())
+                console.print(f"  [success]{result}[/]")
+
         elif cmd == "/memory":
             console.rule("[meta]Memory[/]")
             console.print(agent.ws.load_memory())
@@ -196,12 +214,22 @@ def repl(agent: Agent) -> None:
             console.print(f"  [error]Unknown command: {cmd}[/]  Type /help for commands.")
 
         else:
-            agent.chat(user)
+            try:
+                agent.chat(user)
+            except KeyboardInterrupt:
+                # Ctrl+C mid-response — cancel this turn, keep the session
+                console.print("\n  [meta](interrupted)[/]")
+            except Exception as exc:
+                console.print(f"\n  [error]⚠ Unexpected error: {exc}[/]")
+                console.print("  [meta]Session is intact — you can keep chatting.[/]")
 
-    # Summarise and save session on exit
+    # Summarise and save session on exit — always, even after errors
     console.print("  [meta]Saving session summary...[/]", end=" ")
-    agent.close()
-    console.print("[success]done.[/]")
+    try:
+        agent.close()
+        console.print("[success]done.[/]")
+    except Exception:
+        console.print("[meta]skipped.[/]")
 
 
 def main() -> None:

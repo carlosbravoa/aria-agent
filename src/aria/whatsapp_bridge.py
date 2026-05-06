@@ -105,6 +105,26 @@ class _Handler(http.server.BaseHTTPRequestHandler):
 
         log.info("WhatsApp message from %s: %s", sender, text[:80])
 
+        # Handle /model commands directly without going through the agent
+        stripped = text.strip()
+        if stripped.lower() in ("/models", "/model"):
+            from aria.channel import get_session
+            agent = get_session(CHANNEL, sender)
+            lines = []
+            for p in agent.list_profiles():
+                active = " ✓" if p["active"] else ""
+                lines.append(f"{'*' + p['name'] + '*':14} {p['model']}{active}")
+            self._respond({"reply": "\n".join(lines)})
+            return
+
+        if stripped.lower().startswith("/model "):
+            profile_name = stripped[7:].strip()
+            from aria.channel import get_session
+            agent = get_session(CHANNEL, sender)
+            result = agent.switch_profile(profile_name)
+            self._respond({"reply": result})
+            return
+
         # Run through the agent (blocking — bridge runs handler in a thread)
         responses = handle(CHANNEL, sender, text)
         reply = "\n\n".join(r for r in responses if r.strip())
