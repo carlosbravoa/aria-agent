@@ -98,7 +98,7 @@ class Workspace:
     def load_memory(self) -> str:
         # Exclude last_session.md — it is loaded separately as ## Previous Session
         # to avoid it appearing twice in the system prompt.
-        excluded = {"last_session.md"}
+        excluded = {"last_session.md", "notify_feed.md"}
         parts = [
             f.read_text(encoding="utf-8")
             for f in sorted((self.root / "memory").glob("*.md"))
@@ -113,7 +113,36 @@ class Workspace:
             f.write(f"\n<!-- {ts} -->\n{note.strip()}\n")
         path.chmod(0o600)
 
-    # ── Session summaries ─────────────────────────────────────────────────────
+    # ── Notify feed ──────────────────────────────────────────────────────────
+
+    def append_notify_feed(self, message: str) -> None:
+        """Record a proactively sent message so the agent has context
+        when the user replies. Kept to last 10 entries to stay lean."""
+        feed_path = self.root / "memory" / "notify_feed.md"
+        ts      = datetime.now().strftime("%Y-%m-%d %H:%M")
+        marker  = "<!-- " + ts + " -->"
+        line    = "- " + message.strip()[:500]
+        entry   = chr(10) + marker + chr(10) + line + chr(10)
+        if feed_path.exists():
+            existing = feed_path.read_text(encoding="utf-8")
+        else:
+            existing = "# Recent Proactive Messages" + chr(10)
+        # Keep last 9 entries + new one = 10
+        sep    = chr(10) + "<!-- "
+        parts  = existing.split(sep)
+        header = parts[0]
+        recent = parts[1:][-9:]
+        content = header + (sep.join([""] + recent) if recent else "") + entry
+        _secure_write(feed_path, content)
+
+    def load_notify_feed(self) -> str | None:
+        """Return recent proactive messages, or None if none exist."""
+        feed_path = self.root / "memory" / "notify_feed.md"
+        if not feed_path.exists():
+            return None
+        return feed_path.read_text(encoding="utf-8").strip()
+
+        # ── Session summaries ─────────────────────────────────────────────────────
 
     def last_session_summary(self) -> str | None:
         """Return the most recent session summary, or None if none exists."""

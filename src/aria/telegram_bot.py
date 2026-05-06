@@ -153,6 +153,13 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     chat_id = str(update.effective_chat.id)  # type: ignore[union-attr]
     user_text = update.message.text or ""  # type: ignore[union-attr]
 
+    # If the user replied to a bot message, prepend the original text
+    # so the agent understands what they're responding to.
+    replied_to = update.message.reply_to_message  # type: ignore[union-attr]
+    if replied_to and replied_to.text:
+        original  = replied_to.text.strip()[:500]
+        user_text = f"[Replying to: {original}]\n\n{user_text}"
+
     await context.bot.send_chat_action(
         chat_id=int(chat_id), action=ChatAction.TYPING
     )

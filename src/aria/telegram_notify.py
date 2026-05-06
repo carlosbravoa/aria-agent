@@ -123,3 +123,12 @@ def send(text: str, chat_id: int | None = None) -> None:
             except urllib.error.HTTPError as e:
                 body_err = e.read().decode(errors="replace")
                 raise RuntimeError(f"Telegram API error {e.code}: {body_err}") from e
+
+    # Record in notify feed so the agent has context when user replies
+    try:
+        from aria import config
+        from aria.workspace import Workspace
+        ws = Workspace(config.workspace_dir())
+        ws.append_notify_feed(text)
+    except Exception:
+        pass  # best-effort — never block on feed write

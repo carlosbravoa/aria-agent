@@ -139,6 +139,9 @@ class Agent:
         tool_docs    = self._build_tool_docs()
         last_session = self.ws.last_session_summary()
         prev_block   = last_session if last_session else "_No previous session._"
+        notify_feed  = self.ws.load_notify_feed()
+        notify_block = (f"## Recent Proactive Messages\n{notify_feed}\n\n"
+                        if notify_feed else "")
 
         return (
             f"{soul}\n\n"
@@ -146,6 +149,7 @@ class Agent:
             f"{memory}\n\n"
             "## Previous Session\n"
             f"{prev_block}\n\n"
+            f"{notify_block}"
             "## Tool Protocol\n"
             "To call a tool, output EXACTLY these two lines with no other text before them:\n\n"
             "TOOL: <tool_name>\n"
