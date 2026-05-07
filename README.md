@@ -1,8 +1,16 @@
-# Why Aria and what it can do
+# Aria Agent
+
+A lean AI agent that runs against any OpenAI-compatible LLM endpoint — local
+(Ollama, LM Studio) or cloud (Anthropic, OpenAI) — with persistent markdown
+workspace, pluggable tools, session continuity, autonomous memory reflection,
+and a rich terminal interface. Optionally extends to Telegram, WhatsApp, and
+scheduled background tasks.
+
+## Why Aria (if there is OpenClaw and others already out there)
 
 I created this agent after experimenting with OpenClaw and noticing its tremendously high token consumption for relatively simple tasks — handling emails, fetching web content, managing reminders. The codebase is a mixture of many technologies, and context handling balloons quickly. So I decided to build my own: leaner, simpler, with stricter context handling, and capable of running well with local LLMs (which is why tool handling works differently here than in most agents).
 
-The result is an agent that will impress you with how useful it can be while remaining trivial to maintain — and the best part: you pay a tiny fraction of what you would with OpenClaw. My daily usage covers managing personal email, scheduling reminders in ways a normal calendar cannot, handling to-dos, creating Jira tickets, summarising web content, and more. The sky is the limit. It runs on Ubuntu and works equally well as a CLI tool or as an IM agent on Telegram or WhatsApp.
+The result is an agent that will impress you with how useful it can be while remaining trivial to maintain — and the best part: you pay a tiny fraction of what you would with OpenClaw. My daily usage covers managing personal email, scheduling reminders in ways a normal calendar cannot, handling to-dos, creating Jira tickets, summarising web content, and more. It runs on Ubuntu and works equally well as a CLI tool or as an IM agent on Telegram or WhatsApp.
 
 ## What it can do today
 
@@ -18,16 +26,6 @@ The result is an agent that will impress you with how useful it can be while rem
 - **Browser automation** — connecting to an open Chrome session to interact with logged-in pages on your behalf (posting, checking content, filling forms)
 - **Knowledge base integration** — consuming content from document repositories, wikis, or vector stores for RAG-style retrieval
 - **Your suggestions** — open an issue or ask the agent itself
-
----
-
-# Aria Agent
-
-A lean AI agent that runs against any OpenAI-compatible LLM endpoint — local
-(Ollama, LM Studio) or cloud (Anthropic, OpenAI) — with persistent markdown
-workspace, pluggable tools, session continuity, autonomous memory reflection,
-and a rich terminal interface. Optionally extends to Telegram, WhatsApp, and
-scheduled background tasks.
 
 ---
 
