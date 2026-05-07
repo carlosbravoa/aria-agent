@@ -1,3 +1,26 @@
+# Why Aria and what it can do
+
+I created this agent after experimenting with OpenClaw and noticing its tremendously high token consumption for relatively simple tasks — handling emails, fetching web content, managing reminders. The codebase is a mixture of many technologies, and context handling balloons quickly. So I decided to build my own: leaner, simpler, with stricter context handling, and capable of running well with local LLMs (which is why tool handling works differently here than in most agents).
+
+The result is an agent that will impress you with how useful it can be while remaining trivial to maintain — and the best part: you pay a tiny fraction of what you would with OpenClaw. My daily usage covers managing personal email, scheduling reminders in ways a normal calendar cannot, handling to-dos, creating Jira tickets, summarising web content, and more. The sky is the limit. It runs on Ubuntu and works equally well as a CLI tool or as an IM agent on Telegram or WhatsApp.
+
+## What it can do today
+
+- **CLI (REPL)** — interactive terminal with Markdown rendering, arrow-key history, and tab completion
+- **Telegram & WhatsApp** — full IM agent with formatted responses, model switching, and proactive scheduled messages
+- **Rich tool ecosystem** — web content fetching (via trafilatura), file read/write, shell execution, Gmail and Google Drive (via gog), Google Calendar, IMAP email, Jira tickets, scheduled reminders, and memory reflection. You can also write your own tools — or ask the agent to write them for you.
+- **Multi-model support** — switch between models mid-session (e.g. local Ollama and a cloud model) with `/model <name>`
+- **Autonomous background tasks** — a supervisor runs scheduled tasks, sends proactive notifications, and reflects on past conversations to improve over time
+- **Lean token usage** — careful context management and a plain-text tool protocol mean you get impressive capability at a fraction of the cost of comparable agents
+
+## What is on the roadmap
+
+- **Browser automation** — connecting to an open Chrome session to interact with logged-in pages on your behalf (posting, checking content, filling forms)
+- **Knowledge base integration** — consuming content from document repositories, wikis, or vector stores for RAG-style retrieval
+- **Your suggestions** — open an issue or ask the agent itself
+
+---
+
 # Aria Agent
 
 A lean AI agent that runs against any OpenAI-compatible LLM endpoint — local
@@ -14,23 +37,25 @@ scheduled background tasks.
 2. [Quickstart — CLI only](#quickstart--cli-only)
 3. [Quickstart — with services](#quickstart--with-services)
 4. [Configure](#configure)
-5. [CLI commands](#cli-commands)
-6. [Interactive REPL](#interactive-repl)
-7. [Channels — Telegram](#telegram)
+5. [Model profiles](#model-profiles)
+23. [CLI commands](#cli-commands)
+23. [Interactive REPL](#interactive-repl)
+23. [Channels — Telegram](#telegram)
 8. [Channels — WhatsApp](#whatsapp)
-9. [Scheduled tasks](#scheduled-tasks)
-10. [Autonomous supervisor](#autonomous-supervisor)
-11. [Memory reflection](#memory-reflection)
-12. [Session continuity](#session-continuity)
-13. [Tool protocol](#tool-protocol)
-14. [Built-in tools](#built-in-tools)
-15. [Adding custom tools](#adding-custom-tools)
-16. [Gmail & Calendar setup](#gmail--calendar-setup)
-17. [Jira setup](#jira-setup)
-18. [IMAP setup](#imap-setup)
-19. [Running as a background service](#running-as-a-background-service)
-20. [Workspace layout](#workspace-layout)
-21. [Project structure](#project-structure)
+23. [Scheduled tasks](#scheduled-tasks)
+23. [Autonomous supervisor](#autonomous-supervisor)
+23. [Memory reflection](#memory-reflection)
+23. [Session continuity](#session-continuity)
+23. [Tool protocol](#tool-protocol)
+23. [Built-in tools](#built-in-tools)
+23. [Web fetching](#web-fetching)
+23. [Adding custom tools](#adding-custom-tools)
+23. [Gmail & Calendar setup](#gmail--calendar-setup)
+23. [Jira setup](#jira-setup)
+23. [IMAP setup](#imap-setup)
+23. [Running as a background service](#running-as-a-background-service)
+23. [Workspace layout](#workspace-layout)
+23. [Project structure](#project-structure)
 
 ---
 
@@ -41,6 +66,7 @@ scheduled background tasks.
 | Requirement | Notes |
 |-------------|-------|
 | Python 3.11+ | `python3 --version` to check |
+| System libraries | Some trafilatura dependencies may need system packages (see [Web fetching](#web-fetching)) |
 | pip | Usually bundled with Python |
 | An OpenAI-compatible LLM endpoint | Anthropic, OpenAI, Ollama, LM Studio, etc. |
 
@@ -224,6 +250,75 @@ TELEGRAM_ALLOWED=<your chat ID>
 
 > **Avoid** on-device runtimes like MediaPipe/Gemma — limited context window
 > and unreliable structured output cause tool-call failures.
+
+---
+
+## Model profiles
+
+Aria supports up to 9 named model profiles that can be switched mid-session without losing conversation history, memory, or tools.
+
+### Configuration
+
+Add profiles to `~/.aria/.env`. Unset fields inherit from the default `LLM_*` values:
+
+```ini
+# Default profile — unchanged from existing config
+LLM_BASE_URL=https://api.anthropic.com/v1
+LLM_API_KEY=sk-ant-...
+LLM_MODEL=claude-sonnet-4-6
+
+# Profile 1 — fast model (inherits BASE_URL and API_KEY from default)
+LLM_PROFILE1_NAME=fast
+LLM_PROFILE1_MODEL=claude-haiku-4-5-20251001
+
+# Profile 2 — local model (different endpoint)
+LLM_PROFILE2_NAME=local
+LLM_PROFILE2_MODEL=llama3.2
+LLM_PROFILE2_BASE_URL=http://localhost:11434/v1
+LLM_PROFILE2_API_KEY=ollama
+
+# Profile 3 — more powerful model
+LLM_PROFILE3_NAME=strong
+LLM_PROFILE3_MODEL=claude-opus-4-6
+```
+
+Profiles are numbered 1–9. Each has an optional `NAME` used for switching — if no name is set it defaults to `profile1`, `profile2`, etc.
+
+### Switching profiles
+
+**REPL:**
+```
+/models
+  ──────────────────────────────────
+  default      claude-sonnet-4-6   ← active
+  fast         claude-haiku-4-5-20251001
+  local        llama3.2
+  ──────────────────────────────────
+
+/model fast
+  Switched to fast (claude-haiku-4-5-20251001)
+
+/model default
+  Switched to default (claude-sonnet-4-6)
+
+/model
+  fast  claude-haiku-4-5-20251001   (shows current)
+```
+
+**Telegram:**
+```
+/model          → lists all profiles with ✓ on active
+/model fast     → switches and confirms
+/model default  → back to default
+```
+
+**WhatsApp:**
+```
+/models         → lists all profiles
+/model fast     → switches and confirms
+```
+
+> **Note:** Profile switches are per-session and per-channel. The supervisor always uses the default profile for scheduled tasks.
 
 ---
 
@@ -481,7 +576,7 @@ at startup — no registration needed.
 |---------------|---------------------------------------------------------------------------|
 | `file_access` | Read, write, append, patch, list, delete files. Supports `base64` encoding and paginated reads (`offset`/`limit`). Read/write restricted to configured directories. |
 | `shell_run`   | Run shell commands or scripts. Interpreter whitelist enforced. Destructive commands require confirmation or are blocked in non-interactive mode. |
-| `web_fetch`   | Fetch readable text from a web page.                                      |
+| `web_fetch`   | Fetch readable text from a web page using trafilatura for clean content extraction. |
 | `gmail`       | Search, read, send, mark-read via `gog` CLI.                              |
 | `calendar`    | List, create, update, delete, RSVP Google Calendar events via `gog`.      |
 | `notify`      | Push a message to the user via Telegram.                                  |
@@ -518,6 +613,29 @@ ARIA_FILE_WRITE_DIRS=~/projects              # workspace always included
 
 Delete is always restricted to the workspace. Sensitive paths (`~/.ssh`,
 `~/.aria/.env`, etc.) are always blocked regardless of configuration.
+
+---
+
+## Web fetching
+
+`web_fetch` uses [trafilatura](https://trafilatura.readthedocs.io) for content extraction — the same approach as Firefox Reader Mode. It identifies the main article or documentation body and discards navigation, ads, footers, and boilerplate, dramatically improving signal-to-noise ratio compared to plain HTML stripping.
+
+trafilatura is installed automatically with `pip install .` but some of its dependencies have system-level requirements that pip alone cannot satisfy.
+
+**If `pip install .` fails** with errors related to `pandas-stubs`, `pyproj`, or similar:
+
+```bash
+# Debian/Ubuntu
+sudo apt install python3-pyproj
+pip install pandas-stubs
+pip install .   # retry
+
+# macOS
+brew install proj
+pip install .   # retry
+```
+
+If you cannot install the system dependencies, trafilatura degrades gracefully to a regex-based HTML stripper — web fetching still works, just with more noise in the output.
 
 ---
 
