@@ -242,6 +242,13 @@ def configure_env(dry_run: bool = False) -> tuple[dict[str, str], set[str]]:
     values["ARIA_REFLECT_BATCH"]        = _ask("ARIA_REFLECT_BATCH",        e("ARIA_REFLECT_BATCH")        or "10",  hint="Sessions per reflection batch")
     values["ARIA_REFLECT_MAX_LINES"]    = _ask("ARIA_REFLECT_MAX_LINES",    e("ARIA_REFLECT_MAX_LINES")    or "40",  hint="Max bullet points in patterns.md")
 
+    section("Self-update (optional)")
+    info("Used by the 'update' tool — lets the agent update itself from source.")
+    values["ARIA_SOURCE_DIR"]    = _ask("ARIA_SOURCE_DIR",    e("ARIA_SOURCE_DIR"),
+                                        hint="Path to the source directory, e.g. ~/aria-agent")
+    values["ARIA_UPDATE_BRANCH"] = _ask("ARIA_UPDATE_BRANCH", e("ARIA_UPDATE_BRANCH") or "main",
+                                        hint="Git branch to pull from")
+
     # ── Write ─────────────────────────────────────────────────────────────────
     print()
     if dry_run:

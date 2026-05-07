@@ -73,16 +73,25 @@ def _setup_readline() -> None:
 
         # Tab completion for slash commands
         _commands = [
-            "/help", "/memory", "/tools", "/clear",
-            "/save ", "/version", "/quit", "/exit",
+            "/help", "/memory", "/tools", "/clear", "/save ",
+            "/version", "/models", "/model ", "/discard", "/quit", "/exit",
         ]
 
         def _completer(text: str, state: int) -> str | None:
+            # Only complete when text starts with /
+            if not text.startswith("/"):
+                return None
             matches = [c for c in _commands if c.startswith(text)]
             return matches[state] if state < len(matches) else None
 
         readline.set_completer(_completer)
-        readline.parse_and_bind("tab: complete")
+        # Ensure / is not treated as a word delimiter so completion
+        # triggers on the full /command text
+        readline.set_completer_delims(" \t\n")
+        # menu-complete cycles through matches one at a time on repeated Tab —
+        # more reliable across Linux distributions than "complete"
+        readline.parse_and_bind("tab: menu-complete")
+        readline.parse_and_bind('"\\e[Z": menu-complete-backward')  # Shift+Tab goes back
 
     except ImportError:
         pass  # Windows — degrade gracefully
