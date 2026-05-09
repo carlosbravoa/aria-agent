@@ -2,7 +2,7 @@
 aria/workspace.py — Persistent markdown storage.
 
 Layout (all under the configured root, default ~/.aria/workspace/):
-  memory/           long-term facts, user prefs, last-session summary
+  memory/           long-term facts, conversation window, patterns, notify feed
   soul/             agent identity and persona
   sessions/         per-session conversation logs (chmod 700, files 600)
   tools_registry/   auto-generated tool docs
@@ -15,37 +15,47 @@ import re
 from datetime import datetime
 from pathlib import Path
 
+_WINDOW_MESSAGES  = int(os.environ.get("ARIA_WINDOW_MESSAGES",  "15"))
+_WINDOW_MSG_CHARS = int(os.environ.get("ARIA_WINDOW_MSG_CHARS", "300"))
 
 # ── Secret redaction ──────────────────────────────────────────────────────────
-# Applied to all session log writes. Conservative patterns only — high
-# confidence to avoid false positives on legitimate content.
 _SECRET_RE = re.compile(
     r"""(?ix)
-    # KEY=value or KEY: value patterns
     (?:password|passwd|secret|token|api[_\-]?key|auth[_\-]?key|
        access[_\-]?key|private[_\-]?key|bearer)
     \s*[=:]\s*\S+
-    # AWS access key IDs
     | (?:AKIA|AGPA|AIDA|AROA|AIPA|ANPA|ANVA|ASIA)[A-Z0-9]{16}
-    # OpenAI / Anthropic key prefix
     | sk-[a-zA-Z0-9]{20,}
-    # GitHub PAT
     | ghp_[a-zA-Z0-9]{36}
-    # Slack token
     | xox[baprs]-[a-zA-Z0-9\-]+
     """
 )
 
 
 def _redact(text: str) -> str:
-    """Replace secret-shaped strings with [REDACTED] in log output."""
     return _SECRET_RE.sub("[REDACTED]", text)
 
 
 def _secure_write(path: Path, content: str) -> None:
-    """Write text to path with owner-only permissions (0o600)."""
     path.write_text(content, encoding="utf-8")
     path.chmod(0o600)
+
+
+# ── Conversation window helpers ───────────────────────────────────────────────
+_ENTRY_SEP = "\n---\n"
+
+
+def _parse_window(text: str) -> list[str]:
+    """Split window file into individual entries."""
+    return [e.strip() for e in text.split(_ENTRY_SEP) if e.strip()]
+
+
+def _format_entry(role: str, content: str, agent_name: str) -> str:
+    label   = "User" if role == "user" else agent_name
+    snippet = content.strip()[:_WINDOW_MSG_CHARS]
+    if len(content.strip()) > _WINDOW_MSG_CHARS:
+        snippet += "…"
+    return f"**{label}:** {snippet}"
 
 
 class Workspace:
@@ -54,7 +64,6 @@ class Workspace:
         for sub in ("memory", "soul", "sessions", "tools_registry"):
             d = self.root / sub
             d.mkdir(parents=True, exist_ok=True)
-        # Restrict sensitive directories to owner-only (rwx------)
         for sub in ("memory", "soul", "sessions"):
             (self.root / sub).chmod(0o700)
         self._bootstrap(agent_name=os.environ.get("AGENT_NAME", "Agent"))
@@ -82,10 +91,7 @@ class Workspace:
             )
         memory_file = self.root / "memory" / "core.md"
         if not memory_file.exists():
-            _secure_write(
-                memory_file,
-                "# Core Memory\n\n_Nothing stored yet._\n",
-            )
+            _secure_write(memory_file, "# Core Memory\n\n_Nothing stored yet._\n")
 
     # ── Soul ─────────────────────────────────────────────────────────────────
 
@@ -96,9 +102,7 @@ class Workspace:
     # ── Memory ───────────────────────────────────────────────────────────────
 
     def load_memory(self) -> str:
-        # Exclude last_session.md — it is loaded separately as ## Previous Session
-        # to avoid it appearing twice in the system prompt.
-        excluded = {"last_session.md", "notify_feed.md"}
+        excluded = {"conversation_window.md", "notify_feed.md"}
         parts = [
             f.read_text(encoding="utf-8")
             for f in sorted((self.root / "memory").glob("*.md"))
@@ -113,21 +117,56 @@ class Workspace:
             f.write(f"\n<!-- {ts} -->\n{note.strip()}\n")
         path.chmod(0o600)
 
+    # ── Conversation window ───────────────────────────────────────────────────
+
+    def append_conversation_window(self, role: str, content: str, agent_name: str) -> None:
+        """
+        Append a message to the rolling conversation window.
+        Written in real time after every exchange so nothing is lost on crash.
+        """
+        path  = self.root / "memory" / "conversation_window.md"
+        entry = _format_entry(role, _redact(content), agent_name)
+
+        if path.exists():
+            existing = path.read_text(encoding="utf-8")
+        else:
+            existing = ""
+
+        content_new = (existing + _ENTRY_SEP + entry) if existing else entry
+        _secure_write(path, content_new)
+
+    def trim_conversation_window(self) -> None:
+        """
+        Trim the window to the last ARIA_WINDOW_MESSAGES entries.
+        Called on clean exit (close()) — not during the session.
+        """
+        path = self.root / "memory" / "conversation_window.md"
+        if not path.exists():
+            return
+        entries = _parse_window(path.read_text(encoding="utf-8"))
+        if len(entries) <= _WINDOW_MESSAGES:
+            return
+        trimmed = entries[-_WINDOW_MESSAGES:]
+        _secure_write(path, _ENTRY_SEP.join(trimmed))
+
+    def load_conversation_window(self) -> str | None:
+        """Return the conversation window content, or None if empty."""
+        path = self.root / "memory" / "conversation_window.md"
+        if not path.exists():
+            return None
+        text = path.read_text(encoding="utf-8").strip()
+        return text if text else None
+
     # ── Notify feed ──────────────────────────────────────────────────────────
 
     def append_notify_feed(self, message: str) -> None:
-        """Record a proactively sent message so the agent has context
-        when the user replies. Kept to last 10 entries to stay lean."""
+        """Record a proactively sent message — kept to last 10 entries."""
         feed_path = self.root / "memory" / "notify_feed.md"
         ts      = datetime.now().strftime("%Y-%m-%d %H:%M")
         marker  = "<!-- " + ts + " -->"
         line    = "- " + message.strip()[:500]
         entry   = chr(10) + marker + chr(10) + line + chr(10)
-        if feed_path.exists():
-            existing = feed_path.read_text(encoding="utf-8")
-        else:
-            existing = "# Recent Proactive Messages" + chr(10)
-        # Keep last 9 entries + new one = 10
+        existing = feed_path.read_text(encoding="utf-8") if feed_path.exists() else "# Recent Proactive Messages" + chr(10)
         sep    = chr(10) + "<!-- "
         parts  = existing.split(sep)
         header = parts[0]
@@ -136,32 +175,10 @@ class Workspace:
         _secure_write(feed_path, content)
 
     def load_notify_feed(self) -> str | None:
-        """Return recent proactive messages, or None if none exist."""
         feed_path = self.root / "memory" / "notify_feed.md"
         if not feed_path.exists():
             return None
         return feed_path.read_text(encoding="utf-8").strip()
-
-        # ── Session summaries ─────────────────────────────────────────────────────
-
-    def last_session_summary(self) -> str | None:
-        """Return the most recent session summary, or None if none exists."""
-        summary_file = self.root / "memory" / "last_session.md"
-        if summary_file.exists():
-            return summary_file.read_text(encoding="utf-8").strip()
-        return None
-
-    def save_session_summary(self, summary: str) -> None:
-        """Overwrite the rolling last-session summary file."""
-        path = self.root / "memory" / "last_session.md"
-        ts = datetime.now().strftime("%Y-%m-%d %H:%M")
-        lines = [
-            "# Last Session Summary\n",
-            f"<!-- {ts} -->\n\n",
-            _redact(summary.strip()),
-            "\n",
-        ]
-        _secure_write(path, "".join(lines))
 
     # ── Session logs ──────────────────────────────────────────────────────────
 
@@ -171,7 +188,6 @@ class Workspace:
 
     def log_session(self, path: Path, role: str, content: str) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
-        # Create with owner-only permissions before first write
         if not path.exists():
             path.touch(mode=0o600)
         ts = datetime.now().strftime("%H:%M:%S")
@@ -181,7 +197,6 @@ class Workspace:
     # ── Reflection support ───────────────────────────────────────────────────
 
     def unanalysed_sessions(self, watermark_file: str = "reflect_watermark") -> list[Path]:
-        """Return session log files not yet analysed, sorted oldest-first."""
         sessions_dir = self.root / "sessions"
         watermark    = self.root / "memory" / watermark_file
         all_sessions = sorted(sessions_dir.glob("session_*.md"))
@@ -191,20 +206,13 @@ class Workspace:
         return all_sessions
 
     def update_watermark(self, session_path: Path, watermark_file: str = "reflect_watermark") -> None:
-        """Advance the watermark to this session so it won't be re-analysed."""
         watermark = self.root / "memory" / watermark_file
         watermark.write_text(session_path.stem, encoding="utf-8")
 
     def save_patterns(self, patterns: str) -> None:
-        """Overwrite memory/patterns.md with extracted patterns."""
         path = self.root / "memory" / "patterns.md"
         ts = datetime.now().strftime("%Y-%m-%d %H:%M")
-        lines = [
-            "# Observed Patterns\n",
-            f"<!-- last updated {ts} -->\n\n",
-            f"{patterns.strip()}\n",
-        ]
-        _secure_write(path, "".join(lines))
+        _secure_write(path, "# Observed Patterns\n" + f"<!-- last updated {ts} -->\n\n" + f"{patterns.strip()}\n")
 
     def load_patterns(self) -> str | None:
         path = self.root / "memory" / "patterns.md"

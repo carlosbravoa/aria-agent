@@ -137,8 +137,9 @@ class Agent:
         soul         = self.ws.load_soul()
         memory       = self.ws.load_memory()
         tool_docs    = self._build_tool_docs()
-        last_session = self.ws.last_session_summary()
-        prev_block   = last_session if last_session else "_No previous session._"
+        window      = self.ws.load_conversation_window()
+        window_block = (f"## Recent Conversation\n{window}\n\n"
+                        if window else "")
         notify_feed  = self.ws.load_notify_feed()
         notify_block = (f"## Recent Proactive Messages\n{notify_feed}\n\n"
                         if notify_feed else "")
@@ -147,9 +148,7 @@ class Agent:
             f"{soul}\n\n"
             "## Memory\n"
             f"{memory}\n\n"
-            "## Previous Session\n"
-            f"{prev_block}\n\n"
-            f"{notify_block}"
+            f"{window_block}"            f"{notify_block}"
             "## Tool Protocol\n"
             "To call a tool, output EXACTLY these two lines with no other text before them:\n\n"
             "TOOL: <tool_name>\n"
@@ -213,6 +212,7 @@ class Agent:
         """Send a message; output goes to self._output callback."""
         self.history.append({"role": "user", "content": user_input})
         self.ws.log_session(self.session_log, "user", user_input)
+        self.ws.append_conversation_window("user", user_input, self.name)
         self._trim_history()
         self._run_loop()
 
@@ -374,8 +374,8 @@ class Agent:
                 if self.history and self.history[-1]["role"] == "assistant":
                     self.history[-1]["content"] = display
                 self._responses.append(display)
-                # Also keep _last_response for backwards compat (summarise_session etc.)
                 self._last_response = display
+                self.ws.append_conversation_window("assistant", display, self.name)
                 return
 
             # Text before TOOL: marker — collect it if non-empty
@@ -573,89 +573,12 @@ class Agent:
 
     # ── Session continuity ────────────────────────────────────────────────────
 
-    def summarise_session(self) -> str | None:
-        """
-        Summarise the current session for continuity in the next one.
-
-        Strategy:
-        - 0 real turns → None (nothing happened)
-        - 1-2 turns → save last user message + last assistant answer verbatim
-          (cheap, no LLM call, preserves actual content)
-        - 3+ turns → LLM summarises into bullet points
-
-        Never returns None for a session that had real exchanges — always
-        saves something so last_session.md stays current.
-        """
-        seed_len = len(self._seed)
-        real = self.history[seed_len:]
-        if not real:
-            return None
-
-        # Build transcript — skip RESULT: blocks (tool output noise)
-        turns: list[tuple[str, str]] = []  # (role, content)
-        for msg in real:
-            role    = msg["role"]
-            content = (msg.get("content") or "").strip()
-            if not content:
-                continue
-            if role == "user" and content.startswith("RESULT:"):
-                continue
-            if role in ("user", "assistant") and not content.startswith("TOOL:"):
-                turns.append((role, content))
-
-        if not turns:
-            return None
-
-        # ── Short session: save verbatim snippet, no LLM call ─────────────────
-        if len(turns) <= 2:
-            lines = []
-            for role, content in turns:
-                label   = "User asked" if role == "user" else f"{self.name} answered"
-                snippet = content[:400] + ("…" if len(content) > 400 else "")
-                lines.append(f"- {label}: {snippet}")
-            return "\n".join(lines)
-
-        # ── Longer session: LLM summary ───────────────────────────────────────
-        transcript = "\n".join(
-            f"{'User' if r == 'user' else self.name}: {c[:300]}{'…' if len(c) > 300 else ''}"
-            for r, c in turns
-        )
-        prompt = (
-            "Summarise this conversation in 3-5 bullet points for use as context "
-            "in the next session. Include: what the user asked, what was found or "
-            "done, and any key content or facts from the answers. Be specific — "
-            "include actual content, not just meta-descriptions like 'user asked about X'.\n\n"
-            + transcript
-        )
-
-        try:
-            resp = self.client.chat.completions.create(
-                model=self.model,
-                messages=[{"role": "user", "content": prompt}],
-                stream=False,
-            )
-            return resp.choices[0].message.content.strip() or None
-        except Exception:
-            # Fallback: save verbatim snippet rather than losing the session
-            lines = []
-            for role, content in turns[-4:]:  # last 2 exchanges
-                label   = "User asked" if role == "user" else f"{self.name} answered"
-                snippet = content[:400] + ("…" if len(content) > 400 else "")
-                lines.append(f"- {label}: {snippet}")
-            return "\n".join(lines)
-
     def close(self) -> None:
-        """Summarise this session and persist it to last_session.md.
-        Always writes — never leaves a stale older summary in place.
         """
-        summary = self.summarise_session()
-        if summary:
-            self.ws.save_session_summary(summary)
-        else:
-            # No real exchanges this session — record a minimal timestamp
-            # marker so the model knows the file is current.
-            ts = __import__("datetime").datetime.now().strftime("%Y-%m-%d %H:%M")
-            self.ws.save_session_summary(f"- No exchange recorded ({ts}).")
+        Trim the conversation window to the last ARIA_WINDOW_MESSAGES entries.
+        No LLM call — fast, works offline, safe to call on any exit path.
+        """
+        self.ws.trim_conversation_window()
 
     # ── Tool execution ────────────────────────────────────────────────────────
 

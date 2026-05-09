@@ -237,7 +237,7 @@ def repl(agent: Agent) -> None:
                 console.print("  [meta]Session is intact — you can keep chatting.[/]")
 
     # Summarise and save session on exit — always, even after errors
-    console.print("  [meta]Saving session summary...[/]", end=" ")
+    console.print("  [meta]Saving conversation window...[/]", end=" ")
     try:
         agent.close()
         console.print("[success]done.[/]")
