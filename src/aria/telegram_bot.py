@@ -1,19 +1,8 @@
 """
-aria/telegram_bot.py — Telegram interface for Aria.
+aria/telegram_bot.py — Telegram bot interface.
 
-Uses the shared channel session registry so history is isolated per
+Session model: one Agent per (channel, chat_id) — history is isolated per
 (telegram, chat_id) but workspace/memory is shared with other channels.
-
-Setup:
-  1. Add to ~/.aria/.env:
-       TELEGRAM_TOKEN=<your bot token>
-       TELEGRAM_ALLOWED=<comma-separated chat IDs>
-
-  2. Run:
-       aria-telegram
-
-Dependencies:
-  pip install "aria-agent[telegram]"
 """
 
 from __future__ import annotations
@@ -32,25 +21,20 @@ from telegram.ext import (
     filters,
 )
 
-from aria import config
-from aria.channel import get_session, handle
+from aria import config, __version__
+from aria.channel import get_session, handle, shutdown
 
-log = logging.getLogger(__name__)
-
+log     = logging.getLogger(__name__)
 CHANNEL = "telegram"
 
 
-def _allowed_ids() -> set[int]:
-    raw = os.environ.get("TELEGRAM_ALLOWED", "")
-    return {int(x.strip()) for x in raw.split(",") if x.strip().isdigit()}
-
+# ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _is_allowed(update: Update) -> bool:
-    allowed = _allowed_ids()
-    if not allowed:
-        log.warning("TELEGRAM_ALLOWED is not set — rejecting all users.")
-        return False
-    return update.effective_chat.id in allowed  # type: ignore[union-attr]
+    allowed_raw = os.environ.get("TELEGRAM_ALLOWED", "")
+    allowed     = {s.strip() for s in allowed_raw.split(",") if s.strip()}
+    chat_id     = str(update.effective_chat.id)  # type: ignore[union-attr]
+    return chat_id in allowed
 
 
 def _split(text: str, max_len: int = 4000) -> list[str]:
@@ -64,18 +48,39 @@ def _split(text: str, max_len: int = 4000) -> list[str]:
             buf = line
         else:
             buf += line
-    return (chunks + [buf]) if buf else (chunks or [text[:max_len]])
+    if buf:
+        chunks.append(buf)
+    return chunks or [text[:max_len]]
 
 
-# ── Command handlers ─────────────────────────────────────────────────────────
+async def _reply(update: Update, text: str, parse_html: bool = True) -> None:
+    """Send a reply, with HTML formatting and plain-text fallback."""
+    from aria.telegram_notify import _md_to_html
+    for chunk in _split(text):
+        if not chunk.strip():
+            continue
+        try:
+            body = _md_to_html(chunk) if parse_html else chunk
+            mode = "HTML" if parse_html else None
+            await update.message.reply_text(body, parse_mode=mode)  # type: ignore[union-attr]
+        except Exception as exc:
+            log.error("reply_text failed: %s", exc)
+            try:
+                await update.message.reply_text(chunk)  # type: ignore[union-attr]
+            except Exception as exc2:
+                log.error("plain reply also failed: %s", exc2)
+
+
+# ── Command handlers ──────────────────────────────────────────────────────────
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not _is_allowed(update):
+        await update.message.reply_text("Unauthorised.")  # type: ignore[union-attr]
         return
     agent = get_session(CHANNEL, str(update.effective_chat.id))  # type: ignore[union-attr]
-    await update.message.reply_text(  # type: ignore[union-attr]
-        f"✦ {agent.name} ready.\n\n"
-        "Commands: /memory /tools /clear /save <note> /version /model [name]"
+    await _reply(update,
+        f"👋 Hi, I'm **{agent.name}** v{__version__}.\n"
+        f"Commands: /memory /tools /clear /save /version /model [name] /models"
     )
 
 
@@ -83,16 +88,18 @@ async def cmd_memory(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     if not _is_allowed(update):
         return
     agent = get_session(CHANNEL, str(update.effective_chat.id))  # type: ignore[union-attr]
-    await update.message.reply_text(agent.ws.load_memory() or "_Nothing stored yet._")  # type: ignore[union-attr]
+    await _reply(update, agent.ws.load_memory() or "_Nothing stored yet._")
 
 
 async def cmd_tools(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not _is_allowed(update):
         return
     agent = get_session(CHANNEL, str(update.effective_chat.id))  # type: ignore[union-attr]
-    lines = [f"• {t['function']['name']} — {t['function']['description'].splitlines()[0]}"
-             for t in agent.tool_schemas]
-    await update.message.reply_text("\n".join(lines) or "No tools loaded.")  # type: ignore[union-attr]
+    lines = []
+    for t in agent.tool_schemas:
+        fn = t["function"]
+        lines.append(f"• <b>{fn['name']}</b> — {fn['description'][:60]}")
+    await _reply(update, "\n".join(lines) or "No tools loaded.")
 
 
 async def cmd_clear(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -100,25 +107,25 @@ async def cmd_clear(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     agent = get_session(CHANNEL, str(update.effective_chat.id))  # type: ignore[union-attr]
     agent.history = agent._few_shot_examples()
-    await update.message.reply_text("History cleared.")  # type: ignore[union-attr]
+    await _reply(update, "History cleared.")
 
 
 async def cmd_version(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not _is_allowed(update):
         return
-    from aria import __version__
     agent = get_session(CHANNEL, str(update.effective_chat.id))  # type: ignore[union-attr]
-    await update.message.reply_text(f"{agent.name} {__version__}")  # type: ignore[union-attr]
+    await _reply(update, f"{agent.name} v{__version__}")
 
 
 async def cmd_model(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle both /model and /models."""
     if not _is_allowed(update):
         return
     chat_id = str(update.effective_chat.id)  # type: ignore[union-attr]
     agent   = get_session(CHANNEL, chat_id)
     args    = context.args or []
     if not args:
-        # List profiles
+        # List all profiles
         lines = []
         for p in agent.list_profiles():
             active = " ✓" if p["active"] else ""
@@ -128,7 +135,7 @@ async def cmd_model(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         )
     else:
         result = agent.switch_profile(args[0])
-        await update.message.reply_text(result)  # type: ignore[union-attr]
+        await _reply(update, result)
 
 
 async def cmd_save(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -136,11 +143,11 @@ async def cmd_save(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     note = " ".join(context.args or [])
     if not note:
-        await update.message.reply_text("Usage: /save <note>")  # type: ignore[union-attr]
+        await _reply(update, "Usage: /save <note>")
         return
     agent = get_session(CHANNEL, str(update.effective_chat.id))  # type: ignore[union-attr]
     agent.ws.append_memory(note)
-    await update.message.reply_text(f"Saved: {note}")  # type: ignore[union-attr]
+    await _reply(update, f"Saved: {note}")
 
 
 # ── Message handler ───────────────────────────────────────────────────────────
@@ -150,7 +157,7 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         await update.message.reply_text("Unauthorised.")  # type: ignore[union-attr]
         return
 
-    chat_id = str(update.effective_chat.id)  # type: ignore[union-attr]
+    chat_id   = str(update.effective_chat.id)  # type: ignore[union-attr]
     user_text = update.message.text or ""  # type: ignore[union-attr]
 
     # If the user replied to a bot message, prepend the original text
@@ -176,21 +183,7 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         responses = ["(no response)"]
 
     for response in responses:
-        if not response.strip():
-            continue
-        for chunk in _split(response):
-            if not chunk.strip():
-                continue
-            try:
-                await update.message.reply_text(  # type: ignore[union-attr]
-                    _md_to_html(chunk), parse_mode="HTML"
-                )
-            except Exception as exc:
-                log.error("reply_text failed for chat %s: %s", chat_id, exc)
-                try:
-                    await update.message.reply_text(chunk)  # type: ignore[union-attr]
-                except Exception as exc2:
-                    log.error("plain reply also failed: %s", exc2)
+        await _reply(update, response)
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
@@ -216,7 +209,8 @@ def main() -> None:
     app.add_handler(CommandHandler("tools",  cmd_tools))
     app.add_handler(CommandHandler("clear",  cmd_clear))
     app.add_handler(CommandHandler("version", cmd_version))
-    app.add_handler(CommandHandler("model",   cmd_model))
+    app.add_handler(CommandHandler("model",  cmd_model))
+    app.add_handler(CommandHandler("models", cmd_model))   # alias
     app.add_handler(CommandHandler("save",   cmd_save, has_args=True))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_message))
 
@@ -224,7 +218,6 @@ def main() -> None:
     try:
         app.run_polling(drop_pending_updates=True)
     finally:
-        from aria.channel import shutdown
         shutdown()
 
 

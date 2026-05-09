@@ -57,11 +57,8 @@ def _md_to_html(text: str) -> str:
     """
     Convert common Markdown patterns to Telegram HTML.
     Telegram HTML supports: <b>, <i>, <u>, <s>, <code>, <pre>.
-
-    We escape the raw text first then convert markdown patterns so that
-    any literal < > & in the content don't get interpreted as HTML tags.
     """
-    # 1. Escape HTML special chars in the raw text
+    # 1. Escape HTML special chars first
     result = html.escape(text)
 
     # 2. Fenced code blocks ```lang\n...\n``` → <pre><code>...</code></pre>
@@ -73,21 +70,19 @@ def _md_to_html(text: str) -> str:
     )
 
     # 3. Inline code `...` → <code>...</code>
-    result = re.sub(r"`([^`]+)`", r"<code>\1</code>", result)
+    result = re.sub(r"`([^`\n]+)`", r"<code>\1</code>", result)
 
-    # 4. Bold **text** or __text__ → <b>text</b>
-    result = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", result)
-    result = re.sub(r"__(.+?)__",     r"<b>\1</b>", result)
+    # 4. Bold **text** or __text__ → <b>text</b>  (DOTALL for multiline)
+    result = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", result, flags=re.DOTALL)
+    result = re.sub(r"__(.+?)__",     r"<b>\1</b>", result, flags=re.DOTALL)
 
-    # 5. Italic *text* or _text_ → <i>text</i>
-    #    Use word-boundary lookahead to avoid matching inside words
-    result = re.sub(r"(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)", r"<i>\1</i>", result)
-    result = re.sub(r"(?<!_)_(?!_)(.+?)(?<!_)_(?!_)",       r"<i>\1</i>", result)
+    # 5. Italic *text* → <i>text</i>  (only single *, not **)
+    result = re.sub(r"\*([^*\n]+?)\*", r"<i>\1</i>", result)
 
     # 6. Strikethrough ~~text~~ → <s>text</s>
-    result = re.sub(r"~~(.+?)~~", r"<s>\1</s>", result)
+    result = re.sub(r"~~(.+?)~~", r"<s>\1</s>", result, flags=re.DOTALL)
 
-    # 7. Headers # ## ### → <b>text</b> (Telegram has no heading tag)
+    # 7. Headers # ## ### → <b>text</b>
     result = re.sub(r"^#{1,6}\s+(.+)$", r"<b>\1</b>", result, flags=re.MULTILINE)
 
     return result
