@@ -221,6 +221,27 @@ def configure_env(dry_run: bool = False) -> tuple[dict[str, str], set[str]]:
         for k in ("GMAIL_CLI", "GOG_ACCOUNT", "GOG_KEYRING_BACKEND", "GOG_KEYRING_PASSWORD"):
             values[k] = e(k)
 
+    # ── Browser automation ────────────────────────────────────────────────────
+    if "browser" in features:
+        section("Browser automation")
+        info("Requires: pip install websockets")
+        info("Start browser with: chromium --remote-debugging-port=9222 --remote-allow-origins=*")
+        values["CHROME_PROFILE_DIR"] = _ask(
+            "CHROME_PROFILE_DIR", e("CHROME_PROFILE_DIR") or "~/.config/google-chrome",
+            hint="Path to your Chrome profile directory"
+        )
+        values["CHROME_DEBUG_PORT"]  = _ask(
+            "CHROME_DEBUG_PORT", e("CHROME_DEBUG_PORT") or "9222",
+            hint="CDP remote debugging port (default 9222)"
+        )
+        values["ARIA_BROWSER_MAX_LOOPS"] = _ask(
+            "ARIA_BROWSER_MAX_LOOPS", e("ARIA_BROWSER_MAX_LOOPS") or "50",
+            hint="Max tool-call loops for browser tasks (default 50)"
+        )
+    else:
+        for k in ("CHROME_PROFILE_DIR", "CHROME_DEBUG_PORT", "ARIA_BROWSER_MAX_LOOPS"):
+            values[k] = e(k)
+
     # ── Supervisor ────────────────────────────────────────────────────────────
     if "supervisor" in features:
         section("Supervisor & reflection (optional — press Enter for defaults)")

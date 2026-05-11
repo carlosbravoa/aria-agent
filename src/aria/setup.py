@@ -45,6 +45,9 @@ AGENT_NAME=Aria
 # ── Path overrides ───────────────────────────────────────────────────
 # ARIA_WORKSPACE=~/.aria/workspace
 # ARIA_TOOLS_DIR=~/.aria/tools
+# Path to the source directory — used by the update tool
+# ARIA_SOURCE_DIR=~/aria-agent
+# ARIA_UPDATE_BRANCH=main
 
 # ── File access security ─────────────────────────────────────────────
 # Directories the agent can READ (colon-separated, workspace always included)
@@ -73,6 +76,16 @@ AGENT_NAME=Aria
 
 # ── Agent behaviour ──────────────────────────────────────────────────
 # Max tool-call loops per turn (raise if agent hits limit on complex tasks)
+# Conversation window
+# ── Browser automation (optional) ───────────────────────────────────
+# CHROME_PROFILE_DIR=~/.config/google-chrome
+# CHROME_DEBUG_PORT=9222
+# ARIA_BROWSER_MAX_LOOPS=50
+
+# Conversation window
+# ARIA_WINDOW_MESSAGES=15   # how many messages to keep across sessions
+# ARIA_WINDOW_MSG_CHARS=300 # max chars per message before truncation
+
 # ARIA_MAX_LOOPS=20
 # Max conversation history turns kept in context
 # ARIA_MAX_HISTORY=60

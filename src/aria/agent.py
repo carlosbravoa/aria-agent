@@ -34,8 +34,9 @@ _TOOL_RE = re.compile(
 )
 _REMEMBER_RE = re.compile(r"REMEMBER:\s*(?P<note>[^\n]+)")
 # Both configurable via ~/.aria/.env
-_MAX_LOOPS   = int(os.environ.get("ARIA_MAX_LOOPS",   "20"))
-_MAX_HISTORY = int(os.environ.get("ARIA_MAX_HISTORY", "60"))
+_MAX_LOOPS         = int(os.environ.get("ARIA_MAX_LOOPS",         "20"))
+_BROWSER_MAX_LOOPS = int(os.environ.get("ARIA_BROWSER_MAX_LOOPS", "50"))
+_MAX_HISTORY       = int(os.environ.get("ARIA_MAX_HISTORY",       "60"))
 
 
 class Agent:
@@ -344,8 +345,16 @@ class Agent:
         Callers receive every piece of text the agent produced for the user.
         """
         seen_calls: list[str] = []
+        # Use a higher loop limit when browser tool is involved — browser tasks
+        # require many sequential steps (navigate, snapshot, click, type...).
+        browser_task = any(
+            "browser" in (msg.get("content") or "")
+            for msg in self.history[-3:]
+            if msg["role"] == "user"
+        )
+        loop_limit = _BROWSER_MAX_LOOPS if browser_task else _MAX_LOOPS
 
-        for _ in range(_MAX_LOOPS):
+        for _ in range(loop_limit):
             response = self._stream_response()
 
             # Network/API errors return an [error] sentinel — surface and stop
@@ -418,9 +427,9 @@ class Agent:
 
         if self._is_terminal:
             from rich.console import Console
-            Console().print(f"\n  [yellow]⚠ Hit loop limit ({_MAX_LOOPS}).[/yellow]")
+            Console().print(f"\n  [yellow]⚠ Hit loop limit ({loop_limit}).[/yellow]")
         else:
-            self._output(f"[{self.name}] Hit loop limit ({_MAX_LOOPS}).\n")
+            self._output(f"[{self.name}] Hit loop limit ({loop_limit}).\n")
 
     # ── Streaming ────────────────────────────────────────────────────────────
 

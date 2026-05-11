@@ -6,7 +6,7 @@ workspace, pluggable tools, session continuity, autonomous memory reflection,
 and a rich terminal interface. Optionally extends to Telegram, WhatsApp, and
 scheduled background tasks.
 
-## Why Aria (if there is OpenClaw and others already out there)
+## Why Aria
 
 I created this agent after experimenting with OpenClaw and noticing its tremendously high token consumption for relatively simple tasks — handling emails, fetching web content, managing reminders. The codebase is a mixture of many technologies, and context handling balloons quickly. So I decided to build my own: leaner, simpler, with stricter context handling, and capable of running well with local LLMs (which is why tool handling works differently here than in most agents).
 
@@ -14,7 +14,7 @@ The result is an agent that will impress you with how useful it can be while rem
 
 ## What it can do today
 
-- **CLI (REPL)** — interactive terminal with Markdown rendering, arrow-key history, and tab completion
+- **CLI (REPL)** — interactive terminal with Markdown rendering, arrow-key history, and tab completion for `/` commands
 - **Telegram & WhatsApp** — full IM agent with formatted responses, model switching, and proactive scheduled messages
 - **Rich tool ecosystem** — web content fetching (via trafilatura), file read/write, shell execution, Gmail and Google Drive (via gog), Google Calendar, IMAP email, Jira tickets, scheduled reminders, and memory reflection. You can also write your own tools — or ask the agent to write them for you.
 - **Multi-model support** — switch between models mid-session (e.g. local Ollama and a cloud model) with `/model <name>`
@@ -360,7 +360,7 @@ aria-install --uninstall       # remove all services
 aria
 ```
 
-Arrow keys, history (↑/↓), and tab completion work out of the box.
+Arrow keys and history (↑/↓) work out of the box. Tab completion works for `/` commands — type `/` and press Tab to see options.
 Responses are rendered as Markdown — headings, bold, code blocks, lists.
 
 | Command        | Description                            |
@@ -581,6 +581,7 @@ at startup — no registration needed.
 | `schedule`    | Create, list, and cancel scheduled tasks for the supervisor.              |
 | `reflect`     | Trigger memory reflection on demand.                                      |
 | `jira`        | Create, search, comment, transition Jira issues via REST API.             |
+| `browser`     | Control Chrome/Chromium to browse, click, type, and read web content.    |
 | `imap`        | List, search, read, move, delete emails on any IMAP provider.             |
 | `drive`       | List, search, read, download, upload, organise Google Drive files via gog. |
 
@@ -768,6 +769,56 @@ Search shorthands the agent understands:
 "subject:invoice"           → SUBJECT "invoice"
 "unread from:bank today"    → combined
 ```
+
+---
+
+## Browser automation setup
+
+The `browser` tool lets Aria control a real browser on your behalf — navigating sites, clicking, filling forms, and reading content from pages where you are already logged in.
+
+Aria talks to Chrome/Chromium directly via the Chrome DevTools Protocol (CDP) — a simple HTTP + WebSocket API built into every Chrome/Chromium release. No Playwright, no Node.js, no bundled browsers.
+
+```bash
+# The only dependency — pure Python, ~50KB, no native code
+pip install websockets
+```
+
+### Connect to your existing browser
+
+Aria connects to your browser via Chrome DevTools Protocol (CDP). Start your browser with the debug port enabled:
+
+```bash
+# Snap Chromium (Ubuntu default)
+chromium --remote-debugging-port=9222 --remote-allow-origins=*
+
+# Google Chrome
+google-chrome --remote-debugging-port=9222 --remote-allow-origins=*
+```
+
+Add to `~/.aria/.env`:
+
+```ini
+CHROME_PROFILE_DIR=~/snap/chromium/current/.config/chromium  # snap Chromium
+# CHROME_PROFILE_DIR=~/.config/google-chrome                 # Google Chrome deb
+CHROME_DEBUG_PORT=9222
+ARIA_BROWSER_MAX_LOOPS=50
+```
+
+### Three states handled automatically
+
+| State | Aria behaviour |
+|-------|----------------|
+| Browser running with debug port | Attaches silently |
+| Browser running WITHOUT debug port | Notifies you to restart with the flag |
+| Browser not running | Launches it automatically with your profile |
+
+### Snap Chromium note
+
+Snap Chromium works with CDP on Ubuntu — the sandbox does not block the debug port. Use it directly without installing Google Chrome.
+
+### Work PC / CLI-only users
+
+If Node.js is not installed, the `browser` tool returns a clear error and is otherwise ignored. All other Aria features work normally.
 
 ---
 
