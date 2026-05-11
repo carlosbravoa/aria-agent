@@ -20,10 +20,10 @@ The result is an agent that will impress you with how useful it can be while rem
 - **Multi-model support** — switch between models mid-session (e.g. local Ollama and a cloud model) with `/model <name>`
 - **Autonomous background tasks** — a supervisor runs scheduled tasks, sends proactive notifications, and reflects on past conversations to improve over time
 - **Lean token usage** — careful context management and a plain-text tool protocol mean you get impressive capability at a fraction of the cost of comparable agents
+- **Browser automation** *(experimental)* — control your real Chrome/Chromium with existing sessions via CDP; navigate, click, read content from any logged-in site
 
 ## What is on the roadmap
 
-- **Browser automation** — connecting to an open Chrome session to interact with logged-in pages on your behalf (posting, checking content, filling forms)
 - **Knowledge base integration** — consuming content from document repositories, wikis, or vector stores for RAG-style retrieval
 - **Your suggestions** — open an issue or ask the agent itself
 
@@ -581,7 +581,7 @@ at startup — no registration needed.
 | `schedule`    | Create, list, and cancel scheduled tasks for the supervisor.              |
 | `reflect`     | Trigger memory reflection on demand.                                      |
 | `jira`        | Create, search, comment, transition Jira issues via REST API.             |
-| `browser`     | Control Chrome/Chromium to browse, click, type, and read web content.    |
+| `browser`     | *(experimental)* Control Chrome/Chromium via CDP — viewport-based snapshots, click, type, read, scroll. Uses your real sessions. |
 | `imap`        | List, search, read, move, delete emails on any IMAP provider.             |
 | `drive`       | List, search, read, download, upload, organise Google Drive files via gog. |
 
@@ -772,53 +772,100 @@ Search shorthands the agent understands:
 
 ---
 
-## Browser automation setup
+## Browser automation *(experimental)*
 
-The `browser` tool lets Aria control a real browser on your behalf — navigating sites, clicking, filling forms, and reading content from pages where you are already logged in.
+> ⚠️ **Experimental feature.** Browser automation works well for many tasks but is still being refined. Complex SPAs, heavily iframe-based pages, and sites with aggressive anti-bot measures may not work as expected. Feedback welcome.
 
-Aria talks to Chrome/Chromium directly via the Chrome DevTools Protocol (CDP) — a simple HTTP + WebSocket API built into every Chrome/Chromium release. No Playwright, no Node.js, no bundled browsers.
+The `browser` tool lets Aria control your real Chrome or Chromium browser on your behalf — navigating sites, clicking elements, filling forms, and reading content from pages where you are already logged in. Because it uses your actual browser with your existing sessions and cookies, there is no authentication to configure and no credentials to share with Aria.
 
-```bash
-# The only dependency — pure Python, ~50KB, no native code
-pip install websockets
+### How it works
+
+Most browser automation tools (Playwright, Selenium, Puppeteer) work by downloading their own browser binary and controlling it via a Node.js process. Aria takes a different approach: it talks directly to your existing Chrome or Chromium via the **Chrome DevTools Protocol (CDP)** — a standard HTTP + WebSocket API built into every Chrome/Chromium release. No Playwright, no Node.js, no bundled browsers.
+
+```
+Aria (Python) ──httpx──▶ http://localhost:9222/json  (tab list)
+              ──websockets──▶ ws://localhost:9222/...  (CDP commands)
+                                        │
+                                        ▼
+                            Your Chrome/Chromium
+                            (with your sessions)
 ```
 
-### Connect to your existing browser
+**Dependencies:** `websockets` (pure Python, ~50KB) — already included as a core dependency. Nothing else to install.
 
-Aria connects to your browser via Chrome DevTools Protocol (CDP). Start your browser with the debug port enabled:
+### Viewport-first design
+
+Rather than parsing the entire page DOM (which can be millions of nodes on complex apps like Gmail), Aria only looks at what is currently **visible in the viewport**. This approach:
+
+- Works identically on any page regardless of complexity
+- Returns a compact, focused snapshot of what you actually see
+- Scales naturally — scroll down and the next snapshot shows the next screen
+
+For reading content, Aria extracts `innerText` from the main content element (`<main>`, `<article>`, `[role="main"]`) rather than downloading the full HTML — fast and bounded.
+
+### Setup
 
 ```bash
-# Snap Chromium (Ubuntu default)
+# 1. Start your browser with the debug port enabled
+# Snap Chromium (Ubuntu default — works out of the box)
 chromium --remote-debugging-port=9222 --remote-allow-origins=*
 
 # Google Chrome
 google-chrome --remote-debugging-port=9222 --remote-allow-origins=*
 ```
 
-Add to `~/.aria/.env`:
-
 ```ini
+# ~/.aria/.env
 CHROME_PROFILE_DIR=~/snap/chromium/current/.config/chromium  # snap Chromium
 # CHROME_PROFILE_DIR=~/.config/google-chrome                 # Google Chrome deb
 CHROME_DEBUG_PORT=9222
-ARIA_BROWSER_MAX_LOOPS=50
+ARIA_BROWSER_MAX_LOOPS=50   # browser tasks need more steps than regular tasks
 ```
 
-### Three states handled automatically
+During `aria-install`, answer **yes** to "Browser automation?" and it will ask for these values.
 
-| State | Aria behaviour |
-|-------|----------------|
-| Browser running with debug port | Attaches silently |
-| Browser running WITHOUT debug port | Notifies you to restart with the flag |
-| Browser not running | Launches it automatically with your profile |
+### Three Chrome states handled automatically
+
+| State | What happens |
+|-------|-------------|
+| Browser running with `--remote-debugging-port` | Aria attaches to the active tab silently |
+| Browser running **without** the debug flag | Aria notifies you to close it; relaunches automatically with the flag |
+| Browser not running | Aria launches it with your profile |
+
+### Available actions
+
+| Action | Description |
+|--------|-------------|
+| `open` | Navigate to a URL |
+| `snapshot` | See what is currently visible in the viewport (buttons, links, inputs, text) |
+| `read` | Extract readable text content from the current page |
+| `click` | Click an element by role + name, or by visible text |
+| `type` | Type text into a focused input field |
+| `scroll` | Scroll the page; next snapshot shows the new viewport |
+| `back` | Go back in browser history |
+| `query` | Run a JavaScript snippet for targeted data extraction |
+| `resume` | Continue a paused task (after hitting the loop limit) |
+| `close_tab` | Close the current tab |
+
+### Long tasks and continuation
+
+Browser tasks often require many steps. The loop limit is automatically raised to `ARIA_BROWSER_MAX_LOOPS=50` (vs the normal 20) when browser actions are detected. If a task is still paused at the limit:
+
+```
+You: archive all newsletters in Gmail
+Aria: ⚠ Reached step limit. Progress: archived 18/31, on page 2.
+
+You: continue the browser task
+Aria: Resuming — last URL: mail.google.com, progress: archived 18/31...
+```
 
 ### Snap Chromium note
 
-Snap Chromium works with CDP on Ubuntu — the sandbox does not block the debug port. Use it directly without installing Google Chrome.
+Snap Chromium (the Ubuntu default) works with CDP — the snap sandbox does not block the debug port. No need to install Google Chrome as a deb package.
 
-### Work PC / CLI-only users
+### Work PC / CLI-only
 
-If Node.js is not installed, the `browser` tool returns a clear error and is otherwise ignored. All other Aria features work normally.
+If `websockets` is not installed or the browser is not reachable, the tool returns a clear error and all other Aria features work normally. The `browser` tool has no impact on the CLI-only experience.
 
 ---
 
