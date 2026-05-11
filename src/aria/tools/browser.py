@@ -50,13 +50,13 @@ DEFINITION = {
         "properties": {
             "action": {
                 "type": "string",
-                "enum": ["open", "snapshot", "read", "query", "click", "type",
+                "enum": ["open", "snapshot", "read", "eval", "click", "type",
                          "scroll", "back", "resume", "close_tab"],
                 "description": (
                     "snapshot = page structure for interaction (buttons, links, inputs). "
                     "read = full readable text content (articles, emails, docs). "
-                    "query = run JavaScript to extract specific data (best for complex apps like Gmail). "
-                    "Use query when snapshot is too large or the page is a complex web app."
+                    "eval = run JavaScript directly in the page — can click, extract data, modify DOM. "
+                    "Use eval for canvas apps, complex SPAs, or anything snapshot cannot reach."
                 ),
             },
             "url":       {"type": "string",  "description": "URL to navigate to (for open)."},
@@ -68,7 +68,7 @@ DEFINITION = {
             "amount":    {"type": "integer", "description": "Scroll pixels (default 500).", "default": 500},
             "progress":  {"type": "string",  "description": "Task progress note (saved for resume)."},
             "selector":  {"type": "string",  "description": "CSS selector to scope snapshot to a specific part of the page."},
-            "script":    {"type": "string",  "description": "JavaScript to evaluate for query action. Should return a JSON-serialisable value."},
+            "script":    {"type": "string",  "description": "JavaScript to run for eval action. Can return JSON-serialisable data, or null for side-effects (click, focus, etc.)"},
         },
         "required": ["action"],
     },
@@ -265,56 +265,68 @@ def _get_session() -> CDPSession:
 #      Accessibility.queryAXTree (targeted, not full tree).
 #   3. Format into compact readable lines.
 
-_VISIBLE_ELEMENTS_JS = """
+_VISIBLE_ELEMENTS_JS = r"""
 (function() {
     const vw = window.innerWidth;
     const vh = window.innerHeight;
     const seen = new Set();
     const results = [];
 
-    // Walk all elements, keep those visible in viewport
+    // Only interactive/semantic elements — avoids div/span/p which leak script content
     const all = document.querySelectorAll(
-        'a, button, input, select, textarea, [role], h1, h2, h3, h4, ' +
-        'li, td, th, label, p, span, div, img, nav, main, article, section'
+        'a[href], button, input, select, textarea, ' +
+        '[role="button"], [role="link"], [role="menuitem"], [role="tab"], ' +
+        '[role="checkbox"], [role="radio"], [role="combobox"], [role="searchbox"], ' +
+        '[role="textbox"], [role="option"], [role="switch"], ' +
+        'h1, h2, h3, h4, h5, label, th, [aria-label], [aria-labelledby]'
     );
 
     for (const el of all) {
-        const r = el.getBoundingClientRect();
-        // Must be in viewport and have size
-        if (r.width < 1 || r.height < 1) continue;
-        if (r.bottom < 0 || r.top > vh) continue;
-        if (r.right < 0 || r.left > vw) continue;
+        // Skip hidden elements
+        const cs = window.getComputedStyle(el);
+        if (cs.display === 'none' || cs.visibility === 'hidden' ||
+            parseFloat(cs.opacity) < 0.1) continue;
 
-        // Skip if ancestor already included
+        const r = el.getBoundingClientRect();
+        if (r.width < 2 || r.height < 2) continue;
+        if (r.bottom < 0 || r.top > vh) continue;
+        if (r.right  < 0 || r.left > vw) continue;
+
+        // Skip if already covered by an ancestor
         let skip = false;
         for (const s of seen) {
-            if (s.contains(el)) { skip = true; break; }
+            if (s !== el && s.contains(el)) { skip = true; break; }
         }
         if (skip) continue;
 
-        const role = el.getAttribute('role') ||
-                     el.tagName.toLowerCase();
-        const text = (el.getAttribute('aria-label') ||
-                      el.getAttribute('title') ||
-                      el.textContent || '').trim().slice(0, 120);
-
-        if (!text && !['input','select','textarea','img','button'].includes(
-                el.tagName.toLowerCase())) continue;
-
         const tag  = el.tagName.toLowerCase();
         const type = el.getAttribute('type') || '';
-        const val  = el.value !== undefined ? String(el.value).slice(0, 80) : '';
-        const href = el.href ? el.href.slice(0, 100) : '';
+        const aria = el.getAttribute('aria-label') || '';
+        const ttl  = el.getAttribute('title') || '';
+        // Use innerText (rendered text only — never includes script content)
+        const inner = (el.innerText || '').trim().replace(/[ \t\n\r]+/g, ' ').slice(0, 120);
+        const text  = (aria || ttl || inner).trim();
 
-        results.push({role, tag, type, text, val, href,
-                      top: Math.round(r.top), left: Math.round(r.left)});
+        // Skip no-label elements (except self-describing inputs)
+        if (!text && !['input', 'select', 'textarea'].includes(tag)) continue;
+
+        // Skip if text looks like leaked code
+        if (/^(var |function |const |let |\{|\()/.test(text)) continue;
+
+        const role        = el.getAttribute('role') || tag;
+        const val         = (el.value !== undefined && el.value !== '') ? String(el.value).slice(0, 80) : '';
+        const href        = el.href ? el.href.slice(0, 100) : '';
+        const placeholder = el.placeholder || '';
+
+        results.push({ role, tag, type, text, val, href, placeholder,
+                       top: Math.round(r.top), left: Math.round(r.left) });
         seen.add(el);
-
-        if (results.length >= 120) break;
+        if (results.length >= 100) break;
     }
     return results;
 })()
 """
+
 
 
 def _get_snapshot(session: CDPSession, selector: str = "") -> str:
@@ -535,13 +547,13 @@ def _execute_action(session: CDPSession, action: str, args: dict) -> str:
         case "snapshot":
             return _get_snapshot(session, selector=args.get("selector", ""))
 
-        case "query":
+        case "eval":
             # Run JavaScript to extract specific data.
             # The agent writes targeted JS for the specific page/task,
             # avoiding the need to parse the full accessibility tree.
             script = args.get("script", "")
             if not script:
-                return "[browser] 'script' is required for query action."
+                return "[browser] 'script' is required for eval action."
             try:
                 result = session.send("Runtime.evaluate", {
                     "expression": script,
@@ -615,39 +627,63 @@ def _execute_action(session: CDPSession, action: str, args: dict) -> str:
             return f"URL: {url}\n\n{text}"
 
         case "click":
-            role = args.get("role", "")
-            name = args.get("name", "")
-            text = args.get("text", "")
+            role     = args.get("role", "")
+            name     = args.get("name", "")
+            text     = args.get("text", "")
+            selector = args.get("selector", "")
 
-            # Find element via JS using accessibility or text matching
-            if role and name:
+            if selector:
                 expr = (
                     f"(function(){{"
-                    f"  var els = document.querySelectorAll('[role=\"{role}\"]');"
-                    f"  return Array.from(els).find(e => e.textContent.trim().includes({json.dumps(name)}))?.getBoundingClientRect();"
+                    f"  var el = document.querySelector({json.dumps(selector)});"
+                    f"  return el ? el.getBoundingClientRect() : null;"
+                    f"}})()"
+                )
+            elif role and name:
+                expr = (
+                    f"(function(){{"
+                    f"  var role = {json.dumps(role)};"
+                    f"  var name = {json.dumps(name.lower())};"
+                    f"  var els = document.querySelectorAll('[role="' + role + '"], ' + role);"
+                    f"  var el = Array.from(els).find(e => "
+                    f"    (e.innerText||e.getAttribute('aria-label')||'').toLowerCase().includes(name));"
+                    f"  return el ? el.getBoundingClientRect() : null;"
+                    f"}})()"
+                )
+            elif name:
+                expr = (
+                    f"(function(){{"
+                    f"  var name = {json.dumps(name.lower())};"
+                    f"  var candidates = document.querySelectorAll("
+                    f"    'a,button,input,select,textarea,[role]');"
+                    f"  var el = Array.from(candidates).find(e => "
+                    f"    (e.getAttribute('aria-label')||e.placeholder||"
+                    f"     e.innerText||'').toLowerCase().includes(name));"
+                    f"  return el ? el.getBoundingClientRect() : null;"
                     f"}})()"
                 )
             elif text:
                 expr = (
                     f"(function(){{"
-                    f"  var walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);"
-                    f"  var node; while(node = walker.nextNode()) {{"
-                    f"    if(node.textContent.trim().includes({json.dumps(text)})) {{"
-                    f"      return node.parentElement.getBoundingClientRect();"
-                    f"    }}"
-                    f"  }}"
+                    f"  var txt = {json.dumps(text.lower())};"
+                    f"  var candidates = document.querySelectorAll("
+                    f"    'a,button,input,label,[role=\"button\"],[role=\"link\"],[role=\"menuitem\"]');"
+                    f"  var el = Array.from(candidates).find(e => "
+                    f"    (e.innerText||e.getAttribute('aria-label')||'').toLowerCase().includes(txt));"
+                    f"  return el ? el.getBoundingClientRect() : null;"
                     f"}})()"
                 )
             else:
-                return "[browser] Provide role+name or text to identify the element."
+                return "[browser] Provide selector, role+name, name, or text to identify the element."
 
             result = session.send("Runtime.evaluate",
                 {"expression": expr, "returnByValue": True}, timeout=5)
             rect = result.get("result", {}).get("value")
 
             if not rect:
-                snap = _get_snapshot(session)
-                return f"[browser] Element not found.\n\nCurrent page:\n{snap}"
+                snap  = _get_snapshot(session)
+                label = selector or name or text or f"{role}+{name}"
+                return f"[browser] Element not found: '{label}'\n\nCurrent page:\n{snap}"
 
             x = rect["x"] + rect["width"]  / 2
             y = rect["y"] + rect["height"] / 2
@@ -684,7 +720,8 @@ def _execute_action(session: CDPSession, action: str, args: dict) -> str:
                 session.send("Input.dispatchKeyEvent", {
                     "type": "char", "text": char,
                 })
-            return f"Typed: {value[:50]}"
+            field_label = args.get("name", "") or "focused field"
+            return f"Typed {len(value)} chars into [{field_label}]"
 
         case "scroll":
             direction = args.get("direction", "down")
