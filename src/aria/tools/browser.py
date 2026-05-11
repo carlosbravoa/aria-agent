@@ -510,11 +510,26 @@ def _execute_action(session: CDPSession, action: str, args: dict) -> str:
                 return "[browser] 'url' is required for open."
             if not url.startswith(("http://", "https://")):
                 url = "https://" + url
-            session.send("Page.navigate", {"url": url}, timeout=15)
-            # Wait for load
+
+            # Open in a new tab — don't clobber whatever the user has open
+            try:
+                import httpx
+                # Use CDP /json/new endpoint to create a new tab
+                r = httpx.get(f"{_CDP_HTTP}/json/new?{url}", timeout=5)
+                new_tab = r.json()
+                ws_url  = new_tab.get("webSocketDebuggerUrl")
+                if not ws_url:
+                    raise RuntimeError("No WebSocket URL in new tab response")
+                # Reconnect session to the new tab
+                session.close()
+                session._ws_url = ws_url
+                session.connect()
+            except Exception as e:
+                # Fallback: navigate in current tab
+                session.send("Page.navigate", {"url": url}, timeout=15)
+
+            # Wait for page to settle
             time.sleep(2)
-            session.send("Runtime.evaluate",
-                {"expression": "document.readyState", "returnByValue": True})
             return _get_snapshot(session)
 
         case "snapshot":
