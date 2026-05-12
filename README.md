@@ -15,7 +15,7 @@ The result is an agent that will impress you with how useful it can be while rem
 ## What it can do today
 
 - **CLI (REPL)** — interactive terminal with Markdown rendering, arrow-key history, and tab completion for `/` commands
-- **Telegram & WhatsApp** — full IM agent with formatted responses, model switching, and proactive scheduled messages
+- **Telegram & WhatsApp** — full IM agent with formatted responses, model switching, and proactive scheduled messages. WhatsApp is still an untested feature.
 - **Rich tool ecosystem** — web content fetching (via trafilatura), file read/write, shell execution, Gmail and Google Drive (via gog), Google Calendar, IMAP email, Jira tickets, scheduled reminders, and memory reflection. You can also write your own tools — or ask the agent to write them for you.
 - **Multi-model support** — switch between models mid-session (e.g. local Ollama and a cloud model) with `/model <name>`
 - **Autonomous background tasks** — a supervisor runs scheduled tasks, sends proactive notifications, and reflects on past conversations to improve over time
@@ -26,6 +26,11 @@ The result is an agent that will impress you with how useful it can be while rem
 
 - **Knowledge base integration** — consuming content from document repositories, wikis, or vector stores for RAG-style retrieval
 - **Your suggestions** — open an issue or ask the agent itself
+
+## Quick start 
+- clone this repo
+- `pip install.`
+- Run `aria-install`
 
 ---
 
@@ -96,12 +101,12 @@ The simplest setup. Just a terminal, no bots, no background services.
 
 ```bash
 # 1. Clone and install
-git clone https://github.com/your-org/aria-agent.git
+git clone https://github.com/carlosbravoa/aria-agent.git
 cd aria-agent
 pip install .
 
 # 2. Run — wizard creates ~/.aria/.env on first launch
-aria
+aria-install
 ```
 
 The wizard will ask for your LLM endpoint and model. When it asks about
