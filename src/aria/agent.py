@@ -33,6 +33,7 @@ _TOOL_RE = re.compile(
     re.DOTALL,
 )
 _REMEMBER_RE = re.compile(r"REMEMBER:\s*(?P<note>[^\n]+)")
+_LEARN_RE    = re.compile(r"LEARN:\s*(?P<note>[^\n]+)")
 # Both configurable via ~/.aria/.env
 _MAX_LOOPS         = int(os.environ.get("ARIA_MAX_LOOPS",         "20"))
 _BROWSER_MAX_LOOPS = int(os.environ.get("ARIA_BROWSER_MAX_LOOPS", "50"))
