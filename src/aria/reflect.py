@@ -26,6 +26,7 @@ log = logging.getLogger(__name__)
 _BATCH_SIZE        = int(os.environ.get("ARIA_REFLECT_BATCH",         "10"))
 _SESSION_CHARS     = int(os.environ.get("ARIA_REFLECT_SESSION_CHARS",  "3000"))
 _MAX_PATTERN_LINES = int(os.environ.get("ARIA_REFLECT_MAX_LINES",      "40"))
+_MAX_OPS_LINES     = int(os.environ.get("ARIA_OPSMEM_MAX_LINES",       "40"))
 
 
 def _read_session(path: Path) -> str:
@@ -91,7 +92,37 @@ def _consolidation_prompt(new_observations: str, existing_patterns: str | None) 
     )
 
 
-def run(notify: bool = False) -> str:
+def _ops_consolidation_prompt(current_ops: str, new_observations: str) -> str:
+    """
+    Prompt for Phase 3: consolidate operational_memory.md.
+    Deduplicates entries covering the same topic, keeps most recent/accurate,
+    removes entries contradicted or superseded by recent sessions.
+    """
+    return (
+        "You are consolidating an AI assistant's operational memory — a list of "
+        "procedures and shortcuts learned from past sessions with a specific user.\n\n"
+        "## Current operational memory entries\n"
+        f"{current_ops}\n\n"
+        "## Recent session observations\n"
+        f"{new_observations}\n\n"
+        "## Task\n"
+        "Produce a clean, deduplicated operational memory list following these rules:\n"
+        f"1. Hard limit: {_MAX_OPS_LINES} entries total.\n"
+        "2. Deduplicate — if two entries cover the same topic (e.g. both mention Jira project), "
+        "keep only the most recent or most accurate one.\n"
+        "3. Correct — if a recent session shows that an entry was wrong or has changed "
+        "(e.g. an attempt failed, a new value was used successfully), update or remove it.\n"
+        "4. Prune — remove entries that are too vague to be actionable, or that describe "
+        "something the agent should figure out each time rather than memorise.\n"
+        "5. Keep entries that are specific, verified by successful use, and save meaningful "
+        "time or reduce errors in future sessions.\n"
+        "6. Preserve entries not touched by recent sessions exactly as-is.\n\n"
+        "Output only the bullet list — one entry per line, starting with '- '. "
+        "No headings, no preamble, no explanation."
+    )
+
+
+
     """Run the reflection pass. Returns a status string."""
     from aria import config
     from aria.workspace import Workspace
@@ -167,9 +198,37 @@ def run(notify: bool = False) -> str:
         ws.update_watermark(last_analysed)
 
     line_count = len([l for l in consolidated.splitlines() if l.strip()])
+
+    # ── Phase 3: consolidate operational_memory.md ────────────────────────────
+    ops_status = ""
+    current_ops = ws.load_operational_memory()
+    if current_ops:
+        log.info("Consolidating operational memory...")
+        try:
+            resp = client.chat.completions.create(
+                model=model,
+                messages=[{
+                    "role": "user",
+                    "content": _ops_consolidation_prompt(current_ops, new_observations),
+                }],
+                stream=False,
+            )
+            consolidated_ops = resp.choices[0].message.content.strip()
+            # Write back — reuse append_operational_memory by rewriting the file
+            ops_path = ws.root / "memory" / "operational_memory.md"
+            from aria.workspace import _secure_write
+            _secure_write(ops_path, "# Operational Memory\n" + consolidated_ops + "\n")
+            ops_lines = len([l for l in consolidated_ops.splitlines() if l.strip()])
+            ops_status = f", operational memory consolidated to {ops_lines} entries"
+            log.info("Operational memory consolidated to %d entries.", ops_lines)
+        except Exception as exc:
+            log.warning("Operational memory consolidation failed: %s", exc)
+    else:
+        log.info("No operational memory to consolidate.")
+
     msg = (
         f"Reflection complete: {total_analysed} sessions analysed, "
-        f"patterns consolidated to {line_count} lines."
+        f"patterns consolidated to {line_count} lines{ops_status}."
     )
     log.info(msg)
 

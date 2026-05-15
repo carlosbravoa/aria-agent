@@ -144,12 +144,20 @@ class Agent:
         notify_feed  = self.ws.load_notify_feed()
         notify_block = (f"## Recent Proactive Messages\n{notify_feed}\n\n"
                         if notify_feed else "")
+        ops_mem      = self.ws.load_operational_memory()
+        ops_block    = (
+            "## Operational Memory (suggestions from past sessions)\n"
+            "These are procedures and shortcuts learned from experience. "
+            "Use them as a starting point but verify if results seem wrong — "
+            "they may be outdated. If you find a better approach, update with LEARN:\n\n"
+            f"{ops_mem}\n\n"
+            if ops_mem else "")
 
         return (
             f"{soul}\n\n"
-            "## Memory\n"
+            "## Core Memory\n"
             f"{memory}\n\n"
-            f"{window_block}"            f"{notify_block}"
+            f"{ops_block}"            f"{window_block}"            f"{notify_block}"
             "## Tool Protocol\n"
             "To call a tool, output EXACTLY these two lines with no other text before them:\n\n"
             "TOOL: <tool_name>\n"
@@ -158,12 +166,21 @@ class Agent:
             "RESULT: <o>\n\n"
             "After RESULT, write your final answer in plain text.\n\n"
             f"{tool_docs}\n\n"
-            "## Saving to Memory\n"
-            "To save a fact, output this anywhere in your response:\n\n"
-            "REMEMBER: <the fact>\n\n"
+            "## Memory System\n"
+            "You have two memory files that tailor you to this user. Use them proactively.\n\n"
+            "REMEMBER: <fact>\n"
+            "  → Core memory. Permanent facts about the user: name, role, timezone, language,\n"
+            "    preferences, recurring contacts. Use when you learn something always true.\n\n"
+            "LEARN: <procedure>\n"
+            "  → Operational memory. How to be useful in this user's specific context:\n"
+            "    which accounts/tools to use for tasks, Jira project keys, calendar IDs,\n"
+            "    recurring task patterns, shortcuts discovered during tool use.\n"
+            "    The more you LEARN, the less you have to figure out from scratch each session.\n\n"
+            "Both markers can appear anywhere in your response. Write to them often.\n\n"
             "## Rules\n"
             "- Use TOOL:/INPUT: for tool calls. No other syntax works.\n"
-            "- Use REMEMBER: to persist facts.\n"
+            "- Use REMEMBER: to save user facts. Use LEARN: to save operational knowledge and "
+            "keep anything you would need to improve future session interactions.\n"
             "- Never narrate before a tool call. Emit TOOL: immediately.\n"
             "- After RESULT, answer in plain text.\n"
             "- You know your available tools from the list above — never call a tool to look them up.\n"
@@ -197,13 +214,15 @@ class Agent:
             {"role": "assistant", "content": "/tmp contains: notes.txt, report.pdf."},
             {"role": "user", "content": "What is 2+2?"},
             {"role": "assistant", "content": "4."},
-            {"role": "user", "content": "My name is <username>."},
-            {"role": "assistant", "content": "REMEMBER: User name is <username>.\nNice to meet you, <username>!"},
-            {"role": "user", "content": "scheduled task: summarise top stories from https://news.ycombinator.com"},
-            {"role": "assistant", "content": 'TOOL: web_fetch\nINPUT: {"url": "https://news.ycombinator.com", "max_chars": 2000}'},
-            {"role": "user", "content": "RESULT: 1. Story A\n2. Story B\n3. Story C"},
-            {"role": "assistant", "content": 'TOOL: notify\nINPUT: {"message": "Top HN stories:\\n1. Story A\\n2. Story B\\n3. Story C"}'},
-            {"role": "user", "content": "RESULT: [notify] Message sent."},
+            {"role": "user",      "content": "My name is <name>."},
+            {"role": "assistant", "content": "REMEMBER: User's name is <name>.\nNice to meet you, <name>!"},
+            {"role": "user",      "content": "My project tracker is at <url>."},
+            {"role": "assistant", "content": "LEARN: User's project tracker is at <url>.\nGot it, I'll use that for your projects."},
+            {"role": "user",      "content": "scheduled task: summarise top stories from <news-url>"},
+            {"role": "assistant", "content": 'TOOL: web_fetch\nINPUT: {"url": "<news-url>", "max_chars": 2000}'},
+            {"role": "user",      "content": "RESULT: 1. Story A\n2. Story B\n3. Story C"},
+            {"role": "assistant", "content": 'TOOL: notify\nINPUT: {"message": "Top stories:\\n1. Story A\\n2. Story B\\n3. Story C"}'},
+            {"role": "user",      "content": "RESULT: [notify] Message sent."},
             {"role": "assistant", "content": "Done. Summary sent."},
         ]
 
@@ -369,9 +388,19 @@ class Agent:
                     self.ws.append_memory(f"- {note}")
                     if self._is_terminal:
                         from rich.console import Console
-                        Console().print(f"  [dim]💾 saved: {note}[/dim]")
+                        Console().print(f"  [dim]💾 remembered: {note}[/dim]")
                     else:
-                        self._output(f"  💾 saved: {note}\n")
+                        self._output(f"  💾 remembered: {note}\n")
+
+            for m in _LEARN_RE.finditer(response):
+                note = m.group("note").strip()
+                if note:
+                    self.ws.append_operational_memory(f"- {note}")
+                    if self._is_terminal:
+                        from rich.console import Console
+                        Console().print(f"  [dim]📖 learned: {note}[/dim]")
+                    else:
+                        self._output(f"  📖 learned: {note}\n")
 
             tool_match = _TOOL_RE.search(response)
 
@@ -498,7 +527,7 @@ class Agent:
                         in_tool_call = True
                         line_buf = ""
                         break
-                    if line.startswith("REMEMBER:"):
+                    if line.startswith("REMEMBER:") or line.startswith("LEARN:"):
                         pass  # suppress
                     else:
                         self._output(line + "\n")

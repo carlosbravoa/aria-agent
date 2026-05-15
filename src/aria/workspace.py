@@ -102,7 +102,7 @@ class Workspace:
     # ── Memory ───────────────────────────────────────────────────────────────
 
     def load_memory(self) -> str:
-        excluded = {"conversation_window.md", "notify_feed.md"}
+        excluded = {"conversation_window.md", "notify_feed.md", "operational_memory.md"}
         parts = [
             f.read_text(encoding="utf-8")
             for f in sorted((self.root / "memory").glob("*.md"))
@@ -116,6 +116,40 @@ class Workspace:
         with path.open("a", encoding="utf-8") as f:
             f.write(f"\n<!-- {ts} -->\n{note.strip()}\n")
         path.chmod(0o600)
+
+    def append_operational_memory(self, note: str) -> None:
+        """Append an operational/procedural note to operational_memory.md.
+        Capped at ARIA_OPSMEM_MAX_LINES lines — reflection prunes stale entries.
+        """
+        import os
+        max_lines = int(os.environ.get("ARIA_OPSMEM_MAX_LINES", "40"))
+        path = self.root / "memory" / "operational_memory.md"
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M")
+        if not path.exists():
+            _secure_write(path, "# Operational Memory\n")
+        with path.open("a", encoding="utf-8") as f:
+            f.write(f"\n<!-- {ts} -->\n{note.strip()}\n")
+        path.chmod(0o600)
+        # Trim if over limit
+        content = path.read_text(encoding="utf-8")
+        lines = [l for l in content.splitlines() if l.strip()]
+        entries = [l for l in lines if not l.startswith(("#", "<!--"))]
+        if len(entries) > max_lines:
+            # Keep header + last max_lines entries
+            header = "# Operational Memory"
+            trimmed = "\n".join([header] + entries[-max_lines:])
+            _secure_write(path, trimmed + "\n")
+
+    def load_operational_memory(self) -> str | None:
+        """Return operational memory contents, or None if empty."""
+        path = self.root / "memory" / "operational_memory.md"
+        if not path.exists():
+            return None
+        text = path.read_text(encoding="utf-8").strip()
+        # Strip header line for cleaner injection
+        lines = [l for l in text.splitlines() if not l.startswith("#")]
+        content = "\n".join(lines).strip()
+        return content if content else None
 
     # ── Conversation window ───────────────────────────────────────────────────
 
