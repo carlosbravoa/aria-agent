@@ -65,6 +65,46 @@ class Agent:
         self._active_profile  = "default"
         self._responses:    list[str] = []  # all clean text responses this turn
 
+        # Background reflection — runs once per day for REPL users who don't
+        # have the supervisor running. Fires silently in a daemon thread so it
+        # never blocks the conversation. If the supervisor is running it will
+        # have already advanced the watermark, so this exits instantly.
+        self._maybe_reflect_background()
+
+    def _maybe_reflect_background(self) -> None:
+        """
+        Fire a background reflection pass if it's been long enough since the
+        last one. Uses a daemon thread so it never blocks the conversation and
+        dies cleanly if the process exits.
+
+        Only runs if ARIA_REFLECT_EVERY > 0. Works alongside the supervisor —
+        if the supervisor already advanced the watermark, reflect.run() finds
+        no new sessions and returns immediately (idempotent, negligible cost).
+        """
+        reflect_every = int(os.environ.get("ARIA_REFLECT_EVERY", "86400"))
+        if reflect_every <= 0:
+            return
+
+        # Check time since last reflection via watermark file mtime
+        watermark = self.ws.root / "memory" / "reflect_watermark"
+        if watermark.exists():
+            import time
+            age = time.time() - watermark.stat().st_mtime
+            if age < reflect_every:
+                return  # Not due yet
+
+        import threading
+
+        def _run() -> None:
+            try:
+                from aria import reflect as _reflect
+                _reflect.run(notify=False)
+            except Exception:
+                pass  # Never surface errors from background reflection
+
+        t = threading.Thread(target=_run, daemon=True, name="aria-reflect-bg")
+        t.start()
+
     # ── Model profiles ───────────────────────────────────────────────────────
 
     def list_profiles(self) -> list[dict]:
