@@ -457,12 +457,14 @@ class Agent:
                 self.ws.append_conversation_window("assistant", display, self.name)
                 return
 
-            # Text before TOOL: marker — collect it if non-empty
+            # Text before TOOL: marker — log it for analysis but never deliver.
+            # Pre-tool text is internal reasoning ("Now I have enough...",
+            # "Let me check that...") — useful in session logs for reflection
+            # but not user-facing content. Only final answers go in _responses.
             pre_tool = response[:tool_match.start()].strip()
             pre_tool = re.sub(r"REMEMBER:[^\n]*\n?", "", pre_tool).strip()
+            pre_tool = re.sub(r"LEARN:[^\n]*\n?",    "", pre_tool).strip()
             if pre_tool:
-                self._responses.append(pre_tool)
-                self._last_response = pre_tool
                 self.ws.log_session(self.session_log, self.name, pre_tool)
 
             tool_name = tool_match.group("tool_name")
