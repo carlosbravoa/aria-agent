@@ -21,6 +21,7 @@ import json
 import os
 import re
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 from openai import OpenAI
@@ -34,6 +35,33 @@ _TOOL_RE = re.compile(
 )
 _REMEMBER_RE = re.compile(r"REMEMBER:\s*(?P<note>[^\n]+)")
 _LEARN_RE    = re.compile(r"LEARN:\s*(?P<note>[^\n]+)")
+
+# Persists the last-used model profile across sessions
+_PROFILE_STATE = Path.home() / ".aria" / ".last_profile"
+
+# Markdown detection — patterns that only appear in intentional markdown
+_MD_PATTERNS = re.compile(
+    r"(\*\*[^*]+\*\*)"          # **bold**
+    r"|(__[^_]+__)"              # __bold__
+    r"|(\*[^*\n]+\*)"           # *italic*
+    r"|(^#{1,6}\s)",             # # heading
+    re.MULTILINE
+)
+# Code blocks checked separately since they span lines
+_MD_CODE = re.compile(r"```|`[^`]+`")
+# List items — only if there are multiple (single - could be a dash)
+_MD_LIST = re.compile(r"^(\s*[-*]\s.+\n){2,}", re.MULTILINE)
+
+
+def _has_markdown(text: str) -> bool:
+    """Return True if text contains intentional markdown syntax worth rendering."""
+    clean = re.sub(r"REMEMBER:[^\n]*\n?", "", text)
+    clean = re.sub(r"LEARN:[^\n]*\n?",    "", clean)
+    return bool(
+        _MD_PATTERNS.search(clean)
+        or _MD_CODE.search(clean)
+        or _MD_LIST.search(clean)
+    )
 # Both configurable via ~/.aria/.env
 _MAX_LOOPS         = int(os.environ.get("ARIA_MAX_LOOPS",         "20"))
 _BROWSER_MAX_LOOPS = int(os.environ.get("ARIA_BROWSER_MAX_LOOPS", "50"))
@@ -65,6 +93,15 @@ class Agent:
         self._last_response   = ""  # last clean text response
         self._active_profile  = "default"
         self._responses:    list[str] = []  # all clean text responses this turn
+
+        # Restore last used profile (persisted across sessions)
+        if _PROFILE_STATE.exists():
+            try:
+                saved = _PROFILE_STATE.read_text().strip()
+                if saved and saved != "default":
+                    self.switch_profile(saved)
+            except Exception:
+                pass
 
         # Background reflection — runs once per day for REPL users who don't
         # have the supervisor running. Fires silently in a daemon thread so it
@@ -152,6 +189,10 @@ class Agent:
             )
             self.model = os.environ.get("LLM_MODEL", "llama3.2")
             self._active_profile = "default"
+            try:
+                _PROFILE_STATE.write_text("default")
+            except Exception:
+                pass
             return f"Switched to default ({self.model})"
 
         for i in range(1, 10):
@@ -168,6 +209,11 @@ class Agent:
                 self.client = OpenAI(base_url=base_url, api_key=api_key)
                 self.model  = model
                 self._active_profile = name
+                try:
+                    _PROFILE_STATE.parent.mkdir(parents=True, exist_ok=True)
+                    _PROFILE_STATE.write_text(name)
+                except Exception:
+                    pass
                 return f"Switched to {name} ({model})"
 
         available = [p["name"] for p in self.list_profiles()]
@@ -595,7 +641,10 @@ class Agent:
         else:
             self._output("\n")
             # ── Option A: erase streamed text and re-render as Markdown ──────
-            if self._is_terminal and streamed_lines:
+            # Only re-render if the response actually contains markdown syntax.
+            # Plain prose should stream as-is — the renderer adds unnecessary
+            # padding and reformatting to text that wasn't meant to be markdown.
+            if self._is_terminal and streamed_lines and _has_markdown(full_text):
                 self._render_markdown_replace(streamed_lines, full_text)
 
         self.history.append({"role": "assistant", "content": full_text})
