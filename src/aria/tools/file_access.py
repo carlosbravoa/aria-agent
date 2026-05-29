@@ -7,14 +7,23 @@ Security model:
 
   Read / list:
     - Workspace (always allowed)
-    - ARIA_FILE_READ_DIRS  — colon-separated extra dirs (default: ~/Documents:~/Downloads:~/projects)
+    - ARIA_FILE_READ_DIRS  — colon-separated extra dirs
+    - authorized_dirs.json — user-granted directories (runtime, no restart needed)
 
   Write / append / patch:
     - Workspace (always allowed)
-    - ARIA_FILE_WRITE_DIRS — colon-separated extra dirs (default: none)
+    - ARIA_FILE_WRITE_DIRS — colon-separated extra dirs
+    - authorized_dirs.json — user-granted directories with write permission
 
   Delete:
     - Workspace only, always. Never outside.
+
+  Authorization flow:
+    When a path is denied, the tool returns an authorization request message.
+    The agent surfaces this to the user naturally ("I need access to X — shall I proceed?").
+    If the user agrees, the agent calls file_access with action='authorize' to grant access.
+    The original operation is then retried automatically.
+    Blocked paths can NEVER be authorized regardless of user response.
 
 Configure in ~/.aria/.env:
   ARIA_FILE_READ_DIRS=~/Documents:~/projects:~/code
@@ -24,10 +33,11 @@ Configure in ~/.aria/.env:
 from __future__ import annotations
 
 import base64
+import json
 import os
 from pathlib import Path
 
-# ── Sensitive paths — always blocked regardless of allow-list ──────────────────
+# ── Sensitive paths — always blocked, can never be authorized ─────────────────
 _BLOCKED = [
     "~/.ssh",
     "~/.gnupg",
@@ -44,6 +54,15 @@ _BLOCKED = [
     "/boot",
 ]
 
+# Authorization request sentinel — agent uses this to detect a permission request
+_AUTH_REQUEST = "[file_access:auth_required]"
+
+# Authorized dirs file — written by authorize action, read at every _safe_path call
+_MAX_READ_LINES = int(os.environ.get("ARIA_FILE_MAX_LINES", "500"))
+
+# Authorized dirs file — written by authorize action, read at every _safe_path call
+_AUTH_FILE = Path.home() / ".aria" / "authorized_dirs.json"
+
 
 def _blocked_paths() -> list[Path]:
     return [Path(p).expanduser().resolve() for p in _BLOCKED]
@@ -54,10 +73,30 @@ def _workspace() -> Path:
     return config.workspace_dir().resolve()
 
 
+def _load_authorized() -> dict[str, str]:
+    """Load user-granted directories from authorized_dirs.json.
+    Returns {path_str: "read"|"write"}. Empty dict if file doesn't exist.
+    """
+    try:
+        if _AUTH_FILE.exists():
+            return json.loads(_AUTH_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        pass
+    return {}
+
+
+def _save_authorized(authorized: dict[str, str]) -> None:
+    _AUTH_FILE.parent.mkdir(parents=True, exist_ok=True)
+    _AUTH_FILE.write_text(
+        json.dumps(authorized, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+
+
 def _allow_list(env_var: str, defaults: list[str]) -> list[Path]:
     raw = os.environ.get(env_var, "")
     dirs = [d.strip() for d in raw.split(":") if d.strip()] if raw else defaults
-    result = [_workspace()]  # workspace always included
+    result = [_workspace()]
     for d in dirs:
         try:
             result.append(Path(d).expanduser().resolve())
@@ -67,7 +106,7 @@ def _allow_list(env_var: str, defaults: list[str]) -> list[Path]:
 
 
 def _read_allow() -> list[Path]:
-    return _allow_list(
+    base = _allow_list(
         "ARIA_FILE_READ_DIRS",
         [
             str(Path.home() / "Documents"),
@@ -75,38 +114,77 @@ def _read_allow() -> list[Path]:
             str(Path.home() / "projects"),
         ],
     )
+    # Add user-authorized dirs (both read and write grants allow reading)
+    authorized = _load_authorized()
+    for p, level in authorized.items():
+        try:
+            base.append(Path(p).expanduser().resolve())
+        except Exception:
+            pass
+    return base
 
 
 def _write_allow() -> list[Path]:
-    return _allow_list("ARIA_FILE_WRITE_DIRS", [])
+    base = _allow_list("ARIA_FILE_WRITE_DIRS", [])
+    # Add user-authorized dirs with write permission
+    authorized = _load_authorized()
+    for p, level in authorized.items():
+        if level == "write":
+            try:
+                base.append(Path(p).expanduser().resolve())
+            except Exception:
+                pass
+    return base
 
 
-def _safe_path(raw: str, allow: list[Path]) -> Path:
+def _is_blocked(p: Path) -> bool:
+    """Return True if path is in a permanently blocked location."""
+    p_str = str(p)
+    for blocked in _blocked_paths():
+        if p_str == str(blocked) or p_str.startswith(str(blocked) + "/"):
+            return True
+    return False
+
+
+def _safe_path(raw: str, allow: list[Path], action: str = "") -> Path:
     """
     Resolve path and verify it:
-      1. Does not escape into a blocked sensitive directory.
-      2. Falls within at least one allowed directory.
-    Raises ValueError with a clear message if either check fails.
+      1. Not in a blocked sensitive directory (hard stop — no authorization possible).
+      2. Within at least one allowed directory.
+    Raises ValueError with structured message if blocked.
+    Raises PermissionError with auth request if outside allow-list (but not blocked).
     """
     p = Path(raw).expanduser().resolve()
     p_str = str(p)
 
-    # 1. Block sensitive paths
-    for blocked in _blocked_paths():
-        if p_str == str(blocked) or p_str.startswith(str(blocked) + "/"):
-            raise ValueError(f"Access denied — path is in a protected location: {p}")
+    # 1. Hard block — can never be authorized
+    if _is_blocked(p):
+        raise ValueError(f"Access denied — path is in a protected location: {p}")
 
     # 2. Must be within an allowed directory
     for allowed in allow:
         if p_str == str(allowed) or p_str.startswith(str(allowed) + "/"):
             return p
 
-    allowed_str = ", ".join(str(a) for a in allow)
-    raise ValueError(
-        f"Access denied — path is outside allowed directories.\n"
-        f"  Path: {p}\n"
-        f"  Allowed: {allowed_str}\n"
-        f"  To expand access, set ARIA_FILE_READ_DIRS or ARIA_FILE_WRITE_DIRS in ~/.aria/.env"
+    # 3. Not in allow-list — request authorization
+    # Find the appropriate parent directory to request access to
+    parent = p if p.is_dir() else p.parent
+    level  = "write" if action in ("write", "append", "patch") else "read"
+    raise PermissionError(
+        f"{_AUTH_REQUEST} "
+        f"path={parent} "
+        f"level={level}"
+    )
+
+
+def _format_auth_request(parent: Path, level: str) -> str:
+    """Format a user-facing authorization request message."""
+    return (
+        f"I need {level} access to `{parent}` to complete this request.\n"
+        f"This directory is not currently in the authorized list.\n"
+        f"Would you like to grant {level} access to `{parent}`?\n"
+        f"(If yes, I'll remember this for future requests. "
+        f"Sensitive system directories can never be authorized.)"
     )
 
 
@@ -114,10 +192,11 @@ DEFINITION = {
     "name": "file_access",
     "description": (
         "Read, write, append, patch, list, or delete local files. "
-        "Operations are restricted to the workspace and configured directories "
-        "(ARIA_FILE_READ_DIRS, ARIA_FILE_WRITE_DIRS in ~/.aria/.env). "
-        "Use encoding='base64' for write/append when content contains special characters. "
-        "Use action='patch' to replace a specific string in a file without rewriting it. "
+        "Operations are restricted to the workspace and configured directories. "
+        "If a path is outside the allowed directories, the tool will ask the user "
+        "for authorization — use action='authorize' once the user agrees. "
+        "Use encoding='base64' for binary content. "
+        "Use action='patch' to replace a specific string in a file. "
         "Use offset/limit for reading large files in chunks."
     ),
     "parameters": {
@@ -125,8 +204,12 @@ DEFINITION = {
         "properties": {
             "action": {
                 "type": "string",
-                "enum": ["read", "write", "append", "patch", "list", "delete"],
-                "description": "Operation to perform.",
+                "enum": ["read", "write", "append", "patch", "list", "delete", "authorize"],
+                "description": (
+                    "Operation to perform. "
+                    "Use 'authorize' to grant access to a directory after the user agrees — "
+                    "provide path and level ('read' or 'write')."
+                ),
             },
             "path": {
                 "type": "string",
@@ -134,16 +217,19 @@ DEFINITION = {
             },
             "content": {
                 "type": "string",
-                "description": (
-                    "Content for write/append. "
-                    "Plain text by default; base64-encoded if encoding='base64'."
-                ),
+                "description": "Content for write/append.",
             },
             "encoding": {
                 "type": "string",
                 "enum": ["utf-8", "base64"],
-                "description": "Content encoding. Use 'base64' for code with special chars.",
+                "description": "Content encoding. Use 'base64' for binary content.",
                 "default": "utf-8",
+            },
+            "level": {
+                "type": "string",
+                "enum": ["read", "write"],
+                "description": "Access level for authorize action. 'write' also grants read.",
+                "default": "read",
             },
             "old": {
                 "type": "string",
@@ -155,11 +241,11 @@ DEFINITION = {
             },
             "offset": {
                 "type": "integer",
-                "description": "Line number to start reading from (1-based, for action='read').",
+                "description": "Line number to start reading from (1-based).",
             },
             "limit": {
                 "type": "integer",
-                "description": "Maximum number of lines to return (for action='read').",
+                "description": "Maximum number of lines to return.",
             },
         },
         "required": ["action", "path"],
@@ -175,27 +261,48 @@ def _decode_content(args: dict) -> str:
 
 
 def execute(args: dict) -> str:
-    action: str = args["action"]
+    action: str  = args["action"]
     raw_path: str = args.get("path", "")
 
+    # ── Authorize action ──────────────────────────────────────────────────────
+    if action == "authorize":
+        return _do_authorize(raw_path, args.get("level", "read"))
+
+    # ── Path validation ───────────────────────────────────────────────────────
     try:
         if action in ("read", "list"):
-            path = _safe_path(raw_path, _read_allow())
+            path = _safe_path(raw_path, _read_allow(), action)
         elif action == "delete":
-            # Delete restricted to workspace only — never outside
-            path = _safe_path(raw_path, [_workspace()])
+            path = _safe_path(raw_path, [_workspace()], action)
         else:
-            # write, append, patch
-            path = _safe_path(raw_path, _write_allow())
+            path = _safe_path(raw_path, _write_allow(), action)
+
     except ValueError as e:
+        # Hard block — no authorization possible
         return f"[file_access] {e}"
 
+    except PermissionError as e:
+        # Authorization request — parse and format for the agent
+        msg = str(e)
+        # Extract path and level from the structured message
+        try:
+            parts   = msg.replace(_AUTH_REQUEST, "").strip().split()
+            p_part  = next(p for p in parts if p.startswith("path="))
+            l_part  = next(p for p in parts if p.startswith("level="))
+            req_path  = Path(p_part[5:])
+            req_level = l_part[6:]
+        except Exception:
+            req_path  = Path(raw_path).expanduser().resolve().parent
+            req_level = "read"
+        return _format_auth_request(req_path, req_level)
+
+    # ── File operations ───────────────────────────────────────────────────────
     match action:
 
         case "read":
             if not path.exists():
                 return f"[file_access] Not found: {path}"
-            text = path.read_text(encoding="utf-8", errors="replace")
+            text  = path.read_text(encoding="utf-8", errors="replace")
             lines = text.splitlines(keepends=True)
             total = len(lines)
 
@@ -206,14 +313,13 @@ def execute(args: dict) -> str:
                 start = max(0, (offset or 1) - 1)
                 end   = start + (limit or len(lines))
                 lines = lines[start:end]
-                header = f"[lines {start+1}–{min(end, total)} of {total}]\n"
-                return header + "".join(lines)
+                return f"[lines {start+1}–{min(end, total)} of {total}]\n" + "".join(lines)
 
-            if total > 300:
+            if total > _MAX_READ_LINES:
                 return (
                     f"[file_access] File has {total} lines. "
-                    f"Returning first 300. Use offset/limit to read more.\n"
-                    + "".join(lines[:300])
+                    f"Returning first {_MAX_READ_LINES}. Use offset/limit to read more.\n"
+                    + "".join(lines[:_MAX_READ_LINES])
                 )
             return text
 
@@ -238,8 +344,7 @@ def execute(args: dict) -> str:
             text = path.read_text(encoding="utf-8")
             if old not in text:
                 return f"[file_access] String not found in {path} — no changes made."
-            patched = text.replace(old, new, 1)
-            path.write_text(patched, encoding="utf-8")
+            path.write_text(text.replace(old, new, 1), encoding="utf-8")
             return f"[file_access] Patched: {path}"
 
         case "list":
@@ -266,3 +371,36 @@ def execute(args: dict) -> str:
 
         case _:
             return f"[file_access] Unknown action: {action}"
+
+
+def _do_authorize(raw_path: str, level: str) -> str:
+    """
+    Grant access to a directory. Called after the user explicitly agrees.
+    Blocked paths can never be authorized — this is enforced here regardless
+    of what the agent or user says.
+    """
+    if not raw_path:
+        return "[file_access] 'path' is required for authorize."
+
+    p = Path(raw_path).expanduser().resolve()
+
+    # Hard safety check — blocked paths can NEVER be authorized
+    if _is_blocked(p):
+        return (
+            f"[file_access] Cannot authorize access to `{p}` — "
+            f"this is a protected system location."
+        )
+
+    level = level.lower().strip()
+    if level not in ("read", "write"):
+        level = "read"
+
+    authorized = _load_authorized()
+    authorized[str(p)] = level
+    _save_authorized(authorized)
+
+    level_desc = "read and write" if level == "write" else "read-only"
+    return (
+        f"[file_access] Access granted: {level_desc} access to `{p}`.\n"
+        f"This will be remembered for future sessions."
+    )

@@ -622,6 +622,26 @@ ARIA_FILE_WRITE_DIRS=~/projects              # workspace always included
 Delete is always restricted to the workspace. Sensitive paths (`~/.ssh`,
 `~/.aria/.env`, etc.) are always blocked regardless of configuration.
 
+### Directory authorization flow
+
+When the agent tries to access a path outside the allow-list, instead of failing
+it asks you naturally:
+
+```
+You: read the config at /home/carlos/projects/config.yaml
+Aria: I need read access to /home/carlos/projects/ to do that.
+      Would you like me to grant read access to that directory?
+
+You: yes go ahead
+Aria: Got it. Access granted. [reads the file and continues]
+```
+
+Granted directories are saved to `~/.aria/authorized_dirs.json` and
+remembered across sessions. Sensitive system paths (`~/.ssh`, `~/.aria/.env`,
+etc.) can never be authorized regardless of what you say.
+
+Works identically in REPL, Telegram, and WhatsApp.
+
 ---
 
 ## Web fetching

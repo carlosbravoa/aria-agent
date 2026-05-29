@@ -271,6 +271,11 @@ class Agent:
             "- Never narrate before a tool call. Emit TOOL: immediately.\n"
             "- After RESULT, answer in plain text.\n"
             "- You know your available tools from the list above — never call a tool to look them up.\n"
+            "- File authorization flow: if file_access returns an authorization request,\n"
+            "  ask the user naturally (e.g. 'I need read access to /path — shall I grant that?').\n"
+            "  When the user agrees, call file_access with action=authorize, path, and level\n"
+            "  (read or write — infer from context or user's words).\n"
+            "  Then retry the original operation automatically. Never self-authorize.\n"
             "- Be concise.\n"
         )
 
