@@ -15,7 +15,7 @@ The result is an agent that will impress you with how useful it can be while rem
 ## What it can do today
 
 - **CLI (REPL)** — interactive terminal with Markdown rendering, arrow-key history, and tab completion for `/` commands
-- **Telegram & WhatsApp** — full IM agent with formatted responses, model switching, and proactive scheduled messages. WhatsApp is still an untested feature.
+- **Telegram & WhatsApp** — full IM agent with formatted responses, model switching, and proactive scheduled messages
 - **Rich tool ecosystem** — web content fetching (via trafilatura), file read/write, shell execution, Gmail and Google Drive (via gog), Google Calendar, IMAP email, Jira tickets, scheduled reminders, and memory reflection. You can also write your own tools — or ask the agent to write them for you.
 - **Multi-model support** — switch between models mid-session (e.g. local Ollama and a cloud model) with `/model <name>`
 - **Autonomous background tasks** — a supervisor runs scheduled tasks, sends proactive notifications, and reflects on past conversations to improve over time
@@ -26,11 +26,6 @@ The result is an agent that will impress you with how useful it can be while rem
 
 - **Knowledge base integration** — consuming content from document repositories, wikis, or vector stores for RAG-style retrieval
 - **Your suggestions** — open an issue or ask the agent itself
-
-## Quick start 
-- clone this repo
-- `pip install.`
-- Run `aria-install`
 
 ---
 
@@ -101,12 +96,12 @@ The simplest setup. Just a terminal, no bots, no background services.
 
 ```bash
 # 1. Clone and install
-git clone https://github.com/carlosbravoa/aria-agent.git
+git clone https://github.com/your-org/aria-agent.git
 cd aria-agent
 pip install .
 
 # 2. Run — wizard creates ~/.aria/.env on first launch
-aria-install
+aria
 ```
 
 The wizard will ask for your LLM endpoint and model. When it asks about
@@ -578,7 +573,7 @@ at startup — no registration needed.
 | Tool          | Description                                                               |
 |---------------|---------------------------------------------------------------------------|
 | `file_access` | Read, write, append, patch, list, delete files. Supports `base64` encoding and paginated reads (`offset`/`limit`). Read/write restricted to configured directories. |
-| `shell_run`   | Run shell commands or scripts. Interpreter whitelist enforced. Destructive commands require confirmation or are blocked in non-interactive mode. |
+| `shell_run`   | Run shell commands or scripts. Use `script` field for commands with quotes (AWS CLI, jq, SQL) — no JSON escaping needed. Interpreter whitelist enforced. |
 | `web_fetch`   | Fetch readable text from a web page using trafilatura for clean content extraction. |
 | `gmail`       | Search, read, send, mark-read via `gog` CLI.                              |
 | `calendar`    | List, create, update, delete, RSVP Google Calendar events via `gog`.      |
@@ -592,9 +587,18 @@ at startup — no registration needed.
 
 ### Writing scripts without JSON escaping issues
 
+Use the `script` field for any command containing quotes, backticks, or special characters.
+This avoids JSON escaping failures entirely — the script is written to a temp file and executed:
+
 ```json
-{"script": "print('hello \"world\"')", "interpreter": "python3"}
+{"script": "aws ec2 describe-instances --query 'Reservations[*].Instances[*].InstanceId'"}
 ```
+
+```json
+{"script": "print('hello world')", "interpreter": "python3"}
+```
+
+If `command` is used and contains quotes, Aria automatically redirects to script mode.
 
 ### Editing large files safely
 
