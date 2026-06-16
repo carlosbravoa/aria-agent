@@ -30,7 +30,7 @@ class _Session:
     """Wraps an Agent with an inactivity timer."""
 
     def __init__(self, channel: str, user_id: str) -> None:
-        self.agent     = Agent()
+        self.agent     = Agent(window_key=f"{channel}:{user_id}")
         self.channel   = channel
         self.user_id   = user_id
         self._timer: threading.Timer | None = None

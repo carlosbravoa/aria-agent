@@ -66,7 +66,41 @@ class Workspace:
             d.mkdir(parents=True, exist_ok=True)
         for sub in ("memory", "soul", "sessions"):
             (self.root / sub).chmod(0o700)
+        # Conversation window is keyed per channel/user so REPL, each Telegram
+        # user, each WhatsApp user, and the supervisor each resume their own
+        # context. Set via set_window_key(); defaults to the local REPL.
+        self._window_key = "repl"
         self._bootstrap(agent_name=os.environ.get("AGENT_NAME", "Agent"))
+
+    # ── Conversation window key ───────────────────────────────────────────────
+
+    def set_window_key(self, key: str | None) -> None:
+        """
+        Select which per-channel conversation window this workspace reads/writes.
+
+        `key` is typically "<channel>:<user_id>" (e.g. "telegram:12345"), "repl",
+        or "supervisor". It is sanitised for use in a filename. The first time a
+        non-legacy key is selected, an existing legacy conversation_window.md is
+        migrated to the "repl" window so terminal continuity is not lost.
+        """
+        self._window_key = key or "repl"
+        self._migrate_legacy_window()
+
+    def _safe_window_key(self) -> str:
+        return re.sub(r"[^A-Za-z0-9._-]", "_", self._window_key) or "repl"
+
+    def _window_path(self) -> Path:
+        return self.root / "memory" / f"conversation_window__{self._safe_window_key()}.md"
+
+    def _migrate_legacy_window(self) -> None:
+        """Rename a pre-per-channel conversation_window.md into the repl window."""
+        legacy = self.root / "memory" / "conversation_window.md"
+        repl   = self.root / "memory" / "conversation_window__repl.md"
+        if legacy.exists() and not repl.exists():
+            try:
+                legacy.rename(repl)
+            except OSError:
+                pass
 
     # ── Bootstrap ────────────────────────────────────────────────────────────
 
@@ -102,11 +136,11 @@ class Workspace:
     # ── Memory ───────────────────────────────────────────────────────────────
 
     def load_memory(self) -> str:
-        excluded = {"conversation_window.md", "notify_feed.md", "operational_memory.md"}
+        excluded = {"notify_feed.md", "operational_memory.md"}
         parts = [
             f.read_text(encoding="utf-8")
             for f in sorted((self.root / "memory").glob("*.md"))
-            if f.name not in excluded
+            if f.name not in excluded and not f.name.startswith("conversation_window")
         ]
         return "\n\n---\n\n".join(parts)
 
@@ -158,7 +192,7 @@ class Workspace:
         Append a message to the rolling conversation window.
         Written in real time after every exchange so nothing is lost on crash.
         """
-        path  = self.root / "memory" / "conversation_window.md"
+        path  = self._window_path()
         entry = _format_entry(role, _redact(content), agent_name)
 
         if path.exists():
@@ -174,7 +208,7 @@ class Workspace:
         Trim the window to the last ARIA_WINDOW_MESSAGES entries.
         Called on clean exit (close()) — not during the session.
         """
-        path = self.root / "memory" / "conversation_window.md"
+        path = self._window_path()
         if not path.exists():
             return
         entries = _parse_window(path.read_text(encoding="utf-8"))
@@ -185,11 +219,37 @@ class Workspace:
 
     def load_conversation_window(self) -> str | None:
         """Return the conversation window content, or None if empty."""
-        path = self.root / "memory" / "conversation_window.md"
+        path = self._window_path()
         if not path.exists():
             return None
         text = path.read_text(encoding="utf-8").strip()
         return text if text else None
+
+    def load_conversation_window_messages(self) -> list[dict[str, str]]:
+        """
+        Return the conversation window as a list of {role, content} messages.
+
+        Reconstructs the role from each entry's **User:**/**<agent>:** label so
+        a restarted session resumes with the real prior turns in the message
+        history — not merely as a low-salience system-prompt memory block. This
+        is what lets "what were my last messages?" answer from actual context.
+        Capped to the last ARIA_WINDOW_MESSAGES entries.
+        """
+        path = self._window_path()
+        if not path.exists():
+            return []
+        entries = _parse_window(path.read_text(encoding="utf-8"))[-_WINDOW_MESSAGES:]
+        msgs: list[dict[str, str]] = []
+        for entry in entries:
+            if entry.startswith("**") and ":**" in entry:
+                label, content = entry[2:].split(":**", 1)
+                role    = "user" if label.strip().lower() == "user" else "assistant"
+                content = content.strip()
+            else:
+                role, content = "assistant", entry.strip()
+            if content:
+                msgs.append({"role": role, "content": content})
+        return msgs
 
     # ── Notify feed ──────────────────────────────────────────────────────────
 

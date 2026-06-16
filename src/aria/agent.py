@@ -69,7 +69,7 @@ _MAX_HISTORY       = int(os.environ.get("ARIA_MAX_HISTORY",       "60"))
 
 
 class Agent:
-    def __init__(self, output_callback=None) -> None:
+    def __init__(self, output_callback=None, window_key: str | None = None) -> None:
         # Default output: plain print for streaming tokens.
         # Rich is used for status lines (tool calls, memory saves) via console.print.
         self._output = output_callback or (lambda t: print(t, end="", flush=True))
@@ -83,12 +83,23 @@ class Agent:
 
         from aria import config
         self.ws = Workspace(config.workspace_dir())
+        # Select this agent's per-channel conversation window. REPL/single-shot
+        # pass nothing (defaults to "repl"); channels pass "<channel>:<user_id>";
+        # the supervisor passes "supervisor" so background tasks never inherit a
+        # user's chat context.
+        self.window_key = window_key or "repl"
+        self.ws.set_window_key(self.window_key)
         self.tool_schemas = tools.load_all(config.tools_dir())
         self.ws.update_tools_registry(self.tool_schemas)
 
         self.system_prompt = self._build_system_prompt()
         self._seed = self._few_shot_examples()
-        self.history: list[dict[str, Any]] = list(self._seed)
+        # Resume the prior conversation as real history turns (after the seed) so
+        # a restarted REPL/Telegram session continues with genuine immediate
+        # context. Without this, history holds only the few-shot examples and the
+        # model answers "what were my last messages?" from those placeholders.
+        prior = self.ws.load_conversation_window_messages()
+        self.history: list[dict[str, Any]] = list(self._seed) + prior
         self.session_log    = self.ws.new_session_path()
         self._last_response   = ""  # last clean text response
         self._active_profile  = "default"
@@ -225,9 +236,10 @@ class Agent:
         soul         = self.ws.load_soul()
         memory       = self.ws.load_memory()
         tool_docs    = self._build_tool_docs()
-        window      = self.ws.load_conversation_window()
-        window_block = (f"## Recent Conversation\n{window}\n\n"
-                        if window else "")
+        # The recent conversation is now resumed as real history turns in
+        # __init__ (load_conversation_window_messages), so it is intentionally
+        # NOT injected here — duplicating it caused the model to read back the
+        # memory block instead of the live turns.
         notify_feed  = self.ws.load_notify_feed()
         notify_block = (f"## Recent Proactive Messages\n{notify_feed}\n\n"
                         if notify_feed else "")
@@ -244,7 +256,7 @@ class Agent:
             f"{soul}\n\n"
             "## Core Memory\n"
             f"{memory}\n\n"
-            f"{ops_block}"            f"{window_block}"            f"{notify_block}"
+            f"{ops_block}"            f"{notify_block}"
             "## Tool Protocol\n"
             "To call a tool, output EXACTLY these two lines with no other text before them:\n\n"
             "TOOL: <tool_name>\n"

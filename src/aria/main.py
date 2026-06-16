@@ -281,7 +281,7 @@ def main() -> None:
             parser.error("--notify requires a query")
 
         from aria.telegram_notify import send
-        agent = Agent()
+        agent = Agent(window_key="notify")
         try:
             result = agent.chat_collect(query)
             agent.close()
@@ -297,12 +297,12 @@ def main() -> None:
             sys.exit(1)
 
     elif query:
-        agent = Agent()
+        agent = Agent(window_key="cli")
         agent.chat(query)
         agent.close()
 
     else:
-        agent = Agent()
+        agent = Agent()        # interactive REPL → default "repl" window
         repl(agent)
 
 
