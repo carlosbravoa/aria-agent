@@ -36,24 +36,27 @@ The result is an agent that will impress you with how useful it can be while rem
 3. [Quickstart — with services](#quickstart--with-services)
 4. [Configure](#configure)
 5. [Model profiles](#model-profiles)
-23. [CLI commands](#cli-commands)
-23. [Interactive REPL](#interactive-repl)
-23. [Channels — Telegram](#telegram)
-8. [Channels — WhatsApp](#whatsapp)
-23. [Scheduled tasks](#scheduled-tasks)
-23. [Autonomous supervisor](#autonomous-supervisor)
-23. [Memory reflection](#memory-reflection)
-23. [Session continuity](#session-continuity)
-23. [Tool protocol](#tool-protocol)
-23. [Built-in tools](#built-in-tools)
-23. [Web fetching](#web-fetching)
-23. [Adding custom tools](#adding-custom-tools)
-23. [Gmail & Calendar setup](#gmail--calendar-setup)
-23. [Jira setup](#jira-setup)
-23. [IMAP setup](#imap-setup)
+6. [CLI commands](#cli-commands)
+7. [Interactive REPL](#interactive-repl)
+8. [Channels — Telegram](#telegram)
+9. [Channels — WhatsApp](#whatsapp)
+10. [Scheduled tasks](#scheduled-tasks)
+11. [Autonomous supervisor](#autonomous-supervisor)
+12. [Memory](#memory)
+13. [Memory reflection](#memory-reflection)
+14. [Session continuity](#session-continuity)
+15. [Tool protocol](#tool-protocol)
+16. [Built-in tools](#built-in-tools)
+17. [Web fetching](#web-fetching)
+18. [Adding custom tools](#adding-custom-tools)
+19. [Gmail & Calendar setup](#gmail--calendar-setup)
+20. [Jira setup](#jira-setup)
+21. [IMAP setup](#imap-setup)
+22. [Browser automation (experimental)](#browser-automation-experimental)
 23. [Running as a background service](#running-as-a-background-service)
-23. [Workspace layout](#workspace-layout)
-23. [Project structure](#project-structure)
+24. [Development](#development)
+25. [Workspace layout](#workspace-layout)
+26. [Project structure](#project-structure)
 
 ---
 
@@ -216,11 +219,24 @@ TELEGRAM_ALLOWED=<your chat ID>
 # ── File access security ──────────────────────────────────────────────────────
 # ARIA_FILE_READ_DIRS=~/Documents:~/projects   # workspace always included
 # ARIA_FILE_WRITE_DIRS=~/projects              # workspace always included
+# ARIA_FILE_MAX_LINES=500          # max lines returned per file read
+# Directories outside these can be granted on the fly — Aria asks, you approve
+# in natural language, and the grant is saved to ~/.aria/authorized_dirs.json
+
+# ── REPL ──────────────────────────────────────────────────────────────────────
+# ARIA_REPL_MARKDOWN=on            # render Markdown in REPL; toggle live with /markdown
 
 # ── Agent behaviour ───────────────────────────────────────────────────────────
 # ARIA_MAX_LOOPS=20                # max tool-call loops per turn
 # ARIA_MAX_HISTORY=60              # conversation turns kept in context
 # ARIA_CHANNEL_IDLE_MINUTES=60     # idle minutes before channel session summarised
+# ARIA_OPSMEM_MAX_LINES=40         # operational memory cap (LEARN: entries)
+
+# ── Browser automation (experimental) ────────────────────────────────────────
+# Needs: pip install websockets, and chromium/chrome started with the debug port
+# CHROME_PROFILE_DIR=~/snap/chromium/current/.config/chromium
+# CHROME_DEBUG_PORT=9222
+# ARIA_BROWSER_MAX_LOOPS=50        # higher loop budget for multi-step browser tasks
 
 # ── Supervisor ────────────────────────────────────────────────────────────────
 # ARIA_SUPERVISOR_INTERVAL=30      # seconds between task queue polls
@@ -361,20 +377,24 @@ aria
 ```
 
 Arrow keys and history (↑/↓) work out of the box. Tab completion works for `/` commands — type `/` and press Tab to see options.
-Responses are rendered as Markdown — headings, bold, code blocks, lists.
+Responses are rendered as Markdown — headings, bold, code blocks, lists — but only when actual Markdown is present, so plain prose stays clean.
 
-| Command        | Description                            |
-|----------------|----------------------------------------|
-| `/memory`      | Print current memory                   |
-| `/tools`       | List all loaded tools                  |
-| `/clear`       | Clear conversation history             |
-| `/save <note>` | Append a note directly to memory       |
-| `/version`     | Show version                           |
-| `/help`        | Show command list                      |
-| `/quit`        | Exit (saves session summary)           |
+| Command          | Description                                      |
+|------------------|--------------------------------------------------|
+| `/memory`        | Print current memory                             |
+| `/tools`         | List all loaded tools                            |
+| `/clear`         | Clear conversation history                       |
+| `/save <note>`   | Append a note directly to memory                 |
+| `/models`        | List available model profiles                    |
+| `/model <name>`  | Switch model profile (persists across sessions)  |
+| `/markdown`      | Toggle Markdown rendering on/off                 |
+| `/version`       | Show version                                     |
+| `/help`          | Show command list                                |
+| `/quit`          | Exit (saves conversation window)                 |
 
-On exit, a brief session summary is saved to `memory/last_session.md` and
-loaded into the next session for lightweight continuity.
+On exit, the rolling conversation window is trimmed and saved to
+`memory/conversation_window.md`, loaded into the next session for lightweight
+continuity — no LLM summarisation step.
 
 ---
 
@@ -509,13 +529,38 @@ Aria: 🔧 calling schedule...
 
 ---
 
+## Memory
+
+Aria has two kinds of long-term memory that it writes to itself as you interact:
+
+**Core memory** (`memory/core.md`) — permanent facts about you: your name, role,
+timezone, language, preferences, recurring contacts. Aria writes here when it
+learns something always true.
+
+**Operational memory** (`memory/operational_memory.md`) — how to be useful in
+*your* context: which accounts and tools to use for specific tasks, project keys,
+calendar IDs, recurring task patterns, shortcuts it discovered while working.
+This is what tailors Aria to your day-to-day over time. Capped at
+`ARIA_OPSMEM_MAX_LINES` (default 40); reflection consolidates and prunes it.
+
+Operational memory is injected into each session as *suggestions* — if an entry
+turns out to be wrong or outdated, Aria verifies and replaces it rather than
+blindly following it. The memory heals itself over time.
+
+You don't manage these manually — Aria decides what's worth keeping. Both are
+plain markdown you can inspect or edit directly if you want.
+
+---
+
 ## Memory reflection
 
-Scans session logs, extracts behavioural patterns, and writes them to
-`memory/patterns.md` which is loaded into every session.
+Scans session logs, extracts behavioural patterns, and consolidates both the
+pattern file and operational memory. Loaded into every session automatically.
 
 The supervisor runs reflection automatically every 24 hours
-(`ARIA_REFLECT_EVERY=86400`). Run manually at any time:
+(`ARIA_REFLECT_EVERY=86400`). REPL users without the supervisor get the same
+thing via a background thread on startup (once per day, non-blocking). Run
+manually at any time:
 
 ```bash
 aria-reflect
@@ -528,20 +573,25 @@ The agent can also trigger it mid-conversation:
 ```
 You: analyse our past conversations and update your memory
 Aria: 🔧 calling reflect...
-      Reflection complete: 8 sessions analysed, patterns consolidated to 23 lines.
+      Reflection complete: 8 sessions analysed, patterns consolidated to 23 lines,
+      operational memory consolidated to 12 entries.
 ```
 
-**Two-phase process:**
+**Three-phase process:**
 1. **Extraction** — analyses only new sessions (watermark prevents re-processing)
-2. **Consolidation** — merges with existing patterns, prunes weak signals, caps at `ARIA_REFLECT_MAX_LINES` bullet points
+2. **Pattern consolidation** — merges behavioural patterns, prunes weak signals,
+   caps at `ARIA_REFLECT_MAX_LINES`
+3. **Operational memory consolidation** — deduplicates entries on the same topic,
+   corrects ones contradicted by recent sessions, prunes vague ones
 
 ---
 
 ## Session continuity
 
-At the end of each session a summary is saved to `memory/last_session.md`
-and loaded under `## Previous Session` in the next session's system prompt.
-No full history replay — lightweight and token-efficient.
+A rolling window of the last `ARIA_WINDOW_MESSAGES` exchanges is kept in
+`memory/conversation_window.md` and loaded under `## Recent Conversation` in the
+next session's system prompt. No LLM summarisation on exit — the window is just
+trimmed, so it works instantly and offline.
 
 Works across all interfaces: REPL, single-shot, Telegram, WhatsApp.
 
@@ -943,6 +993,9 @@ nohup aria-supervisor  >> ~/.aria/supervisor.log  2>&1 &
 ```
 ~/.aria/
 ├── .env                                      ← configuration
+├── .last_profile                             ← persisted active model profile
+├── authorized_dirs.json                      ← directories granted on the fly
+├── browser_state.json                        ← paused browser task (for resume)
 ├── tools/                                    ← custom tool .py files
 ├── whatsapp/                                 ← Node.js WhatsApp bridge
 │   ├── package.json
@@ -956,9 +1009,11 @@ nohup aria-supervisor  >> ~/.aria/supervisor.log  2>&1 &
 │   └── cancelled/
 └── workspace/
     ├── memory/                               ← chmod 700; files 600
-    │   ├── core.md                           ← explicit facts (REMEMBER: lines)
-    │   ├── last_session.md                   ← rolling session summary
+    │   ├── core.md                           ← user facts (REMEMBER: lines)
+    │   ├── operational_memory.md             ← procedures/shortcuts (LEARN: lines)
+    │   ├── conversation_window.md            ← rolling last N exchanges
     │   ├── patterns.md                       ← behavioural patterns (aria-reflect)
+    │   ├── notify_feed.md                     ← recent proactive messages
     │   └── reflect_watermark                 ← tracks last analysed session
     ├── soul/
     │   └── identity.md                       ← agent persona (edit freely)
@@ -970,37 +1025,87 @@ nohup aria-supervisor  >> ~/.aria/supervisor.log  2>&1 &
 
 ---
 
+## Development
+
+Aria is built to be taken forward with a coding agent (e.g. Claude Code) or by
+hand. The repo includes `CLAUDE.md` — a context file documenting the
+architecture, conventions, and known pitfalls — which Claude Code reads
+automatically.
+
+### Running the tests
+
+```bash
+pip install ".[dev]"   # installs pytest + pytest-mock
+pytest                 # run all 88 tests
+pytest tests/test_agent_loop.py -v
+pytest --cov=aria --cov-report=term-missing   # coverage (needs pytest-cov)
+```
+
+Tests cover workspace persistence, the task queue, text formatting, tool
+security (path blocking, command rejection, shell quoting), and the agent loop
+(memory markers, response selection, module-level constant existence).
+
+### Conventions
+
+- **Tools** are auto-discovered from `src/aria/tools/`. Add a file with a
+  `DEFINITION` dict and an `execute(args)` function — no registration needed.
+  Files starting with `_` are treated as helpers, not tools.
+- **After editing any module**, run an actual import (not just a syntax check) —
+  `ast.parse` does not catch a referenced-but-undefined module-level constant.
+  Then run `pytest`. See `CLAUDE.md` for the verification one-liner.
+- **New env vars** go in `setup.py`'s template as commented placeholders, and in
+  the README's Configure section.
+
+### The roadmap item that matters most
+
+The plain-text tool protocol's JSON parsing is fragile for coding tasks (quotes,
+braces, newlines in values). The correct fix is native function calling — a full
+design spec is parked at `docs/native-function-calling-spec.md`. Start there if
+you want Aria to be a reliable coding agent.
+
+---
+
 ## Project structure
 
 ```
 aria-agent/
-├── pyproject.toml
+├── pyproject.toml                     ← deps + [dev] extra + pytest config
 ├── README.md
 ├── CLAUDE.md                          ← context for Claude Code
+├── docs/
+│   └── native-function-calling-spec.md  ← parked design spec
+├── tests/                             ← 88 tests (pytest)
+│   ├── conftest.py
+│   ├── test_workspace.py
+│   ├── test_task.py
+│   ├── test_formatting.py
+│   ├── test_tools_security.py
+│   └── test_agent_loop.py
 ├── whatsapp/                          ← copy to ~/.aria/whatsapp/
 │   ├── package.json
 │   └── bridge.js
 └── src/
     └── aria/
         ├── __init__.py                ← version via importlib.metadata
-        ├── agent.py                   ← ReAct loop, streaming, Markdown render, session continuity
+        ├── agent.py                   ← ReAct loop, streaming, markdown toggle, memory markers, JSON repair, background reflection
         ├── channel.py                 ← multi-channel registry, idle timer
         ├── config.py                  ← path resolution, .env loading
         ├── install.py                 ← setup wizard (aria-install)
         ├── main.py                    ← CLI entry point with rich + readline
-        ├── reflect.py                 ← memory reflection engine (aria-reflect)
+        ├── reflect.py                 ← three-phase memory reflection (aria-reflect)
         ├── setup.py                   ← first-run wizard, env template
         ├── supervisor.py              ← task supervisor with periodic reflection (aria-supervisor)
         ├── task.py                    ← task model (JSON), queue ops, recurrence
         ├── telegram_bot.py            ← Telegram bot
-        ├── telegram_notify.py         ← push-only Telegram sender
+        ├── telegram_notify.py         ← push-only Telegram sender + _md_to_html
         ├── whatsapp_bridge.py         ← HTTP bridge for whatsapp-web.js
         ├── workspace.py               ← markdown persistence, secret redaction, permissions
         └── tools/
             ├── __init__.py            ← auto-loader and dispatcher
             ├── _env.py                ← subprocess environment builder
+            ├── browser.py             ← Chrome/Chromium via raw CDP (httpx + websockets)
             ├── calendar.py            ← Google Calendar via gog
-            ├── file_access.py         ← read/write/patch with path security
+            ├── file_access.py         ← read/write/patch + path security + authorize action
             ├── gmail.py               ← Gmail via gog
             ├── drive.py               ← Google Drive via gog
             ├── imap.py                ← IMAP email for any provider
@@ -1009,5 +1114,6 @@ aria-agent/
             ├── reflect.py             ← on-demand memory reflection
             ├── schedule.py            ← create/list/cancel supervisor tasks
             ├── shell_run.py           ← shell commands, script mode, interpreter whitelist
+            ├── update.py              ← self-update from git source
             └── web_fetch.py           ← web page fetcher
 ```
