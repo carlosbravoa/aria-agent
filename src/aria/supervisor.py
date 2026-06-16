@@ -36,13 +36,31 @@ _REFLECT_NOTIFY = os.environ.get("ARIA_REFLECT_NOTIFY", "true").lower() == "true
 # ── Periodic job registry ─────────────────────────────────────────────────────
 
 class _PeriodicJob:
-    """Runs a function every `interval` seconds. Skipped if interval is 0."""
+    """Runs a function every `interval` seconds (wall-clock). Skipped if interval
+    is 0. The last-run timestamp is persisted so the schedule survives process
+    restarts — previously it used time.monotonic() with last_run=0, so the job
+    fired on EVERY restart regardless of the interval."""
 
     def __init__(self, name: str, interval: int, fn) -> None:
-        self.name     = name
-        self.interval = interval
-        self.fn       = fn
-        self._last_run: float = 0.0  # run immediately on first tick
+        from pathlib import Path
+        self.name      = name
+        self.interval  = interval
+        self.fn        = fn
+        self._state    = Path.home() / ".aria" / f".periodic_{name}"
+        self._last_run = self._load_last_run()
+
+    def _load_last_run(self) -> float:
+        try:
+            return float(self._state.read_text(encoding="utf-8").strip())
+        except Exception:
+            return 0.0  # never run → fire on first tick
+
+    def _save_last_run(self, ts: float) -> None:
+        try:
+            self._state.parent.mkdir(parents=True, exist_ok=True)
+            self._state.write_text(str(ts), encoding="utf-8")
+        except Exception:
+            pass
 
     def tick(self, now: float) -> None:
         if self.interval <= 0:
@@ -51,10 +69,10 @@ class _PeriodicJob:
             log.info("Periodic job: %s", self.name)
             try:
                 self.fn()
-                self._last_run = now
             except Exception as exc:
                 log.error("Periodic job %s failed: %s", self.name, exc)
-                self._last_run = now  # don't hammer on failure
+            self._last_run = now           # update even on failure — don't hammer
+            self._save_last_run(now)
 
 
 def _run_reflection() -> None:
@@ -98,7 +116,7 @@ class Supervisor:
         log.info("Task queue: %s", _tasks_dir())
 
         while self._running:
-            now = time.monotonic()
+            now = time.time()           # wall-clock: comparable across restarts
             try:
                 # 1. Built-in periodic jobs
                 for job in self._periodic:

@@ -40,7 +40,8 @@ DEFINITION = {
     "description": (
         "Manage email via IMAP — works with any provider (Outlook, iCloud, Fastmail, Yahoo, etc.). "
         "Actions: list (recent messages), search (by subject/from/date), read (full message), "
-        "mark_read, mark_unread, move (to folder), delete, list_folders. "
+        "mark_read, mark_unread, move (to folder), list_folders. "
+        "There is no permanent-delete action by design; use move (e.g. to Trash) instead. "
         "Use the 'account' parameter to select which account (matches IMAP_<ACCOUNT>_HOST in .env). "
         "Defaults to the DEFAULT account."
     ),
@@ -50,7 +51,7 @@ DEFINITION = {
             "action": {
                 "type": "string",
                 "enum": ["list", "search", "read", "mark_read", "mark_unread",
-                         "move", "delete", "list_folders"],
+                         "move", "list_folders"],
                 "description": "IMAP operation to perform.",
             },
             "account": {
@@ -82,7 +83,7 @@ DEFINITION = {
             },
             "uid": {
                 "type": "string",
-                "description": "Message UID (from list/search results). Required for read, mark_*, move, delete.",
+                "description": "Message UID (from list/search results). Required for read, mark_*, move.",
             },
             "destination": {
                 "type": "string",
@@ -327,16 +328,19 @@ def _dispatch(conn: imaplib.IMAP4_SSL, action: str, args: dict) -> str:
             conn.select(folder)
             conn.uid("copy", uid, destination)
             conn.uid("store", uid, "+FLAGS", "\\Deleted")
-            conn.expunge()
-            return f"[imap] Message {uid} moved to {destination}."
-
-        case "delete":
-            if not uid:
-                return "[imap] 'uid' is required for delete."
-            conn.select(folder)
-            conn.uid("store", uid, "+FLAGS", "\\Deleted")
-            conn.expunge()
-            return f"[imap] Message {uid} deleted."
+            # UID EXPUNGE removes ONLY this message. A bare expunge() would purge
+            # EVERY \Deleted-flagged message in the folder (data loss), so we
+            # require UIDPLUS and otherwise leave the source flagged rather than
+            # risk other mail.
+            if "UIDPLUS" in getattr(conn, "capabilities", ()):
+                conn.uid("expunge", uid)
+                return f"[imap] Message {uid} moved to {destination}."
+            return (
+                f"[imap] Copied {uid} to {destination}, but this server lacks "
+                "UIDPLUS — left the source copy flagged \\Deleted instead of "
+                "expunging it (expunging here would risk removing other deleted "
+                "mail). Expunge the source folder manually if you want it gone."
+            )
 
         case _:
             return f"[imap] Unknown action: {action}"

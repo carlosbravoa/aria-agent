@@ -123,13 +123,58 @@ def _ops_consolidation_prompt(current_ops: str, new_observations: str) -> str:
 
 
 def run(notify: bool = False) -> str:
-    """Run the reflection pass. Returns a status string."""
+    """Run the reflection pass. Returns a status string.
+
+    Serialised with a file lock so the supervisor's periodic job and a REPL
+    background thread can't run it at the same time (which would double the LLM
+    cost and clobber patterns.md / operational_memory.md)."""
     from aria import config
     from aria.workspace import Workspace
-    from openai import OpenAI
 
     config.load()
     ws = Workspace(config.workspace_dir())
+
+    lock = _acquire_reflect_lock(ws)
+    if lock is False:
+        return "Reflection: another pass is already running — skipped."
+    try:
+        return _run_locked(ws, notify)
+    finally:
+        _release_reflect_lock(lock)
+
+
+def _acquire_reflect_lock(ws):
+    """Exclusive non-blocking lock. Returns the open file handle, False if
+    another pass holds it, or None where fcntl is unavailable (no enforcement)."""
+    try:
+        import fcntl
+    except ImportError:
+        return None
+    fh = open(ws.root / "memory" / "reflect.lock", "w")
+    try:
+        fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return fh
+    except OSError:
+        fh.close()
+        return False
+
+
+def _release_reflect_lock(lock) -> None:
+    if not lock:                       # None (no fcntl) or False (never acquired)
+        return
+    try:
+        import fcntl
+        fcntl.flock(lock, fcntl.LOCK_UN)
+    except Exception:
+        pass
+    try:
+        lock.close()
+    except Exception:
+        pass
+
+
+def _run_locked(ws, notify: bool) -> str:
+    from openai import OpenAI
 
     unanalysed = ws.unanalysed_sessions()
     if not unanalysed:

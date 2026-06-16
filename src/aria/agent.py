@@ -637,7 +637,10 @@ class Agent:
             self._output      = orig
             self._is_terminal = orig_is_terminal
 
-        return self._responses or [self._last_response] or [f"[{self.name}] No response generated."]
+        # `[self._last_response]` is always truthy (a non-empty list), so the
+        # final fallback used to be unreachable — an empty turn sent a blank
+        # message. Collapse the fallback into the single element instead.
+        return self._responses or [self._last_response or f"[{self.name}] No response generated."]
 
     def _trim_history(self) -> None:
         """Compress old RESULT blocks and drop oldest turns to stay within limits."""
@@ -663,6 +666,18 @@ class Agent:
         excess = len(real) - _MAX_HISTORY
         if excess > 0:
             real = real[excess:]
+
+        # Don't start the window mid-exchange: a leading assistant turn or a
+        # dangling `RESULT:` (whose originating tool call was trimmed away)
+        # confuses the model and is rejected by some providers. Drop from the
+        # front until the first message is a genuine user turn. Also covers a
+        # window resumed (load_conversation_window_messages) that begins with an
+        # assistant turn.
+        while real and (
+            real[0]["role"] == "assistant"
+            or (real[0]["role"] == "user" and real[0]["content"].startswith("RESULT:"))
+        ):
+            real.pop(0)
 
         self.history = self._seed + real
 

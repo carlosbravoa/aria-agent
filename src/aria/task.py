@@ -113,17 +113,28 @@ class Task:
         recur = self.recur.strip().lower()
 
         if recur == "daily":
-            nxt = base + timedelta(days=1)
+            step = timedelta(days=1)
         elif recur == "weekly":
-            nxt = base + timedelta(weeks=1)
+            step = timedelta(weeks=1)
         elif recur == "weekdays":
-            nxt = base + timedelta(days=1)
-            while nxt.weekday() >= 5:  # skip Sat=5, Sun=6
-                nxt += timedelta(days=1)
-        elif recur.endswith("m") and recur[:-1].isdigit():
-            nxt = base + timedelta(minutes=int(recur[:-1]))
+            step = timedelta(days=1)
+        elif recur.endswith("m") and recur[:-1].isdigit() and int(recur[:-1]) > 0:
+            step = timedelta(minutes=int(recur[:-1]))
         else:
             return ""
+
+        # Advance strictly past 'now'. Without this, a task whose run_after is in
+        # the past (e.g. the supervisor was down for a while) would schedule a
+        # next time that is ALSO in the past, re-firing repeatedly to "catch up"
+        # — a burst of runs + duplicate notifications. The task still runs once
+        # on resume (it was due); this only schedules the NEXT occurrence ahead.
+        now = datetime.now()
+        nxt = base + step
+        while nxt <= now:
+            nxt += step
+        if recur == "weekdays":
+            while nxt.weekday() >= 5:  # land on a weekday (skip Sat=5, Sun=6)
+                nxt += timedelta(days=1)
 
         return nxt.strftime("%Y-%m-%dT%H:%M:%S")
 
