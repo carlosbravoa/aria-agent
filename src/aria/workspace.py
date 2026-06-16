@@ -144,6 +144,20 @@ class Workspace:
         ]
         return "\n\n---\n\n".join(parts)
 
+    def core_is_empty(self) -> bool:
+        """
+        True when core memory holds no real user facts yet (fresh user).
+        Ignores the header and the '_Nothing stored yet._' placeholder and
+        strips <!-- timestamp --> comments. Drives first-contact onboarding.
+        """
+        path = self.root / "memory" / "core.md"
+        if not path.exists():
+            return True
+        text = re.sub(r"<!--.*?-->", "", path.read_text(encoding="utf-8"), flags=re.S)
+        for token in ("# Core Memory", "_Nothing stored yet._"):
+            text = text.replace(token, "")
+        return not text.strip()
+
     def append_memory(self, note: str, filename: str = "core.md") -> None:
         path = self.root / "memory" / filename
         ts = datetime.now().strftime("%Y-%m-%d %H:%M")
@@ -195,13 +209,14 @@ class Workspace:
         path  = self._window_path()
         entry = _format_entry(role, _redact(content), agent_name)
 
-        if path.exists():
-            existing = path.read_text(encoding="utf-8")
-        else:
-            existing = ""
-
-        content_new = (existing + _ENTRY_SEP + entry) if existing else entry
-        _secure_write(path, content_new)
+        existing = path.read_text(encoding="utf-8") if path.exists() else ""
+        entries  = _parse_window(existing)
+        entries.append(entry)
+        # Self-bound on every append (not just on close) so a crash can never
+        # leave an oversized window that reloads as bloated context next session.
+        if len(entries) > _WINDOW_MESSAGES:
+            entries = entries[-_WINDOW_MESSAGES:]
+        _secure_write(path, _ENTRY_SEP.join(entries))
 
     def trim_conversation_window(self) -> None:
         """

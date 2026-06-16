@@ -51,6 +51,9 @@ _MD_PATTERNS = re.compile(
 _MD_CODE = re.compile(r"```|`[^`]+`")
 # List items — only if there are multiple (single - could be a dash)
 _MD_LIST = re.compile(r"^(\s*[-*]\s.+\n){2,}", re.MULTILINE)
+# GFM table — match the delimiter row (|---|:--:|), the unambiguous signature.
+# A line made only of pipes/dashes/colons/spaces with at least one '|' and '-'.
+_MD_TABLE = re.compile(r"^\s*\|?[ :|-]*-[ :|-]*\|[ :|-]*$", re.MULTILINE)
 
 
 def _has_markdown(text: str) -> bool:
@@ -61,6 +64,7 @@ def _has_markdown(text: str) -> bool:
         _MD_PATTERNS.search(clean)
         or _MD_CODE.search(clean)
         or _MD_LIST.search(clean)
+        or _MD_TABLE.search(clean)
     )
 
 
@@ -291,6 +295,15 @@ class Agent:
         # __init__ (load_conversation_window_messages), so it is intentionally
         # NOT injected here — duplicating it caused the model to read back the
         # memory block instead of the live turns.
+        onboard_block = (
+            "## First Contact\n"
+            "Core memory is empty — you have not met this user yet. In your FIRST "
+            "reply this session, briefly introduce yourself and ask for the basics "
+            "you need to be useful: their name (at minimum), and if it feels "
+            "natural their timezone and preferred language. Ask in one short, "
+            "friendly sentence — don't interrogate. The moment they tell you, save "
+            "it with REMEMBER:. Once you know their name, don't ask again.\n\n"
+            if self.ws.core_is_empty() else "")
         notify_feed  = self.ws.load_notify_feed()
         notify_block = (f"## Recent Proactive Messages\n{notify_feed}\n\n"
                         if notify_feed else "")
@@ -307,7 +320,7 @@ class Agent:
             f"{soul}\n\n"
             "## Core Memory\n"
             f"{memory}\n\n"
-            f"{ops_block}"            f"{notify_block}"
+            f"{onboard_block}"            f"{ops_block}"            f"{notify_block}"
             "## Tool Protocol\n"
             "To call a tool, output EXACTLY these two lines with no other text before them:\n\n"
             "TOOL: <tool_name>\n"
