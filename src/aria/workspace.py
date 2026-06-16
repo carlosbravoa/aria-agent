@@ -21,13 +21,21 @@ _WINDOW_MSG_CHARS = int(os.environ.get("ARIA_WINDOW_MSG_CHARS", "300"))
 # ── Secret redaction ──────────────────────────────────────────────────────────
 _SECRET_RE = re.compile(
     r"""(?ix)
+    # key = value / key: value forms
     (?:password|passwd|secret|token|api[_\-]?key|auth[_\-]?key|
-       access[_\-]?key|private[_\-]?key|bearer)
+       access[_\-]?key|private[_\-]?key|client[_\-]?secret|bearer)
     \s*[=:]\s*\S+
-    | (?:AKIA|AGPA|AIDA|AROA|AIPA|ANPA|ANVA|ASIA)[A-Z0-9]{16}
-    | sk-[a-zA-Z0-9]{20,}
-    | ghp_[a-zA-Z0-9]{36}
-    | xox[baprs]-[a-zA-Z0-9\-]+
+    | (?:AKIA|AGPA|AIDA|AROA|AIPA|ANPA|ANVA|ASIA)[A-Z0-9]{16}    # AWS access key id
+    | sk-[a-zA-Z0-9_\-]{20,}                                     # OpenAI/Anthropic (sk-, sk-ant-, sk-proj-)
+    | (?:sk|rk)_(?:live|test)_[a-zA-Z0-9]{10,}                   # Stripe secret/restricted keys
+    | gh[opusr]_[a-zA-Z0-9]{36,}                                 # GitHub tokens (ghp_/gho_/ghu_/ghs_/ghr_)
+    | github_pat_[a-zA-Z0-9_]{20,}                               # GitHub fine-grained PAT
+    | glpat-[a-zA-Z0-9_\-]{20,}                                  # GitLab PAT
+    | AIza[a-zA-Z0-9_\-]{35}                                     # Google API key
+    | xox[baprse]-[a-zA-Z0-9\-]+                                 # Slack tokens
+    | eyJ[a-zA-Z0-9_\-]+\.[a-zA-Z0-9_\-]+\.[a-zA-Z0-9_\-]+       # JWT
+    | -----BEGIN[A-Z0-9\s]*PRIVATE\sKEY-----[\s\S]*?-----END[A-Z0-9\s]*PRIVATE\sKEY-----  # PEM private key
+    | (?<=://)[^/\s:@]+:[^/\s:@]+(?=@)                           # URL basic-auth user:pass@
     """
 )
 

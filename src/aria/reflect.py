@@ -122,7 +122,7 @@ def _ops_consolidation_prompt(current_ops: str, new_observations: str) -> str:
     )
 
 
-
+def run(notify: bool = False) -> str:
     """Run the reflection pass. Returns a status string."""
     from aria import config
     from aria.workspace import Workspace

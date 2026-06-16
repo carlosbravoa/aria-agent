@@ -323,12 +323,28 @@ def _service(description: str, exec_start: str, env_file: str,
     req = f"Requires={requires}\n" if requires else ""
     # PassEnvironment forwards the user's keychain/keyring session so tools
     # like gog can access stored OAuth tokens without extra config.
+    # StartLimit* + OnFailure arm the self-update watchdog: if a service
+    # crash-loops (5 starts in 5 min) it enters 'failed' and triggers
+    # aria-rollback.service, which reverts a bad update automatically.
     return (
-        f"[Unit]\nDescription={description}\nAfter={after}\nWants={wants}\n{req}\n"
+        f"[Unit]\nDescription={description}\nAfter={after}\nWants={wants}\n{req}"
+        "StartLimitIntervalSec=300\nStartLimitBurst=5\n"
+        "OnFailure=aria-rollback.service\n\n"
         f"[Service]\nExecStart={exec_start}\nRestart=on-failure\nRestartSec=10\n"
         f"EnvironmentFile={env_file}\n"
         "PassEnvironment=DBUS_SESSION_BUS_ADDRESS GNOME_KEYRING_CONTROL SSH_AUTH_SOCK\n"
         f"\n[Install]\nWantedBy=default.target\n"
+    )
+
+
+def _rollback_service(rollback_bin: str, env_file: str) -> str:
+    """Oneshot unit triggered via OnFailure= to auto-rollback a bad update.
+    Not enabled — invoked on demand by systemd, not at boot."""
+    return (
+        "[Unit]\nDescription=Aria auto-rollback after a failed self-update\n\n"
+        f"[Service]\nType=oneshot\nExecStart={rollback_bin}\n"
+        f"EnvironmentFile={env_file}\n"
+        "PassEnvironment=DBUS_SESSION_BUS_ADDRESS GNOME_KEYRING_CONTROL SSH_AUTH_SOCK\n"
     )
 
 
@@ -436,6 +452,19 @@ def install_services(features: set[str] | None = None, dry_run: bool = False) ->
         else:
             path.write_text(content, encoding="utf-8")
             ok(f"Written: {path.name}")
+
+    # Auto-rollback watchdog unit (referenced by OnFailure= above).
+    rollback_bin = _aria_bin("aria-rollback")
+    if rollback_bin:
+        rb_path = systemd_dir / "aria-rollback.service"
+        if dry_run:
+            info(f"[dry-run] would write {rb_path}")
+        else:
+            rb_path.write_text(_rollback_service(rollback_bin, str(env_file)), encoding="utf-8")
+            ok("Written: aria-rollback.service (auto-rollback watchdog)")
+    else:
+        warn("aria-rollback binary not found — auto-rollback disabled until you reinstall "
+             "(pip install) the new version, then re-run aria-install.")
 
     section("Enabling user lingering")
     if _linger_enabled():

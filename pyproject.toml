@@ -19,6 +19,12 @@ dependencies = [
     "websockets>=12.0",
 ]
 
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-mock>=3.12",
+]
+
 [project.scripts]
 aria           = "aria.main:main"
 aria-telegram  = "aria.telegram_bot:main"
@@ -26,6 +32,7 @@ aria-whatsapp  = "aria.whatsapp_bridge:main"
 aria-reflect    = "aria.reflect:main"
 aria-supervisor = "aria.supervisor:main"
 aria-install    = "aria.install:main"
+aria-rollback   = "aria.tools.update:rollback_main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

@@ -3,7 +3,8 @@ aria/tools/file_access.py — Read, write, append, list, patch, and delete local
 
 Security model:
   All paths are resolved and checked against an allow-list before any operation.
-  Sensitive paths (~/.ssh, ~/.gnupg, ~/.aria/.env, etc.) are always blocked.
+  Sensitive paths (~/.ssh, ~/.gnupg, all of ~/.aria except the workspace, cloud
+  credential dirs, /etc, /proc, …) are always blocked and can never be authorized.
 
   Read / list:
     - Workspace (always allowed)
@@ -41,7 +42,13 @@ from pathlib import Path
 _BLOCKED = [
     "~/.ssh",
     "~/.gnupg",
-    "~/.aria/.env",
+    # Aria's entire control plane: .env (secrets), authorized_dirs.json (the
+    # approval store — agent must not grant itself access), tasks/ (the
+    # autonomous job queue), tools/ (auto-loaded code = persistence), and runtime
+    # state (.last_profile, browser_state.json, update_state.json). The workspace
+    # (~/.aria/workspace) is carved out in _is_blocked so memory/soul/sessions
+    # stay accessible.
+    "~/.aria",
     "~/.config/gogcli",
     "~/.aws",
     "~/.azure",
@@ -138,8 +145,19 @@ def _write_allow() -> list[Path]:
 
 
 def _is_blocked(p: Path) -> bool:
-    """Return True if path is in a permanently blocked location."""
+    """Return True if path is in a permanently blocked location.
+
+    The agent's workspace lives under ~/.aria but is legitimately accessible
+    (memory, soul, sessions), so it is carved out BEFORE the block check — this
+    lets us block ~/.aria's control plane without also blocking the workspace.
+    """
     p_str = str(p)
+    try:
+        ws = str(_workspace())
+        if p_str == ws or p_str.startswith(ws + "/"):
+            return False
+    except Exception:
+        pass
     for blocked in _blocked_paths():
         if p_str == str(blocked) or p_str.startswith(str(blocked) + "/"):
             return True

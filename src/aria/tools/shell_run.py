@@ -1,10 +1,15 @@
 """
-aria/tools/shell_run.py — Execute shell commands with smart confirmation policy.
+aria/tools/shell_run.py — Execute shell commands with a context-aware policy.
 
-Confirmation rules:
-  - Destructive commands (rm, mv, kill, shutdown …) → ask in terminal,
-    auto-reject in non-interactive mode (Telegram, WhatsApp, cron).
-  - Everything else → runs immediately.
+Safety policy (applies to BOTH command and script content):
+  - Interactive REPL: destructive (rm, dd, kill, mv …) or secret-touching
+    (~/.ssh, cloud creds) ops prompt for confirmation; everything else runs.
+  - Non-interactive (Telegram/WhatsApp/supervisor), via ARIA_SHELL_UNATTENDED:
+      safe (default) → destructive + secret-path rejected, ordinary cmds allowed
+      off            → no shell at all outside the REPL
+      full           → destructive rejected; secret-path allowed (legacy)
+  Destructive detection scans every sub-command (split on ; && || | $() ),
+  so chaining like `echo ok && rm -rf ~` is caught.
 
 Special fields:
   - script: pass raw script content; written to a temp file and executed.
@@ -83,36 +88,129 @@ DEFINITION = {
     },
 }
 
-# Commands that are always destructive — must confirm or auto-reject
-_DESTRUCTIVE_RE = re.compile(
-    r"^\s*("
-    r"rm\b|rmdir\b|"
-    r"dd\b|mkfs\b|fdisk\b|parted\b|"
-    r"shutdown\b|reboot\b|halt\b|poweroff\b|"
-    r"kill\b|killall\b|pkill\b|"
-    r"chown\b|chgrp\b|"
-    r"mv\b|"
-    r"shred\b|wipe\b|"
-    r"crontab\s+-r|"
-    r"userdel\b|groupdel\b|passwd\b"
-    r")\b",
-    re.IGNORECASE,
+# Destructive binaries — checked as the leading command of EACH sub-command
+# (split on shell operators) so chaining like `echo ok && rm -rf ~` is caught,
+# not just the first token.
+_DESTRUCTIVE_CMDS = {
+    "rm", "rmdir", "dd", "mkfs", "fdisk", "parted",
+    "shutdown", "reboot", "halt", "poweroff",
+    "kill", "killall", "pkill",
+    "chown", "chgrp", "mv", "shred", "wipe",
+    "userdel", "groupdel", "passwd",
+}
+# Split a command line into sub-commands at shell control operators / substitutions.
+_SPLIT_RE = re.compile(r"\$\(|\|\||&&|;|\||&|\n|`|\(|\)")
+# High-confidence destructive patterns matched anywhere in the text (covers
+# bash and common Python/Node forms that the per-segment leading-token check
+# can't see).
+_EXTRA_DESTRUCTIVE_RE = re.compile(
+    r"(?ix)"
+    r"\bfind\b[^\n]*?(?:-delete|-exec\s+rm)\b"
+    r"|\bgit\s+clean\s+-[a-z]*f"
+    r"|\bgit\s+reset\s+--hard\b"
+    r"|>\s*/dev/sd|of=/dev/"
+    r"|\btruncate\s+-s\s*0"
+    r"|:\(\)\s*\{\s*:\s*\|\s*:"                       # fork bomb
+    r"|\bshutil\.rmtree\b|\bos\.remove\b|\bos\.unlink\b"
+    r"|\bchmod\s+-R\b"
+)
+# Sensitive paths whose mere appearance in a command is a red flag (SSH keys,
+# cloud credentials, Aria's own secrets, PEM private keys).
+_SECRET_PATH_RE = re.compile(
+    r"(?ix)"
+    r"\.ssh/|/\.ssh\b|\bid_rsa\b|\bid_ed25519\b|\bid_ecdsa\b|\bid_dsa\b"
+    r"|\.aws/credentials|\.aws/config\b"
+    r"|\.config/gcloud|\.config/gh\b"
+    r"|\.kube/config|\.netrc\b|\.pgpass\b|\.docker/config\.json"
+    r"|\.aria/\.env\b"
+    r"|-----BEGIN[A-Z0-9\s]*PRIVATE\sKEY-----"
 )
 
 # Interactive-only Python invocations (no args = REPL)
 _PYTHON_REPL_RE = re.compile(r"^\s*python3?\s*$")
 
 
+def _unattended_policy() -> str:
+    """Shell policy for non-interactive contexts (channels/supervisor).
+    safe (default) = block destructive + secret-path, allow the rest;
+    off = no shell at all; full = today's behavior (destructive still blocked)."""
+    val = os.environ.get("ARIA_SHELL_UNATTENDED", "safe").strip().lower()
+    return val if val in ("safe", "off", "full") else "safe"
+
+
+def _is_destructive(text: str) -> str | None:
+    """Return a reason string if the command performs a destructive operation."""
+    for seg in _SPLIT_RE.split(text):
+        s = seg.strip()
+        if not s:
+            continue
+        s = re.sub(r"^(?:\w+=\S*\s+)+", "", s)          # strip FOO=bar env prefixes
+        m = re.match(r"[\"']?([\w./-]+)", s)
+        if not m:
+            continue
+        cmd = os.path.basename(m.group(1)).lower()
+        if cmd in _DESTRUCTIVE_CMDS:
+            return f"destructive command '{cmd}'"
+    if _EXTRA_DESTRUCTIVE_RE.search(text):
+        return "destructive operation"
+    return None
+
+
+def _touches_secret(text: str) -> bool:
+    return bool(_SECRET_PATH_RE.search(text))
+
+
 def _is_interactive() -> bool:
     return os.isatty(0)
 
 
-def _confirm(command: str) -> bool:
+def _confirm(command: str, reason: str = "") -> bool:
     if not _is_interactive():
         return False
-    print(f"\n⚠️  Shell command requested:\n  $ {command}")
+    why = f"  ⚠️  {reason}\n" if reason else ""
+    print(f"\n⚠️  Shell command requested:\n{why}  $ {command}")
     answer = input("  Run? [y/N] ").strip().lower()
     return answer in ("y", "yes")
+
+
+def _gate(payload: str) -> str | None:
+    """
+    Apply the shell safety policy to a command or script BEFORE it runs.
+    Returns a rejection string to abort, or None to proceed.
+
+    - Interactive REPL: destructive/secret-touching ops prompt for confirmation;
+      everything else runs (no friction for normal dev work).
+    - Non-interactive (Telegram/WhatsApp/supervisor), per ARIA_SHELL_UNATTENDED:
+        off  → all shell rejected
+        safe → destructive AND secret-path rejected; ordinary commands allowed
+        full → destructive rejected; secret-path allowed (legacy behavior)
+    """
+    interactive = _is_interactive()
+    policy      = _unattended_policy()
+
+    if not interactive and policy == "off":
+        return ("[shell_run] Shell is disabled outside the interactive REPL "
+                "(ARIA_SHELL_UNATTENDED=off).")
+
+    reasons: list[str] = []
+    dest = _is_destructive(payload)
+    if dest:
+        reasons.append(dest)
+    if _touches_secret(payload):
+        reasons.append("references a sensitive path (SSH keys / cloud credentials / Aria secrets)")
+
+    if not reasons:
+        return None  # ordinary command — always allowed
+
+    if interactive:
+        return None if _confirm(payload, "; ".join(reasons)) else "[shell_run] Cancelled by user."
+
+    # Non-interactive + risky: destructive is always refused; secret-path is
+    # refused under 'safe' but permitted under 'full'.
+    if dest or policy == "safe":
+        return (f"[shell_run] Refused — {'; '.join(reasons)} — in non-interactive mode "
+                f"(ARIA_SHELL_UNATTENDED={policy}). Run it yourself in a terminal if intended.")
+    return None
 
 
 # Interpreters allowed for the script field — no shell metacharacters possible
@@ -147,6 +245,11 @@ def execute(args: dict) -> str:
                 f"[shell_run] Interpreter not allowed: '{interp_bin}'. "
                 f"Allowed: {', '.join(sorted(_ALLOWED_INTERPRETERS))}"
             )
+        # Safety policy applies to script content too — script mode used to skip
+        # every check, so a destructive script ran unguarded in any context.
+        gate = _gate(script_content)
+        if gate:
+            return gate
         suffix = ".py" if "python" in interp_bin else ".sh"
         with tempfile.NamedTemporaryFile(
             mode="w", suffix=suffix, delete=False, encoding="utf-8"
@@ -180,17 +283,11 @@ def execute(args: dict) -> str:
             "Use a non-interactive alternative."
         )
 
-    # Destructive commands always require confirmation.
-    # Non-interactive mode (Telegram, WhatsApp, supervisor) always rejects them —
-    # there is no safe way to confirm, and silent destruction is never acceptable.
-    if _DESTRUCTIVE_RE.match(command):
-        if not _is_interactive():
-            return (
-                f"[shell_run] Destructive command rejected in non-interactive mode: "
-                f"`{command}` — run it manually in a terminal if intended."
-            )
-        if not _confirm(command):
-            return "[shell_run] Cancelled by user."
+    # Safety policy: confirm (REPL) or reject (channels/supervisor) destructive
+    # and secret-touching commands; ordinary commands run unimpeded.
+    gate = _gate(command)
+    if gate:
+        return gate
 
     return _run_shell(command, stdin_text=stdin_text, cwd=cwd, timeout=timeout)
 

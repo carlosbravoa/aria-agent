@@ -9,7 +9,9 @@ Setup: add to ~/.aria/.env:
   JIRA_API_TOKEN=your-api-token   # from https://id.atlassian.com/manage-profile/security/api-tokens
   JIRA_DEFAULT_PROJECT=PROJ       # optional default project key
 
-Supports Jira Cloud and Jira Server/Data Center.
+Jira Cloud only — uses REST API v3 (/rest/api/3) and Atlassian Document Format.
+Jira Server / Data Center (which uses /rest/api/2 and wiki markup) is NOT
+supported.
 """
 
 from __future__ import annotations
@@ -19,10 +21,11 @@ import os
 DEFINITION = {
     "name": "jira",
     "description": (
-        "Manage Jira issues. "
-        "Actions: create (new issue), get (issue details), search (JQL query), "
-        "comment (add a comment), transition (change status), assign (assign to user), "
-        "list_projects (show available projects).\n"
+        "Manage Jira issues (Jira Cloud). "
+        "Actions: create (new issue), update (edit summary/description/priority/"
+        "labels/components of an existing issue), get (issue details), search "
+        "(JQL query), comment (add a comment), transition (change status), assign "
+        "(assign to user), list_projects (show available projects).\n"
         "Useful JQL patterns for search:\n"
         "  - My open tickets: assignee = currentUser() AND statusCategory != Done\n"
         "  - Recent activity: assignee = currentUser() ORDER BY updated DESC\n"
@@ -36,7 +39,7 @@ DEFINITION = {
         "properties": {
             "action": {
                 "type": "string",
-                "enum": ["create", "get", "search", "comment", "transition", "assign", "list_projects"],
+                "enum": ["create", "update", "get", "search", "comment", "transition", "assign", "list_projects"],
                 "description": "Jira action to perform.",
             },
             "project": {
@@ -45,7 +48,7 @@ DEFINITION = {
             },
             "issue_key": {
                 "type": "string",
-                "description": "Issue key (e.g. PROJ-123). Required for get, comment, transition, assign.",
+                "description": "Issue key (e.g. PROJ-123). Required for get, update, comment, transition, assign.",
             },
             "summary": {
                 "type": "string",
@@ -66,7 +69,9 @@ DEFINITION = {
             },
             "assignee": {
                 "type": "string",
-                "description": "Assignee account ID or email (for assign action or on create).",
+                "description": "Assignee: accountId, email, or display name (resolved "
+                               "automatically), 'me' for yourself, or 'none' to unassign. "
+                               "Used by assign and on create.",
             },
             "labels": {
                 "type": "array",
@@ -122,6 +127,41 @@ def _client():
     )
 
 
+def _check(r) -> None:
+    """Raise with Jira's actual error detail instead of httpx's generic message.
+    Jira returns useful reasons in errorMessages/errors — surface them."""
+    if r.status_code < 400:
+        return
+    detail = ""
+    try:
+        j = r.json()
+        parts = list(j.get("errorMessages") or [])
+        parts += [f"{k}: {v}" for k, v in (j.get("errors") or {}).items()]
+        detail = "; ".join(parts)
+    except Exception:
+        detail = (r.text or "")[:300]
+    raise ValueError(f"HTTP {r.status_code} on {r.request.url.path} — {detail or 'request failed'}")
+
+
+def _resolve_account_id(client, who: str):
+    """Resolve an assignee string to a Jira Cloud accountId.
+    Accepts an accountId as-is, an email or display name (looked up via
+    /user/search), 'me'/'currentUser' (the authenticated account), or
+    'none'/'unassign' (returns None → unassigns)."""
+    w   = (who or "").strip()
+    low = w.lower()
+    if low in ("me", "currentuser", "currentuser()"):
+        r = client.get("/myself")
+        return r.json().get("accountId") if r.status_code == 200 else w
+    if low in ("none", "unassigned", "unassign", "null", "-1"):
+        return None
+    if "@" in w or " " in w:   # email or display name → look up
+        r = client.get("/user/search", params={"query": w})
+        if r.status_code == 200 and r.json():
+            return r.json()[0].get("accountId", w)
+    return w  # assume it's already an accountId
+
+
 def _default_project(args: dict) -> str:
     project = args.get("project") or os.environ.get("JIRA_DEFAULT_PROJECT", "")
     if not project:
@@ -157,7 +197,7 @@ def _execute(args: dict) -> str:
         # ── List projects ─────────────────────────────────────────────────────
         if action == "list_projects":
             r = client.get("/project/search", params={"maxResults": 50})
-            r.raise_for_status()
+            _check(r)
             projects = r.json().get("values", [])
             if not projects:
                 return "No projects found."
@@ -170,7 +210,7 @@ def _execute(args: dict) -> str:
             if not key:
                 return "[jira] 'issue_key' is required for get."
             r = client.get(f"/issue/{key}")
-            r.raise_for_status()
+            _check(r)
             issue = r.json()
             f = issue.get("fields", {})
             desc  = (f.get("description") or {})
@@ -185,16 +225,32 @@ def _execute(args: dict) -> str:
             if not jql:
                 return "[jira] 'jql' is required for search."
             n = int(args.get("max_results", 10))
-            r = client.get("/search", params={"jql": jql, "maxResults": n,
-                                               "fields": "summary,status,issuetype,priority,assignee"})
-            r.raise_for_status()
+            # Jira Cloud removed GET/POST /rest/api/3/search (deadline 2025-05-01).
+            # The replacement /search/jql uses token pagination and returns no
+            # `total`; counts come from the separate /search/approximate-count.
+            r = client.get("/search/jql",
+                           params={"jql": jql, "maxResults": n,
+                                   "fields": "summary,status,issuetype,priority,assignee"})
+            _check(r)
             data   = r.json()
             issues = data.get("issues", [])
-            total  = data.get("total", 0)
             if not issues:
-                return f"No issues found. (total: {total})"
+                return "No issues found."
+            # Best-effort total via approximate-count — degrade gracefully.
+            total = None
+            try:
+                cr = client.post("/search/approximate-count", json={"jql": jql})
+                if cr.status_code == 200:
+                    total = cr.json().get("count")
+            except Exception:
+                pass
             lines = [_format_issue(i) for i in issues]
-            header = f"Found {total} issue(s), showing {len(issues)}:\n"
+            more  = bool(data.get("nextPageToken")) and not data.get("isLast", False)
+            if total is not None:
+                header = f"~{total} matching, showing {len(issues)}:\n"
+            else:
+                hint = " (more available — narrow the JQL or raise max_results)" if more else ""
+                header = f"Showing {len(issues)} issue(s){hint}:\n"
             return header + "\n\n".join(lines)
 
         # ── Create ────────────────────────────────────────────────────────────
@@ -222,15 +278,39 @@ def _execute(args: dict) -> str:
             if args.get("components"):
                 payload["fields"]["components"] = [{"name": c} for c in args["components"]]
             if args.get("assignee"):
-                # Try accountId first, fall back to name for Server
-                payload["fields"]["assignee"] = {"accountId": args["assignee"]}
+                payload["fields"]["assignee"] = {
+                    "accountId": _resolve_account_id(client, args["assignee"])
+                }
 
             r = client.post("/issue", json=payload)
-            r.raise_for_status()
+            _check(r)
             data    = r.json()
             key     = data.get("key", "?")
             base_url = os.environ.get("JIRA_BASE_URL", "").rstrip("/")
             return f"Created {key}\n  URL: {base_url}/browse/{key}"
+
+        # ── Update ────────────────────────────────────────────────────────────
+        if action == "update":
+            key = args.get("issue_key", "")
+            if not key:
+                return "[jira] 'issue_key' is required for update."
+            fields: dict = {}
+            if args.get("summary"):
+                fields["summary"] = args["summary"]
+            if args.get("description"):
+                fields["description"] = _text_to_adf(args["description"])
+            if args.get("priority"):
+                fields["priority"] = {"name": args["priority"]}
+            if args.get("labels"):
+                fields["labels"] = args["labels"]
+            if args.get("components"):
+                fields["components"] = [{"name": c} for c in args["components"]]
+            if not fields:
+                return ("[jira] nothing to update — provide one of: summary, "
+                        "description, priority, labels, components.")
+            r = client.put(f"/issue/{key}", json={"fields": fields})
+            _check(r)
+            return f"Updated {key} ({', '.join(fields)})."
 
         # ── Comment ───────────────────────────────────────────────────────────
         if action == "comment":
@@ -240,7 +320,7 @@ def _execute(args: dict) -> str:
                 return "[jira] 'issue_key' and 'comment_body' are required for comment."
             payload = {"body": _text_to_adf(body)}
             r = client.post(f"/issue/{key}/comment", json=payload)
-            r.raise_for_status()
+            _check(r)
             return f"Comment added to {key}."
 
         # ── Transition ────────────────────────────────────────────────────────
@@ -251,7 +331,7 @@ def _execute(args: dict) -> str:
                 return "[jira] 'issue_key' and 'transition_name' are required."
             # Fetch available transitions
             r = client.get(f"/issue/{key}/transitions")
-            r.raise_for_status()
+            _check(r)
             transitions = r.json().get("transitions", [])
             match = next(
                 (t for t in transitions if t["name"].lower() == tname.lower()),
@@ -262,7 +342,7 @@ def _execute(args: dict) -> str:
                 return f"[jira] Transition '{tname}' not found. Available: {names}"
             r = client.post(f"/issue/{key}/transitions",
                             json={"transition": {"id": match["id"]}})
-            r.raise_for_status()
+            _check(r)
             return f"{key} transitioned to '{match['name']}'."
 
         # ── Assign ────────────────────────────────────────────────────────────
@@ -271,10 +351,12 @@ def _execute(args: dict) -> str:
             assignee = args.get("assignee", "")
             if not key or not assignee:
                 return "[jira] 'issue_key' and 'assignee' are required for assign."
+            account_id = _resolve_account_id(client, assignee)
             r = client.put(f"/issue/{key}/assignee",
-                           json={"accountId": assignee})
-            r.raise_for_status()
-            return f"{key} assigned to {assignee}."
+                           json={"accountId": account_id})
+            _check(r)
+            who = "Unassigned" if account_id is None else assignee
+            return f"{key} assigned to {who}."
 
     return f"[jira] Unknown action: {action}"
 

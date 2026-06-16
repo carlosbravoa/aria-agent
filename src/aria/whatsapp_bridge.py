@@ -27,6 +27,7 @@ Dependencies: none (uses stdlib http.server)
 
 from __future__ import annotations
 
+import hmac
 import http.server
 import json
 import logging
@@ -76,9 +77,13 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             self._reject(404, "not found")
             return
 
-        # Auth via shared secret header
+        # Auth via shared secret header — FAIL CLOSED: no secret configured
+        # means no requests are accepted (an unset secret used to disable auth).
         secret = _secret()
-        if secret and self.headers.get("X-Aria-Secret") != secret:
+        if not secret:
+            self._reject(403, "bridge not configured: set ARIA_WA_SECRET")
+            return
+        if not hmac.compare_digest(self.headers.get("X-Aria-Secret", ""), secret):
             self._reject(403, "forbidden")
             return
 
@@ -96,10 +101,12 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             self._reject(400, "missing 'from' or 'text'")
             return
 
-        # Allowlist check
+        # Allowlist check — FAIL CLOSED: an empty WHATSAPP_ALLOWED rejects every
+        # sender (matches Telegram). Previously an unset allowlist served anyone
+        # who messaged the linked number.
         allowed = _allowed()
-        if allowed and sender not in allowed:
-            log.warning("Rejected WhatsApp message from %s", sender)
+        if sender not in allowed:
+            log.warning("Rejected WhatsApp message from %s (not in WHATSAPP_ALLOWED)", sender)
             self._reject(403, "sender not allowed")
             return
 
@@ -151,6 +158,14 @@ def main() -> None:
         setup_run()
 
     logging.basicConfig(level=logging.INFO)
+
+    # Fail-closed config check — surface misconfiguration loudly at startup.
+    if not _secret():
+        log.warning("ARIA_WA_SECRET is not set — the bridge will REJECT all "
+                    "requests. Set it (and on the Node side) to enable WhatsApp.")
+    if not _allowed():
+        log.warning("WHATSAPP_ALLOWED is empty — every sender will be REJECTED. "
+                    "Set it to the allowed phone number(s).")
 
     port = int(os.environ.get("ARIA_WA_PORT", 7532))
     server = http.server.ThreadingHTTPServer(("127.0.0.1", port), _Handler)

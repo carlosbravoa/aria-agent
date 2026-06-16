@@ -89,6 +89,11 @@ AGENT_NAME=Aria
 # ARIA_MAX_LOOPS=20
 # Max conversation history turns kept in context
 # ARIA_MAX_HISTORY=60
+# shell_run policy in non-interactive contexts (Telegram/WhatsApp/supervisor):
+#   safe (default) = block destructive + secret-path commands, allow the rest
+#   off            = no shell outside the interactive REPL
+#   full           = legacy (destructive still blocked, secret-path allowed)
+# ARIA_SHELL_UNATTENDED=safe
 # Minutes of inactivity before a Telegram/WhatsApp session is summarised
 # ARIA_CHANNEL_IDLE_MINUTES=60
 

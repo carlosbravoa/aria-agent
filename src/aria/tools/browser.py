@@ -10,9 +10,9 @@ Dependencies:
 
 Setup:
   # Start your browser with the debug port enabled:
-  chromium --remote-debugging-port=9222 --remote-allow-origins=*
+  chromium --remote-debugging-port=9222 --remote-allow-origins=http://localhost
   # or Google Chrome:
-  google-chrome --remote-debugging-port=9222 --remote-allow-origins=*
+  google-chrome --remote-debugging-port=9222 --remote-allow-origins=http://localhost
 
 Optional in ~/.aria/.env:
   CHROME_PROFILE_DIR=~/snap/chromium/current/.config/chromium
@@ -77,6 +77,11 @@ DEFINITION = {
 _PORT      = int(os.environ.get("CHROME_DEBUG_PORT", "9222"))
 _CDP_HTTP  = f"http://localhost:{_PORT}"
 _STATE     = Path.home() / ".aria" / "browser_state.json"
+# Scope the CDP allow-list to a fixed origin our client sends, instead of "*".
+# A malicious web page can't forge its Origin header, so Chrome rejects it (403),
+# while our raw client connects by sending this exact value. Verified against
+# Chrome 149: evil origins are rejected, this one connects.
+_CDP_ORIGIN = "http://localhost"
 _PROFILE   = os.environ.get("CHROME_PROFILE_DIR", "").strip()
 
 
@@ -115,7 +120,7 @@ def _launch_browser() -> str | None:
     args = [
         binary,
         f"--remote-debugging-port={_PORT}",
-        "--remote-allow-origins=*",
+        f"--remote-allow-origins={_CDP_ORIGIN}",
         "--no-first-run",
         "--no-default-browser-check",
     ]
@@ -137,7 +142,7 @@ def _launch_browser() -> str | None:
     return (
         f"Browser launched but CDP not reachable on port {_PORT}.\n"
         "Try launching manually:\n"
-        f"  chromium --remote-debugging-port={_PORT} --remote-allow-origins=*"
+        f"  chromium --remote-debugging-port={_PORT} --remote-allow-origins=http://localhost"
     )
 
 
@@ -162,7 +167,7 @@ class CDPSession:
                 "websockets not installed.\n"
                 "Install with: pip install websockets"
             )
-        self._ws = ws_connect(self._ws_url)
+        self._ws = ws_connect(self._ws_url, origin=_CDP_ORIGIN)
 
     def close(self) -> None:
         if self._ws:
@@ -231,7 +236,7 @@ def _get_session() -> CDPSession:
             f"Browser is running but CDP port {_PORT} is not available.\n"
             "Please close the browser and I will relaunch it with debugging enabled.\n"
             "Or relaunch manually:\n"
-            f"  chromium --remote-debugging-port={_PORT} --remote-allow-origins=*"
+            f"  chromium --remote-debugging-port={_PORT} --remote-allow-origins=http://localhost"
         )
 
     # State 3: Launch browser
@@ -522,6 +527,13 @@ def _execute_action(session: CDPSession, action: str, args: dict) -> str:
                 return "[browser] 'url' is required for open."
             if not url.startswith(("http://", "https://")):
                 url = "https://" + url
+            # SSRF guard: always block cloud-metadata / link-local, but allow
+            # loopback/private so local-dev sites still work in the browser.
+            from aria.tools._net import validate_public_url, BlockedURL
+            try:
+                validate_public_url(url, allow_loopback=True, allow_private=True)
+            except BlockedURL as exc:
+                return f"[browser] Refused to open {url}: {exc}."
 
             # Open in a new tab — don't clobber whatever the user has open
             try:

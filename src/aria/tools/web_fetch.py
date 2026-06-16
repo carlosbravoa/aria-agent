@@ -89,12 +89,15 @@ def execute(args: dict) -> str:
     include_links = bool(args.get("include_links", False))
 
     try:
-        resp = httpx.get(
-            url,
-            timeout=15,
-            follow_redirects=True,
-            headers={"User-Agent": "Mozilla/5.0 (compatible; AgentBot/1.0)"},
-        )
+        from aria.tools._net import safe_get, BlockedURL
+        try:
+            resp = safe_get(
+                url,
+                timeout=15,
+                headers={"User-Agent": "Mozilla/5.0 (compatible; AgentBot/1.0)"},
+            )
+        except BlockedURL as exc:
+            return f"[web_fetch] Refused: {exc}. Only public http(s) URLs are allowed."
         resp.raise_for_status()
 
         ct = resp.headers.get("content-type", "")
