@@ -29,12 +29,113 @@ from openai import OpenAI
 from aria import tools
 from aria.workspace import Workspace
 
+# Capture the tool name and EVERYTHING after INPUT: (to end of message). The old
+# pattern used \{.*?\} which truncated at the first '}', so any code/JSON/brace
+# inside an argument broke the call — the #1 reason coding failed. The full tail
+# is handed to _parse_tool_args, which extracts a balance-matched JSON object and
+# any ARG <<< heredoc >>> blocks.
 _TOOL_RE = re.compile(
-    r"TOOL:\s*(?P<tool_name>\w+)\s*\nINPUT:\s*(?P<args>\{.*?\})",
+    r"TOOL:\s*(?P<tool_name>\w+)[ \t]*\r?\nINPUT:[ \t]*(?P<args>.+)",
     re.DOTALL,
 )
 _REMEMBER_RE = re.compile(r"REMEMBER:\s*(?P<note>[^\n]+)")
 _LEARN_RE    = re.compile(r"LEARN:\s*(?P<note>[^\n]+)")
+
+# Heredoc form for code / multi-line / brace-heavy arguments — no JSON escaping:
+#   ARG script <<<
+#   ...raw content, any characters...
+#   >>>
+_HEREDOC_RE = re.compile(
+    r"^[ \t]*ARG[ \t]+(?P<field>[\w.\-]+)[ \t]*<<<[ \t]*\r?\n"
+    r"(?P<body>.*?)\r?\n[ \t]*>>>[ \t]*$",
+    re.MULTILINE | re.DOTALL,
+)
+
+
+def _extract_heredocs(raw: str) -> tuple[dict[str, str], str]:
+    """Pull every `ARG <field> <<< … >>>` block out of `raw`, returning the
+    field→content map and the text with those blocks removed."""
+    heredocs: dict[str, str] = {}
+
+    def _grab(m: "re.Match") -> str:
+        heredocs[m.group("field")] = m.group("body")
+        return ""
+
+    return heredocs, _HEREDOC_RE.sub(_grab, raw)
+
+
+def _strip_fences(s: str) -> str:
+    """Drop a wrapping ```json … ``` fence if the model added one."""
+    s = s.strip()
+    s = re.sub(r"^```[a-zA-Z]*[ \t]*\r?\n", "", s)
+    s = re.sub(r"\r?\n```$", "", s)
+    return s.strip()
+
+
+def _extract_json_object(s: str) -> str | None:
+    """Return the first brace-balanced {...} object in `s`, respecting string
+    literals so a '}' inside a JSON string value never terminates the object.
+    This is what fixes the truncation-on-first-'}' bug."""
+    start = s.find("{")
+    if start == -1:
+        return None
+    depth, in_str, esc = 0, False, False
+    for i in range(start, len(s)):
+        c = s[i]
+        if in_str:
+            if esc:
+                esc = False
+            elif c == "\\":
+                esc = True
+            elif c == '"':
+                in_str = False
+        elif c == '"':
+            in_str = True
+        elif c == "{":
+            depth += 1
+        elif c == "}":
+            depth -= 1
+            if depth == 0:
+                return s[start:i + 1]
+    return None  # unbalanced — fell off the end
+
+
+def _loads_with_repair(obj_str: str) -> tuple[dict, bool]:
+    """Try json.loads, then a few lenient repairs for common LLM glitches.
+    Returns (dict, ok)."""
+    import ast
+    try:
+        v = json.loads(obj_str)
+        return (v, True) if isinstance(v, dict) else ({}, False)
+    except Exception:
+        pass
+    try:  # single quotes / Python literals (True/None)
+        v = ast.literal_eval(obj_str)
+        if isinstance(v, dict):
+            return v, True
+    except Exception:
+        pass
+    try:  # trailing commas before } or ]
+        v = json.loads(re.sub(r",(\s*[}\]])", r"\1", obj_str))
+        return (v, True) if isinstance(v, dict) else ({}, False)
+    except Exception:
+        return {}, False
+
+
+def _parse_tool_args(raw: str) -> dict:
+    """Parse the INPUT payload into an args dict. Handles brace-heavy JSON,
+    code fences, lenient repairs, and ARG heredoc blocks (which override JSON
+    keys of the same name). Raises ValueError when nothing parseable is found."""
+    heredocs, text = _extract_heredocs(raw)
+    obj_str = _extract_json_object(_strip_fences(text))
+    args, parsed = ({}, False)
+    if obj_str is not None:
+        args, parsed = _loads_with_repair(obj_str)
+    if not parsed and not heredocs:
+        raise ValueError("could not parse tool INPUT as JSON")
+    if heredocs:
+        args = {**args, **heredocs}
+    return args
 
 # Persists the last-used model profile across sessions
 _PROFILE_STATE = Path.home() / ".aria" / ".last_profile"
@@ -328,6 +429,19 @@ class Agent:
             "The system runs it and replies:\n\n"
             "RESULT: <o>\n\n"
             "After RESULT, write your final answer in plain text.\n\n"
+            "### Passing code or multi-line values\n"
+            "Do NOT embed code, scripts, multi-line text, or anything with quotes "
+            "or braces inside the INPUT JSON — escaping it breaks the call. Instead, "
+            "keep that argument OUT of the JSON and append it as an ARG heredoc "
+            "block. The content between <<< and >>> is passed verbatim — no "
+            "escaping, braces and quotes are fine:\n\n"
+            "TOOL: shell_run\n"
+            'INPUT: {"action": "run"}\n'
+            "ARG script <<<\n"
+            'for f in *.py; do echo "$f"; done\n'
+            ">>>\n\n"
+            "You may add several ARG blocks. Keep small scalar values inline in "
+            "the JSON as usual.\n\n"
             f"{tool_docs}\n\n"
             "## Memory System\n"
             "You have two memory files that tailor you to this user. Use them proactively.\n\n"
@@ -409,6 +523,10 @@ class Agent:
             {"role": "assistant", "content": "/tmp contains: notes.txt, report.pdf."},
             {"role": "user", "content": "What is 2+2?"},
             {"role": "assistant", "content": "4."},
+            {"role": "user", "content": "Run a script that prints each Python file name"},
+            {"role": "assistant", "content": 'TOOL: shell_run\nINPUT: {"action": "run"}\nARG script <<<\nfor f in *.py; do echo "$f"; done\n>>>'},
+            {"role": "user", "content": "RESULT: a.py\nb.py"},
+            {"role": "assistant", "content": "Listed your Python files: a.py, b.py."},
             {"role": "user",      "content": "My name is <name>."},
             {"role": "assistant", "content": "REMEMBER: User's name is <name>.\nNice to meet you, <name>!"},
             {"role": "user",      "content": "My project tracker is at <url>."},
@@ -638,9 +756,14 @@ class Agent:
             seen_calls.append(call_sig)
 
             try:
-                args = json.loads(raw_args)
-            except json.JSONDecodeError:
-                result = f"[agent] Invalid JSON: {raw_args}"
+                args = _parse_tool_args(raw_args)
+            except ValueError as exc:
+                result = (
+                    f"[agent] Could not parse INPUT ({exc}). Re-emit the call. "
+                    "For code, multi-line text, quotes or braces, put the value in "
+                    "an ARG heredoc instead of the JSON:\n"
+                    "ARG <field> <<<\n...raw content...\n>>>"
+                )
             else:
                 result = self._execute_tool(tool_name, args)
 
