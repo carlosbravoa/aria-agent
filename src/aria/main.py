@@ -44,57 +44,83 @@ _THEME = Theme({
 console = Console(theme=_THEME, highlight=False)
 
 
-# ── Readline setup ────────────────────────────────────────────────────────────
+# ── Input: prompt_toolkit session ─────────────────────────────────────────────
 
-def _setup_readline() -> None:
+_COMMANDS = [
+    "/help", "/memory", "/tools", "/clear", "/save ", "/markdown ",
+    "/version", "/models", "/model ", "/discard", "/quit", "/exit",
+]
+
+
+def _make_prompt_session():
     """
-    Enable arrow-key navigation, history, and line editing in the REPL.
-    Uses the built-in readline module (Linux/macOS). No-ops gracefully on
-    Windows where readline is not available.
+    Build a prompt_toolkit session for the REPL input box: persistent history,
+    autosuggest from history (ghost text), fuzzy reverse-search (Ctrl+R),
+    slash-command completion + highlighting, and Alt+Enter for a newline so the
+    user can compose multi-line messages while plain Enter still submits.
+
+    Returns None if prompt_toolkit is unavailable (e.g. minimal Windows
+    install) — the REPL then falls back to a plain input() prompt.
     """
     try:
-        import readline
-        import atexit
         from pathlib import Path
-
-        history_file = Path.home() / ".aria" / ".repl_history"
-        history_file.parent.mkdir(parents=True, exist_ok=True)
-
-        # Load previous history
-        try:
-            readline.read_history_file(str(history_file))
-        except FileNotFoundError:
-            pass
-
-        readline.set_history_length(500)
-
-        # Save history on exit
-        atexit.register(readline.write_history_file, str(history_file))
-
-        # Tab completion for slash commands
-        _commands = [
-            "/help", "/memory", "/tools", "/clear", "/save ",
-            "/version", "/models", "/model ", "/discard", "/quit", "/exit",
-        ]
-
-        def _completer(text: str, state: int) -> str | None:
-            # Only complete when text starts with /
-            if not text.startswith("/"):
-                return None
-            matches = [c for c in _commands if c.startswith(text)]
-            return matches[state] if state < len(matches) else None
-
-        readline.set_completer(_completer)
-        # Ensure / is not treated as a word delimiter so completion
-        # triggers on the full /command text
-        readline.set_completer_delims(" \t\n")
-        # menu-complete cycles through matches one at a time on repeated Tab —
-        # more reliable across Linux distributions than "complete"
-        readline.parse_and_bind("tab: menu-complete")
-        readline.parse_and_bind('"\\e[Z": menu-complete-backward')  # Shift+Tab goes back
-
+        from prompt_toolkit import PromptSession
+        from prompt_toolkit.history import FileHistory
+        from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
+        from prompt_toolkit.completion import Completer, Completion
+        from prompt_toolkit.lexers import Lexer
+        from prompt_toolkit.styles import Style
+        from prompt_toolkit.key_binding import KeyBindings
     except ImportError:
-        pass  # Windows — degrade gracefully
+        return None
+
+    history_file = Path.home() / ".aria" / ".repl_history"
+    history_file.parent.mkdir(parents=True, exist_ok=True)
+
+    class _SlashCompleter(Completer):
+        """Complete /commands; stay silent for ordinary prose."""
+        def get_completions(self, document, complete_event):
+            text = document.text_before_cursor
+            if not text.startswith("/") or "\n" in text:
+                return
+            for c in _COMMANDS:
+                if c.startswith(text) and c != text:
+                    yield Completion(c, start_position=-len(text))
+
+    class _SlashLexer(Lexer):
+        """Colour a leading /command token; leave the rest as plain text."""
+        def lex_document(self, document):
+            def get_line(lineno):
+                line = document.lines[lineno]
+                if lineno == 0 and line.startswith("/"):
+                    head, sep, tail = line.partition(" ")
+                    frags = [("class:cmd", head)]
+                    if sep:
+                        frags.append(("", sep + tail))
+                    return frags
+                return [("", line)]
+            return get_line
+
+    kb = KeyBindings()
+
+    @kb.add("escape", "enter")          # Alt+Enter / Esc-then-Enter → newline
+    def _(event) -> None:
+        event.current_buffer.insert_text("\n")
+
+    style = Style.from_dict({
+        "prompt": "bold ansicyan",
+        "cmd":    "bold ansiyellow",
+    })
+
+    return PromptSession(
+        history=FileHistory(str(history_file)),
+        auto_suggest=AutoSuggestFromHistory(),
+        completer=_SlashCompleter(),
+        complete_while_typing=True,
+        lexer=_SlashLexer(),
+        key_bindings=kb,
+        style=style,
+    )
 
 
 # ── REPL ──────────────────────────────────────────────────────────────────────
@@ -104,6 +130,7 @@ _HELP_TEXT = """
 [cmd]/tools[/]       List available tools
 [cmd]/clear[/]       Clear conversation history
 [cmd]/save[/] [meta]<note>[/]  Append a note to memory
+[cmd]/markdown[/] [meta][on|off][/]  Toggle Markdown rendering
 [cmd]/version[/]     Show version
 [cmd]/quit[/]        Exit  [meta](or Ctrl+D)[/]
 """
@@ -128,36 +155,38 @@ def _print_banner(agent: Agent) -> None:
                   style="meta")
 
 
-def _prompt(agent: Agent) -> str:
+def _prompt(session) -> str:
     """
-    Read a line with readline support (arrow keys, history, tab completion).
+    Read a line of input. Uses the prompt_toolkit session when available
+    (history, autosuggest, completion, multi-line); falls back to a plain
+    coloured input() prompt when prompt_toolkit isn't installed.
 
-    The prompt string is passed directly to input() with ANSI colour codes
-    wrapped in readline's non-printing markers (\\001...\\002). This tells
-    readline the exact visible width of the prompt so backspace and arrow
-    keys are correctly bounded — without these markers readline thinks the
-    prompt is wider than it is and allows the cursor to overwrite it.
+    Raises EOFError on Ctrl+D and KeyboardInterrupt on Ctrl+C, which the REPL
+    loop treats as "exit" and "cancel line" respectively.
     """
-    # \001 = RL_PROMPT_START_IGNORE, \002 = RL_PROMPT_END_IGNORE
+    if session is not None:
+        return session.prompt([("class:prompt", "  You › ")]).strip()
+
+    # Fallback: ANSI-coloured input(); \001..\002 mark non-printing width.
     CYAN_BOLD = "\001\033[1;36m\002"
     RESET     = "\001\033[0m\002"
-    prompt    = f"  {CYAN_BOLD}You ›{RESET} "
-    try:
-        return input(prompt).strip()
-    except EOFError:
-        raise
+    return input(f"  {CYAN_BOLD}You ›{RESET} ").strip()
 
 
 def repl(agent: Agent) -> None:
-    _setup_readline()
+    session = _make_prompt_session()
     _print_banner(agent)
 
     while True:
         try:
-            user = _prompt(agent)
-        except (EOFError, KeyboardInterrupt):
+            user = _prompt(session)
+        except EOFError:
             console.print("\n  [meta]Bye.[/]")
             break
+        except KeyboardInterrupt:
+            # Ctrl+C at the prompt cancels the current line, doesn't exit.
+            console.print()
+            continue
 
         if not user:
             continue
@@ -213,7 +242,7 @@ def repl(agent: Agent) -> None:
             console.rule()
 
         elif cmd == "/clear":
-            agent.history = agent._few_shot_examples()
+            agent.history = list(agent._seed)   # seed is empty; examples live in the system prompt
             console.print("  [success]History cleared.[/]")
 
         elif cmd == "/save":
@@ -222,6 +251,18 @@ def repl(agent: Agent) -> None:
             else:
                 agent.ws.append_memory(rest)
                 console.print("  [success]Saved to memory.[/]")
+
+        elif cmd == "/markdown":
+            arg = rest.strip().lower()
+            if arg in ("on", "off"):
+                agent.markdown_enabled = (arg == "on")
+            elif arg:
+                console.print("  [error]Usage: /markdown [on|off][/]")
+                continue
+            else:
+                agent.markdown_enabled = not agent.markdown_enabled
+            state = "on" if agent.markdown_enabled else "off"
+            console.print(f"  [success]Markdown rendering {state}.[/]")
 
         elif cmd.startswith("/"):
             console.print(f"  [error]Unknown command: {cmd}[/]  Type /help for commands.")

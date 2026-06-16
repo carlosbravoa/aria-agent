@@ -62,6 +62,49 @@ def _has_markdown(text: str) -> bool:
         or _MD_CODE.search(clean)
         or _MD_LIST.search(clean)
     )
+
+
+# Heading styles for streamed Markdown. rich centers headings and draws
+# decorative rules by default; we want plain left-aligned coloured text so the
+# REPL reads like a chat, not a document.
+def _md_theme():
+    from rich.theme import Theme
+    return Theme({
+        "markdown.h1":        "bold green",
+        "markdown.h1.border": "none",
+        "markdown.h2":        "bold cyan",
+        "markdown.h2.border": "none",
+        "markdown.h3":        "bold",
+        "markdown.h4":        "bold dim",
+        "markdown.h5":        "dim",
+        "markdown.h6":        "dim",
+    })
+
+
+_CHAT_MD_CLASS = None
+
+
+def _chat_markdown(body: str):
+    """
+    Markdown renderable with left-aligned headings. rich centers headings by
+    default (LEVEL_ALIGN), which looks like a printed document; a chat REPL
+    wants them flush-left. The subclass is built once and cached.
+    """
+    global _CHAT_MD_CLASS
+    if _CHAT_MD_CLASS is None:
+        from rich.markdown import Markdown, Heading
+
+        class _LeftHeading(Heading):
+            def __rich_console__(self, console, options):
+                text = self.text.copy()
+                text.justify = "left"
+                yield text
+
+        class _ChatMarkdown(Markdown):
+            elements = {**Markdown.elements, "heading_open": _LeftHeading}
+
+        _CHAT_MD_CLASS = _ChatMarkdown
+    return _CHAT_MD_CLASS(body)
 # Both configurable via ~/.aria/.env
 _MAX_LOOPS         = int(os.environ.get("ARIA_MAX_LOOPS",         "20"))
 _BROWSER_MAX_LOOPS = int(os.environ.get("ARIA_BROWSER_MAX_LOOPS", "50"))
@@ -80,6 +123,12 @@ class Agent:
         )
         self.model: str = os.environ.get("LLM_MODEL", "llama3.2")
         self.name: str  = os.environ.get("AGENT_NAME", "Agent")
+        # Terminal Markdown rendering. Default from ARIA_REPL_MARKDOWN (on);
+        # toggled at runtime via the REPL `/markdown` command. When off, terminal
+        # responses stream as plain wrapped text (raw markdown shown literally).
+        self.markdown_enabled = os.environ.get(
+            "ARIA_REPL_MARKDOWN", "on"
+        ).strip().lower() not in ("off", "0", "false", "no")
 
         from aria import config
         self.ws = Workspace(config.workspace_dir())
@@ -93,11 +142,13 @@ class Agent:
         self.ws.update_tools_registry(self.tool_schemas)
 
         self.system_prompt = self._build_system_prompt()
-        self._seed = self._few_shot_examples()
-        # Resume the prior conversation as real history turns (after the seed) so
-        # a restarted REPL/Telegram session continues with genuine immediate
-        # context. Without this, history holds only the few-shot examples and the
-        # model answers "what were my last messages?" from those placeholders.
+        # Protocol examples live in the system prompt (_protocol_examples_block),
+        # NOT in history: seeding them as real turns made the model recall them
+        # as the user's messages and adopt their placeholders ("Hello, <name>!").
+        # Seed stays empty so history holds only genuine conversation.
+        self._seed: list[dict[str, Any]] = []
+        # Resume the prior conversation as real history turns so a restarted
+        # REPL/Telegram session continues with genuine immediate context.
         prior = self.ws.load_conversation_window_messages()
         self.history: list[dict[str, Any]] = list(self._seed) + prior
         self.session_log    = self.ws.new_session_path()
@@ -276,6 +327,7 @@ class Agent:
             "    recurring task patterns, shortcuts discovered during tool use.\n"
             "    The more you LEARN, the less you have to figure out from scratch each session.\n\n"
             "Both markers can appear anywhere in your response. Write to them often.\n\n"
+            f"{self._protocol_examples_block()}\n\n"
             "## Rules\n"
             "- Use TOOL:/INPUT: for tool calls. No other syntax works.\n"
             "- Use REMEMBER: to save user facts. Use LEARN: to save operational knowledge and "
@@ -306,10 +358,36 @@ class Agent:
         lines.append("_* required, ? optional_")
         return "\n".join(lines)
 
+    def _protocol_examples_block(self) -> str:
+        """
+        Render the protocol examples as a labelled transcript for the system
+        prompt. They teach the TOOL/INPUT/RESULT/REMEMBER/LEARN format WITHOUT
+        living in self.history — where the model mistakes them for real
+        conversation, reads them back ("your last messages were… My name is
+        <name>"), and adopts their placeholders ("Hello, <name>!"). Fenced and
+        explicitly marked as not-real so the model never quotes them.
+        """
+        labels = {"user": "User", "assistant": self.name}
+        lines = [
+            "## Protocol Examples",
+            "The transcript below is ILLUSTRATIVE ONLY — it demonstrates the exact "
+            "TOOL/INPUT/RESULT/REMEMBER/LEARN format. It is NOT part of your "
+            "conversation with the user. Never quote it, never treat its names, "
+            "URLs, or tasks as real, and never list it when asked about earlier "
+            "messages.",
+            "",
+            "```",
+        ]
+        lines += [f"{labels[m['role']]}: {m['content']}" for m in self._few_shot_examples()]
+        lines.append("```")
+        return "\n".join(lines)
+
     def _few_shot_examples(self) -> list[dict]:
         """
         Protocol examples — tool-agnostic except for the file_access demo
         which is needed to show the TOOL:/INPUT: format concretely.
+        Rendered into the system prompt by _protocol_examples_block(); these are
+        NOT seeded into self.history (that caused few-shot leakage into recall).
         """
         return [
             {"role": "user", "content": "List the files in /tmp"},
@@ -509,8 +587,11 @@ class Agent:
             tool_match = _TOOL_RE.search(response)
 
             if not tool_match:
-                # Pure text response — no tool call — collect it
-                clean   = re.sub(r"REMEMBER:[^\n]*\n?", "", response).strip()
+                # Pure text response — no tool call — collect it.
+                # Strip BOTH memory markers: they're intercepted above and must
+                # never reach the user, the window, or history.
+                clean   = re.sub(r"REMEMBER:[^\n]*\n?", "", response)
+                clean   = re.sub(r"LEARN:[^\n]*\n?",    "", clean).strip()
                 display = clean or response.strip() or "(no response)"
                 self.ws.log_session(self.session_log, self.name, display)
                 if self.history and self.history[-1]["role"] == "assistant":
@@ -607,18 +688,43 @@ class Agent:
         full_text    = ""
         line_buf     = ""
         in_tool_call = False
-        streamed_lines: list[str] = []  # track what we printed for terminal erase
+        # Terminal mode streams through a single rich.Live region: rich owns
+        # word-wrapping and redraws in place, so there is no manual cursor math
+        # and no erase-then-reprint flash. Markdown renders incrementally as the
+        # response grows. Non-terminal callers (Telegram, chat_collect) keep
+        # writing to self._output line by line, exactly as before.
+        display_lines: list[str] = []
 
+        live = None
+        con  = None
         if self._is_terminal:
             from rich.console import Console
-            _con = Console(highlight=False)
-            _con.print(f"\n  [bold green]{self.name}[/bold green] ", end="")
+            from rich.live import Live
+            con = Console(highlight=False, theme=_md_theme())
+            con.print(f"\n  [bold green]{self.name}[/bold green]")
+            live = Live(console=con, refresh_per_second=12,
+                        vertical_overflow="visible", auto_refresh=True)
+            live.start()
         else:
             self._output(f"\n{self.name}: ")
 
-        for chunk in stream:
-            delta = chunk.choices[0].delta if chunk.choices else None
-            if delta and delta.content:
+        def _renderable():
+            from rich.text import Text
+            body = "\n".join(display_lines)
+            partial = "" if line_buf.startswith(("TOOL:", "REMEMBER:", "LEARN:")) else line_buf
+            if partial:
+                body = f"{body}\n{partial}" if body else partial
+            if not body:
+                return Text("")
+            if self.markdown_enabled and _has_markdown(body):
+                return _chat_markdown(body)
+            return Text(body)
+
+        try:
+            for chunk in stream:
+                delta = chunk.choices[0].delta if chunk.choices else None
+                if not (delta and delta.content):
+                    continue
                 token      = delta.content
                 full_text += token
 
@@ -634,18 +740,28 @@ class Agent:
                         line_buf = ""
                         break
                     if line.startswith("REMEMBER:") or line.startswith("LEARN:"):
-                        pass  # suppress
+                        continue  # suppress from display
+                    if self._is_terminal:
+                        display_lines.append(line)
                     else:
                         self._output(line + "\n")
-                        if self._is_terminal:
-                            streamed_lines.append(line)
 
-        # Flush remaining partial line
-        if line_buf and not in_tool_call:
-            if not line_buf.startswith("REMEMBER:") and not line_buf.startswith("TOOL:"):
-                self._output(line_buf)
+                if live is not None and not in_tool_call:
+                    live.update(_renderable())
+
+            # Flush the trailing partial line (no newline terminator)
+            if line_buf and not in_tool_call and not line_buf.startswith(
+                ("REMEMBER:", "TOOL:", "LEARN:")
+            ):
                 if self._is_terminal:
-                    streamed_lines.append(line_buf)
+                    display_lines.append(line_buf)
+                else:
+                    self._output(line_buf)
+                line_buf = ""
+        finally:
+            if live is not None:
+                live.update(_renderable())
+                live.stop()
 
         tool_match = _TOOL_RE.search(full_text)
 
@@ -655,68 +771,13 @@ class Agent:
                 Console().print(f"  [dim]⚙ calling [bold]{tool_match.group('tool_name')}[/bold]...[/dim]")
             else:
                 self._output(f"⚙ calling {tool_match.group('tool_name')}...\n")
+        elif con is not None:
+            con.print()       # trailing blank line for spacing before next prompt
         else:
             self._output("\n")
-            # ── Option A: erase streamed text and re-render as Markdown ──────
-            # Only re-render if the response actually contains markdown syntax.
-            # Plain prose should stream as-is — the renderer adds unnecessary
-            # padding and reformatting to text that wasn't meant to be markdown.
-            if self._is_terminal and streamed_lines and _has_markdown(full_text):
-                self._render_markdown_replace(streamed_lines, full_text)
 
         self.history.append({"role": "assistant", "content": full_text})
         return full_text
-
-    def _render_markdown_replace(self, streamed_lines: list[str], full_text: str) -> None:
-        """
-        Erase the raw streamed text and re-render as rich Markdown (Option A).
-
-        Moves the cursor up by the number of lines we printed, clears them,
-        then renders the full response through rich's Markdown renderer.
-
-        Only called in terminal mode after a non-tool response.
-        """
-        from rich.console import Console
-        from rich.markdown import Markdown
-        from rich.theme import Theme
-
-        # Override default heading styles — rich centers headings and adds
-        # decorative rules by default. We want plain left-aligned bold text.
-        _MD_THEME = Theme({
-            "markdown.h1":         "bold green",
-            "markdown.h1.border":  "none",
-            "markdown.h2":         "bold cyan",
-            "markdown.h2.border":  "none",
-            "markdown.h3":         "bold",
-            "markdown.h4":         "bold dim",
-            "markdown.h5":         "dim",
-            "markdown.h6":         "dim",
-        })
-
-        # Clean the response — strip REMEMBER: lines before rendering
-        clean = re.sub(r"REMEMBER:[^\n]*\n?", "", full_text).strip()
-        if not clean:
-            return
-
-        # Count how many terminal lines the streamed text occupied.
-        # Each streamed line may wrap if wider than the terminal.
-        con = Console(highlight=False, theme=_MD_THEME)
-        terminal_width = con.width or 80
-        # +2 for the "  Name " prefix on the first line
-        lines_to_erase = 1  # the "Name " prefix line
-        for i, line in enumerate(streamed_lines):
-            visible_len = len(line) + (len(self.name) + 3 if i == 0 else 0)
-            lines_to_erase += max(1, (visible_len + terminal_width - 1) // terminal_width)
-
-        # Move cursor up and clear each line
-        import sys
-        for _ in range(lines_to_erase):
-            sys.stdout.write("\033[1A\033[2K")
-        sys.stdout.flush()
-
-        # Re-render with name prefix + Markdown
-        con.print(f"  [bold green]{self.name}[/bold green]")
-        con.print(Markdown(clean), soft_wrap=True)
 
     # ── Session continuity ────────────────────────────────────────────────────
 
