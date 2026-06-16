@@ -10,9 +10,11 @@ Memory is saved via:
 
     REMEMBER: some fact
 
-Session continuity: agent.close() summarises the conversation and saves it
-to workspace/memory/last_session.md. Next session, that summary is loaded
-into the system prompt for lightweight continuity without replaying history.
+Session continuity: a rolling per-channel conversation window
+(memory/conversation_window__<key>.md) is appended in real time and trimmed by
+agent.close() — no LLM summary. Next session it is reconstructed into real
+history turns (load_conversation_window_messages) so the model resumes with
+genuine immediate context.
 """
 
 from __future__ import annotations

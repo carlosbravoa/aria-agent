@@ -159,6 +159,10 @@ def _resolve_account_id(client, who: str):
         r = client.get("/user/search", params={"query": w})
         if r.status_code == 200 and r.json():
             return r.json()[0].get("accountId", w)
+        # Looked like an email/name but matched no one — fail clearly instead of
+        # sending the raw string as an accountId (which Jira rejects with 400).
+        raise ValueError(f"no Jira user found matching '{w}' — use their exact "
+                         "email or accountId")
     return w  # assume it's already an accountId
 
 

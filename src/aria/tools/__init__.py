@@ -60,13 +60,13 @@ def dispatch(name: str, args: dict, schemas: list[dict] | None = None) -> str:
                 try:
                     return t["_module"].execute(args)
                 except Exception as exc:
-                    return f"[tool_error] {name}: {exc}"
+                    return f"[{name}] error: {exc}"
 
     # Fall back to built-in package tools
     try:
         mod = importlib.import_module(f"aria.tools.{name}")
         return mod.execute(args)
     except ModuleNotFoundError:
-        return f"[tool_error] Unknown tool: {name}"
+        return f"[tools] error: unknown tool '{name}'"
     except Exception as exc:
-        return f"[tool_error] {name}: {exc}"
+        return f"[{name}] error: {exc}"

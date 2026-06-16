@@ -18,20 +18,43 @@ from pathlib import Path
 
 # Commands that require an interactive TTY and will hang or fail in background.
 # shell_run uses this to reject them early with a clear message.
+# Always interactive — block regardless of arguments.
 TTY_COMMANDS = frozenset({
     "top", "htop", "btop", "vim", "vi", "nano", "emacs", "less", "more",
-    "man", "ssh", "telnet", "ftp", "sftp", "mysql", "psql", "sqlite3",
+    "man", "ssh", "telnet", "ftp", "sftp", "screen", "tmux", "watch",
+})
+# Interactive ONLY when run bare (a REPL). With a script/args they're fine —
+# `python3 file.py`, `node app.js`, `bash script.sh`, `mysql -e '...'` must NOT
+# be rejected (this was the over-broad block that forced everything to 'script').
+REPL_COMMANDS = frozenset({
     "python", "python3", "ipython", "irb", "node", "bash", "sh", "zsh",
-    "fish", "screen", "tmux", "watch",
+    "fish", "mysql", "psql", "sqlite3",
 })
 
 
 def is_tty_command(command: str) -> bool:
     """Return True if the command is likely to require an interactive TTY."""
-    first_word = command.strip().split()[0] if command.strip() else ""
-    # Strip path prefix (e.g. /usr/bin/vim → vim)
-    binary = Path(first_word).name
-    return binary in TTY_COMMANDS
+    parts = command.strip().split()
+    if not parts:
+        return False
+    binary = Path(parts[0]).name           # strip path (e.g. /usr/bin/vim → vim)
+    if binary in TTY_COMMANDS:
+        return True
+    return binary in REPL_COMMANDS and len(parts) == 1   # bare REPL only
+
+
+def gog_keyring_hint(text: str) -> str:
+    """Return an actionable setup hint if `text` looks like a gog keyring /
+    credential-store failure, else "". Headless/systemd gog needs
+    GOG_KEYRING_BACKEND=file + GOG_KEYRING_PASSWORD, and the failure is otherwise
+    an opaque non-zero exit."""
+    low = (text or "").lower()
+    if any(k in low for k in ("keyring", "secretstorage", "no password",
+                              "locked", "dbus", "could not be opened",
+                              "no such interface")):
+        return ("\nHint: for headless/systemd use, set GOG_KEYRING_BACKEND=file "
+                "and GOG_KEYRING_PASSWORD in ~/.aria/.env.")
+    return ""
 
 
 def build_env() -> dict[str, str]:

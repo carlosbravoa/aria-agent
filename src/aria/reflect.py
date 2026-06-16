@@ -1,13 +1,16 @@
 """
 aria/reflect.py — Autonomous memory reflection engine.
 
-Two-phase process:
+Three-phase process:
   1. Extraction  — analyse only NEW session logs (watermark-gated), extract
                    raw observations per batch
-  2. Consolidation — merge raw observations with existing patterns into a
-                   single pruned, high-signal output capped at MAX_PATTERN_LINES
+  2. Consolidation of patterns — merge raw observations with existing patterns
+                   into a single pruned output capped at MAX_PATTERN_LINES
+  3. Consolidation of operational memory — dedupe/prune operational_memory.md
+                   against the new observations (only if it has content)
 
-This keeps patterns.md lean and signal-dense regardless of history length.
+Serialised by a file lock so the supervisor and a REPL background thread can't
+run it concurrently. Keeps patterns.md lean regardless of history length.
 
 Triggered via:
   - CLI:     aria-reflect

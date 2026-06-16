@@ -140,7 +140,10 @@ def _cancel_task(task_id: str) -> str:
         if not directory.exists():
             continue
         for p in directory.glob("*.task"):
-            if task_id in p.name:
+            # Filename is "<priority>_<task_id>.task" — match the id EXACTLY,
+            # not as a substring (which could hit the wrong task).
+            file_id = p.stem.split("_", 1)[1] if "_" in p.stem else p.stem
+            if file_id == task_id:
                 cancelled_dir = tasks_dir() / "cancelled"
                 cancelled_dir.mkdir(exist_ok=True)
                 p.rename(cancelled_dir / p.name)

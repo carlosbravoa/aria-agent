@@ -259,7 +259,7 @@ def configure_env(dry_run: bool = False) -> tuple[dict[str, str], set[str]]:
     section("Agent behaviour (optional — press Enter for defaults)")
     values["ARIA_MAX_LOOPS"]            = _ask("ARIA_MAX_LOOPS",            e("ARIA_MAX_LOOPS")            or "20",  hint="Max tool-call loops per turn")
     values["ARIA_MAX_HISTORY"]          = _ask("ARIA_MAX_HISTORY",          e("ARIA_MAX_HISTORY")          or "60",  hint="Conversation turns kept in context")
-    values["ARIA_CHANNEL_IDLE_MINUTES"] = _ask("ARIA_CHANNEL_IDLE_MINUTES", e("ARIA_CHANNEL_IDLE_MINUTES") or "60",  hint="Idle minutes before channel session is summarised")
+    values["ARIA_CHANNEL_IDLE_MINUTES"] = _ask("ARIA_CHANNEL_IDLE_MINUTES", e("ARIA_CHANNEL_IDLE_MINUTES") or "60",  hint="Idle minutes before a channel session is trimmed + dropped")
     values["ARIA_REFLECT_BATCH"]        = _ask("ARIA_REFLECT_BATCH",        e("ARIA_REFLECT_BATCH")        or "10",  hint="Sessions per reflection batch")
     values["ARIA_REFLECT_MAX_LINES"]    = _ask("ARIA_REFLECT_MAX_LINES",    e("ARIA_REFLECT_MAX_LINES")    or "40",  hint="Max bullet points in patterns.md")
 

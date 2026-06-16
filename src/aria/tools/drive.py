@@ -26,7 +26,7 @@ import os
 import shlex
 import subprocess
 
-from aria.tools._env import build_env
+from aria.tools._env import build_env, gog_keyring_hint
 
 _CLI = os.getenv("GMAIL_CLI", "gog")
 
@@ -105,7 +105,8 @@ def _run(cmd: str, capture_stdout: bool = True) -> str:
         err = result.stderr.strip()
         if result.returncode != 0:
             detail = err or out or "no output"
-            return f"[drive error] exit={result.returncode}\ncmd: {cmd}\n{detail}"
+            return (f"[drive error] exit={result.returncode}\ncmd: {cmd}\n{detail}"
+                    + gog_keyring_hint(detail))
         return out or "(no output)"
     except FileNotFoundError:
         return f"[drive error] '{_CLI}' not found. Ensure gog is installed."

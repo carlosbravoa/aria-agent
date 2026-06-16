@@ -94,7 +94,7 @@ AGENT_NAME=Aria
 #   off            = no shell outside the interactive REPL
 #   full           = legacy (destructive still blocked, secret-path allowed)
 # ARIA_SHELL_UNATTENDED=safe
-# Minutes of inactivity before a Telegram/WhatsApp session is summarised
+# Minutes of inactivity before a Telegram/WhatsApp session is trimmed + dropped
 # ARIA_CHANNEL_IDLE_MINUTES=60
 
 # ── Memory reflection ────────────────────────────────────────────────

@@ -20,7 +20,7 @@ import os
 import subprocess
 import shlex
 
-from aria.tools._env import build_env
+from aria.tools._env import build_env, gog_keyring_hint
 
 _CLI = os.getenv("GMAIL_CLI", "gog")
 
@@ -79,7 +79,8 @@ def _run(cmd: str) -> str:
         err = result.stderr.strip()
         if result.returncode != 0:
             details = err or out or "no output"
-            return f"[gmail error] exit={result.returncode}\ncmd: {cmd}\n{details}"
+            return (f"[gmail error] exit={result.returncode}\ncmd: {cmd}\n{details}"
+                    + gog_keyring_hint(details))
         return out or "(no output)"
     except FileNotFoundError:
         return (

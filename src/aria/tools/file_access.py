@@ -271,11 +271,14 @@ DEFINITION = {
 }
 
 
-def _decode_content(args: dict) -> str:
+def _decode_content(args: dict):
+    """Return str for utf-8 content, or bytes for base64 (so binary writes work
+    — the schema advertises base64 for binary, but decoding to utf-8 + write_text
+    crashed on real binary data)."""
     content = args.get("content", "")
     if args.get("encoding") == "base64":
-        return base64.b64decode(content).decode("utf-8")
-    return content
+        return base64.b64decode(content)        # bytes
+    return content                               # str
 
 
 def execute(args: dict) -> str:
@@ -343,13 +346,22 @@ def execute(args: dict) -> str:
 
         case "write":
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(_decode_content(args), encoding="utf-8")
+            data = _decode_content(args)
+            if isinstance(data, bytes):
+                path.write_bytes(data)
+            else:
+                path.write_text(data, encoding="utf-8")
             return f"[file_access] Written: {path}"
 
         case "append":
             path.parent.mkdir(parents=True, exist_ok=True)
-            with path.open("a", encoding="utf-8") as f:
-                f.write(_decode_content(args))
+            data = _decode_content(args)
+            if isinstance(data, bytes):
+                with path.open("ab") as f:
+                    f.write(data)
+            else:
+                with path.open("a", encoding="utf-8") as f:
+                    f.write(data)
             return f"[file_access] Appended to: {path}"
 
         case "patch":
@@ -359,9 +371,15 @@ def execute(args: dict) -> str:
                 return "[file_access] 'old' is required for patch."
             if not path.exists():
                 return f"[file_access] Not found: {path}"
-            text = path.read_text(encoding="utf-8")
-            if old not in text:
+            text  = path.read_text(encoding="utf-8")
+            count = text.count(old)
+            if count == 0:
                 return f"[file_access] String not found in {path} — no changes made."
+            if count > 1:
+                # Refuse an ambiguous patch instead of silently editing the first
+                # of several matches (which could change the wrong line).
+                return (f"[file_access] '{old[:50]}…' appears {count} times in {path}. "
+                        "Provide a longer, unique string so the right occurrence is patched.")
             path.write_text(text.replace(old, new, 1), encoding="utf-8")
             return f"[file_access] Patched: {path}"
 

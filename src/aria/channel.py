@@ -6,9 +6,11 @@ Session key: (channel_name, user_id)
   - Memory (workspace) is shared across all channels
 
 Session continuity for long-lived channel processes (Telegram, WhatsApp):
-  After ARIA_CHANNEL_IDLE_MINUTES of inactivity, the session is summarised
-  and closed so the agent has continuity if the process restarts or the
-  user returns later. Default: 60 minutes.
+  After ARIA_CHANNEL_IDLE_MINUTES of inactivity, the session's conversation
+  window is trimmed (agent.close(), no LLM summary) and the session is dropped
+  so it resumes cleanly when the user returns. Default: 60 minutes.
+  Registry access is guarded by a lock — channels handle messages on multiple
+  threads.
 """
 
 from __future__ import annotations

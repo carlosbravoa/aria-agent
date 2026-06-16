@@ -40,8 +40,9 @@ DEFINITION = {
         "Actions: open (navigate to URL), snapshot (get page structure for interaction), "
         "read (extract full readable text content — use for articles, emails, docs), "
         "click (click an element by role/name/text), type (fill a field), "
-        "scroll (scroll the page), back (go back), "
-        "resume (continue a paused browser task), close_tab (close current tab). "
+        "eval (run JavaScript directly in the page), scroll (scroll the page), "
+        "back (go back), resume (continue a paused browser task), "
+        "close_tab (close current tab). "
         "Always call snapshot after navigating or clicking to see the current page state. "
         "If the page uses canvas or has no accessible content, report that to the user."
     ),
