@@ -102,6 +102,38 @@ def _extract_json_object(s: str) -> str | None:
     return None  # unbalanced — fell off the end
 
 
+def _escape_ctrl_in_strings(s: str) -> str:
+    """Escape raw control chars (newline/CR/tab/…) that appear INSIDE a JSON
+    string literal. LLMs routinely emit multi-line argument values with literal
+    newlines, which is invalid JSON — this is the #1 reason a `notify`/`shell_run`
+    call with a multi-line message silently fails to parse. Structure outside
+    strings is left untouched."""
+    out, in_str, esc = [], False, False
+    for ch in s:
+        if in_str:
+            if esc:
+                out.append(ch); esc = False
+            elif ch == "\\":
+                out.append(ch); esc = True
+            elif ch == '"':
+                out.append(ch); in_str = False
+            elif ch == "\n":
+                out.append("\\n")
+            elif ch == "\r":
+                out.append("\\r")
+            elif ch == "\t":
+                out.append("\\t")
+            elif ord(ch) < 0x20:
+                out.append("\\u%04x" % ord(ch))
+            else:
+                out.append(ch)
+        else:
+            out.append(ch)
+            if ch == '"':
+                in_str = True
+    return "".join(out)
+
+
 def _loads_with_repair(obj_str: str) -> tuple[dict, bool]:
     """Try json.loads, then a few lenient repairs for common LLM glitches.
     Returns (dict, ok)."""
@@ -115,6 +147,14 @@ def _loads_with_repair(obj_str: str) -> tuple[dict, bool]:
         v = ast.literal_eval(obj_str)
         if isinstance(v, dict):
             return v, True
+    except Exception:
+        pass
+    # Raw control chars (literal newlines/tabs) inside string values — the
+    # multi-line-message case — optionally with trailing commas.
+    try:
+        fixed = re.sub(r",(\s*[}\]])", r"\1", _escape_ctrl_in_strings(obj_str))
+        v = json.loads(fixed)
+        return (v, True) if isinstance(v, dict) else ({}, False)
     except Exception:
         pass
     try:  # trailing commas before } or ]

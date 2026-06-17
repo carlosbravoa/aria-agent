@@ -125,3 +125,18 @@ def test_preamble_before_data_tool_is_not_delivered(minimal_env, mock_client, mo
     out = a.chat_collect("what does x say")
     assert "Let me check" not in out
     assert out == "The page says hello."
+
+
+def test_multiline_notify_message_executes(minimal_env, mock_client, monkeypatch):
+    """A notify call whose message has literal newlines must actually run — the
+    multi-line briefing previously failed to parse and silently never sent."""
+    a = _agent()
+    call = ('TOOL: notify\nINPUT: {"message": "Briefing:\n- 9am standup\n- 2pm review"}\n'
+            'RESULT: [notify] Message sent.\n✅ Done.')
+    a.client = mock_client(call, "✅ Done.")
+    sent = []
+    monkeypatch.setattr(a, "_execute_tool",
+                        lambda n, ar: (sent.append((n, ar.get("message", ""))) or "[notify] Message sent."))
+    a.chat_collect("send briefing")
+    assert sent and sent[0][0] == "notify"
+    assert "9am standup" in sent[0][1]      # full briefing actually reached notify

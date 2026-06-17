@@ -90,3 +90,19 @@ def test_extract_json_object_respects_strings(minimal_env):
     # the closing brace inside the string must not terminate the object
     assert _extract_json_object('{"a": "x}y", "b": 1}') == '{"a": "x}y", "b": 1}'
     assert _extract_json_object("no object here") is None
+
+
+def test_multiline_string_value_repaired(parse):
+    # LLMs emit multi-line argument values with LITERAL newlines (invalid JSON).
+    # This is the briefing-not-sent bug: notify's message never parsed.
+    name, args = parse('TOOL: notify\nINPUT: {"message": "line one\nline two\n- bullet"}')
+    assert args["message"] == "line one\nline two\n- bullet"
+
+
+def test_escape_ctrl_only_inside_strings(minimal_env):
+    import json
+    from aria.agent import _escape_ctrl_in_strings
+    # literal newline + tab inside a string → escaped + parseable
+    assert json.loads(_escape_ctrl_in_strings('{"m": "a\nb\tc"}'))["m"] == "a\nb\tc"
+    # newlines OUTSIDE strings (structure/whitespace) left untouched
+    assert _escape_ctrl_in_strings('{\n"a": 1\n}') == '{\n"a": 1\n}'
