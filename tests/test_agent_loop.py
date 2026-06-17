@@ -99,3 +99,29 @@ def test_pretool_preamble_not_in_response(minimal_env, mock_client, monkeypatch)
     out = a.chat_collect("list files")
     assert "Let me check that for you" not in out
     assert out == "Here are the files."
+
+
+def test_content_before_side_effect_tool_is_delivered(minimal_env, mock_client, monkeypatch):
+    """The answer written BEFORE a notify/send/schedule tool must reach the
+    caller (supervisor/Telegram) — regression for the 'briefing sent but no
+    content' bug (side-effect pre-tool capture)."""
+    a = _agent()
+    assert "notify" in a._classify_side_effect_tools()
+    briefing = "Briefing:\n- 9am standup\n- 2pm review"
+    a.client = mock_client(f'{briefing}\nTOOL: notify\nINPUT: {{"message": "sent"}}',
+                           "Briefing sent.")
+    monkeypatch.setattr(a, "_execute_tool", lambda n, ar: "[notify] Message sent.")
+    out = a.chat_collect("send my briefing")
+    assert "9am standup" in out          # the content survives, not just the wrap-up
+
+
+def test_preamble_before_data_tool_is_not_delivered(minimal_env, mock_client, monkeypatch):
+    """Reasoning text before a DATA tool (web_fetch) stays internal — ordering
+    fix preserved, the side-effect capture must not over-trigger."""
+    a = _agent()
+    a.client = mock_client('Let me check that.\nTOOL: web_fetch\nINPUT: {"url": "https://x.com"}',
+                           "The page says hello.")
+    monkeypatch.setattr(a, "_execute_tool", lambda n, ar: "hello")
+    out = a.chat_collect("what does x say")
+    assert "Let me check" not in out
+    assert out == "The page says hello."

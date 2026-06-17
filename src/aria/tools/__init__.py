@@ -36,17 +36,24 @@ def load_all(extra_dir: Path | None = None) -> list[dict[str, Any]]:
         for path in sorted(extra_dir.glob("*.py")):
             if path.stem.startswith("_"):
                 continue
-            spec = importlib.util.spec_from_file_location(f"_user_tool_{path.stem}", path)
-            if spec and spec.loader:
-                mod = importlib.util.module_from_spec(spec)
-                sys.modules[spec.name] = mod
-                spec.loader.exec_module(mod)  # type: ignore[union-attr]
-                if hasattr(mod, "DEFINITION") and hasattr(mod, "execute"):
-                    schemas[mod.DEFINITION["name"]] = {
-                        "type": "function",
-                        "function": mod.DEFINITION,
-                        "_module": mod,
-                    }
+            # Isolate each user tool: a broken one in ~/.aria/tools/ must not
+            # crash discovery (and the whole agent) at startup — skip with a warn.
+            try:
+                spec = importlib.util.spec_from_file_location(f"_user_tool_{path.stem}", path)
+                if spec and spec.loader:
+                    mod = importlib.util.module_from_spec(spec)
+                    sys.modules[spec.name] = mod
+                    spec.loader.exec_module(mod)  # type: ignore[union-attr]
+                    if hasattr(mod, "DEFINITION") and hasattr(mod, "execute"):
+                        schemas[mod.DEFINITION["name"]] = {
+                            "type": "function",
+                            "function": mod.DEFINITION,
+                            "_module": mod,
+                        }
+            except Exception as exc:
+                import logging
+                logging.getLogger(__name__).warning(
+                    "Skipping broken user tool %s: %s", path.name, exc)
 
     return list(schemas.values())
 

@@ -438,7 +438,7 @@ class Agent:
             f"{soul}\n\n"
             "## Core Memory\n"
             f"{memory}\n\n"
-            f"{onboard_block}"            f"{ops_block}"            f"{notify_block}"
+            f"{onboard_block}{ops_block}{notify_block}"
             "## Tool Protocol\n"
             "To call a tool, output EXACTLY these two lines with no other text before them:\n\n"
             "TOOL: <tool_name>\n"
@@ -655,15 +655,11 @@ class Agent:
                 last_asst_idx = i
                 break
 
+        # Compress old, already-processed RESULT blocks (keep the most recent).
         for i, msg in enumerate(real):
-            if msg["role"] == "user" and msg["content"].startswith("RESULT:"):
-                if i == last_asst_idx:
-                    continue
-                if len(msg["content"]) > 400:
-                    real[i] = {**msg, "content": "RESULT: [output truncated — already processed]"}
-                continue
-            if msg["role"] != "assistant" or i == last_asst_idx:
-                continue
+            if (msg["role"] == "user" and msg["content"].startswith("RESULT:")
+                    and i != last_asst_idx and len(msg["content"]) > 400):
+                real[i] = {**msg, "content": "RESULT: [output truncated — already processed]"}
 
         excess = len(real) - _MAX_HISTORY
         if excess > 0:
@@ -735,6 +731,11 @@ class Agent:
             if msg["role"] == "user"
         )
         loop_limit = _BROWSER_MAX_LOOPS if browser_task else _MAX_LOOPS
+        # Tools that DELIVER output (notify/send/schedule …). The content answer
+        # the agent writes BEFORE calling one of these must be captured into
+        # _responses, or the supervisor / Telegram delivers only the post-tool
+        # wrap-up (e.g. "Briefing sent." with the briefing itself lost).
+        side_effect_tools = self._classify_side_effect_tools()
 
         for _ in range(loop_limit):
             response = self._stream_response()
@@ -789,11 +790,20 @@ class Agent:
             pre_tool = response[:tool_match.start()].strip()
             pre_tool = re.sub(r"REMEMBER:[^\n]*\n?", "", pre_tool).strip()
             pre_tool = re.sub(r"LEARN:[^\n]*\n?",    "", pre_tool).strip()
-            if pre_tool:
-                self.ws.log_session(self.session_log, self.name, pre_tool)
 
             tool_name = tool_match.group("tool_name")
             raw_args  = tool_match.group("args")
+
+            if pre_tool:
+                self.ws.log_session(self.session_log, self.name, pre_tool)
+                # If this text precedes a side-effect tool, it IS the answer the
+                # user should receive — capture it. For data tools it's just
+                # internal reasoning ("let me check…") and stays out of
+                # _responses to preserve ordering on Telegram.
+                if tool_name in side_effect_tools:
+                    self._responses.append(pre_tool)
+                    self._last_response = pre_tool
+                    self.ws.append_conversation_window("assistant", pre_tool, self.name)
 
             call_sig = f"{tool_name}:{raw_args}"
             if call_sig in seen_calls:

@@ -122,3 +122,19 @@ def test_gog_keyring_hint_triggers_and_is_silent():
     assert "GOG_KEYRING_BACKEND" in gog_keyring_hint("error: keyring is locked")
     assert "GOG_KEYRING_BACKEND" in gog_keyring_hint("SecretStorage dbus error")
     assert gog_keyring_hint("Message not found") == ""
+
+
+# ── L2: a broken user tool must not crash discovery ──────────────────────────
+
+def test_broken_user_tool_does_not_crash_loading(tmp_path):
+    from aria import tools
+    d = tmp_path / "tools"; d.mkdir()
+    (d / "broken.py").write_text("raise RuntimeError('boom at import')\n")
+    (d / "good.py").write_text(
+        "DEFINITION = {'name': 'mygood', 'description': 'x', "
+        "'parameters': {'type': 'object', 'properties': {}}}\n"
+        "def execute(args): return 'ok'\n"
+    )
+    schemas = tools.load_all(d)                       # must not raise
+    names = [t["function"]["name"] for t in schemas]
+    assert "mygood" in names                          # good tool loads despite broken sibling
