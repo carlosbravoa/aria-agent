@@ -28,7 +28,9 @@ DEFINITION = {
     "name": "gmail",
     "description": (
         "Interact with Gmail via the gog CLI. "
-        "Actions: list (recent emails), read (full thread by ID), send, search (by query), mark_read (mark thread as read)."
+        "Actions: list (recent emails), read (full thread by ID), send, search (by query), mark_read (mark thread as read). "
+        "list and search return each thread as `[thread_id] sender — \"subject\"`; "
+        "pass that bracketed thread_id to read or mark_read."
     ),
     "parameters": {
         "type": "object",
@@ -93,19 +95,48 @@ def _run(cmd: str) -> str:
         return f"[gmail error] {exc}"
 
 
+def _format_threads(raw: str) -> str:
+    """Format gog's `--json` thread list into compact, ID-first lines so the
+    model can reliably pass the thread id to read/mark_read. Falls back to the
+    raw output if it isn't the expected JSON (older gog, or an error string)."""
+    import json
+    if raw.startswith("[gmail"):           # _run already returned an error → pass through
+        return raw
+    try:
+        threads = json.loads(raw).get("threads", [])
+    except Exception:
+        return raw                          # not JSON → no regression, return as-is
+    if not threads:
+        return "No messages."
+    lines = []
+    for t in threads:
+        tid     = t.get("id", "?")
+        subject = t.get("subject", "(no subject)")
+        sender  = t.get("from", "")
+        labels  = t.get("labels") or []
+        flags   = ["UNREAD"] if "UNREAD" in labels else []
+        cnt     = t.get("messageCount")
+        if isinstance(cnt, int) and cnt > 1:
+            flags.append(f"{cnt} msgs")
+        meta = "  ·  ".join(filter(None, [", ".join(flags), t.get("date", "")]))
+        line = f'[{tid}] {sender} — "{subject}"'
+        lines.append(f"{line}  ·  {meta}" if meta else line)
+    return f"{len(threads)} thread(s):\n" + "\n".join(lines)
+
+
 def execute(args: dict) -> str:
     action = args["action"]
     n = args.get("max_results", 10)
 
     match action:
         case "list":
-            return _run(f"{_CLI} gmail search 'in:inbox' --max {n}")
+            return _format_threads(_run(f"{_CLI} gmail search 'in:inbox' --max {n} --json"))
 
         case "search":
             query = args.get("query", "")
             if not query:
                 return "[gmail] 'query' is required for search."
-            return _run(f"{_CLI} gmail search {shlex.quote(query)} --max {n}")
+            return _format_threads(_run(f"{_CLI} gmail search {shlex.quote(query)} --max {n} --json"))
 
         case "read":
             thread_id = args.get("query", "")

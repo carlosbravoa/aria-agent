@@ -138,3 +138,24 @@ def test_broken_user_tool_does_not_crash_loading(tmp_path):
     schemas = tools.load_all(d)                       # must not raise
     names = [t["function"]["name"] for t in schemas]
     assert "mygood" in names                          # good tool loads despite broken sibling
+
+
+# ── G1: gmail --json thread formatting (verified against real gog output) ─────
+
+def test_gmail_format_threads_real_shape():
+    from aria.tools.gmail import _format_threads
+    raw = ('{"nextPageToken":"107","threads":[{"id":"19ed59fa67802873",'
+           '"date":"2026-06-17 08:47","from":"AliExpress <t@x.com>",'
+           '"subject":"Package left the region","labels":["UNREAD","INBOX"],'
+           '"messageCount":1}]}')
+    out = _format_threads(raw)
+    assert "[19ed59fa67802873]" in out      # ID surfaced for read/mark_read
+    assert "Package left the region" in out
+    assert "UNREAD" in out
+
+
+def test_gmail_format_threads_fallbacks():
+    from aria.tools.gmail import _format_threads
+    assert _format_threads('{"threads":[]}') == "No messages."
+    assert _format_threads("plain text not json") == "plain text not json"   # no regression
+    assert _format_threads("[gmail error] exit=1").startswith("[gmail error]")  # error passthrough
