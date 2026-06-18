@@ -106,7 +106,7 @@ async def cmd_clear(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not _is_allowed(update):
         return
     agent = get_session(CHANNEL, str(update.effective_chat.id))  # type: ignore[union-attr]
-    agent.history = agent._few_shot_examples()
+    agent.history = list(agent._seed)
     await _reply(update, "History cleared.")
 
 

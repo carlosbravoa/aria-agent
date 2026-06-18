@@ -53,20 +53,33 @@ def test_main_module_imports(minimal_env):
 @pytest.mark.parametrize("module, symbol", [
     # The exact regressions that have shipped before:
     ("aria.reflect", "run"),
-    ("aria.agent", "_parse_tool_args"),
-    ("aria.agent", "_TOOL_RE"),
-    ("aria.agent", "_REMEMBER_RE"),
-    ("aria.agent", "_LEARN_RE"),
+    ("aria.agent", "_wrap_untrusted"),
+    ("aria.agent", "_looks_like_error"),
+    ("aria.agent", "_UNTRUSTED_OPEN"),
     ("aria.agent", "_PROFILE_STATE"),
     ("aria.agent", "_MAX_HISTORY"),
     ("aria.agent", "Agent"),
     ("aria.workspace", "Workspace"),
     ("aria.reflect", "main"),
     ("aria.supervisor", "main"),
+    # Native tool engine + memory tools (the 2.0 rewrite surface):
+    ("aria.tools.remember", "execute"),
+    ("aria.tools.learn", "execute"),
 ])
 def test_required_symbol_exists(minimal_env, module, symbol):
     mod = importlib.import_module(module)
     assert hasattr(mod, symbol), f"{module}.{symbol} is missing"
+
+
+@pytest.mark.parametrize("method", [
+    "_call_model", "_run_one_call", "_assistant_msg", "_wire_schemas",
+    "_render_answer", "_render_tool", "_console", "_trim_history",
+])
+def test_native_agent_methods_exist(minimal_env, method):
+    """Guards the native loop's method surface — a deleted/renamed helper here
+    is the 2.0 equivalent of the `_LEARN_RE`/`_PROFILE_STATE` class of bug."""
+    from aria.agent import Agent
+    assert callable(getattr(Agent, method, None)), f"Agent.{method} missing"
 
 
 def test_reflect_run_is_callable_with_notify(minimal_env):

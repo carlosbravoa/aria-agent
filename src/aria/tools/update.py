@@ -132,7 +132,8 @@ def _validate_imports() -> tuple[bool, str]:
         "        continue\n"
         "    importlib.import_module(m.name)\n"
         "assert hasattr(aria.reflect, 'run'), 'reflect.run missing'\n"
-        "assert hasattr(aria.agent, '_parse_tool_args')\n"
+        "assert hasattr(aria.agent.Agent, '_call_model'), 'native loop missing'\n"
+        "assert hasattr(aria.tools.remember, 'execute'), 'remember tool missing'\n"
         "print('SMOKE_OK')\n"
     )
     env = dict(os.environ)

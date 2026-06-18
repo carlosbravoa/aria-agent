@@ -58,13 +58,12 @@ def test_imap_move_is_soft_without_uidplus():
 
 # ── A: chat_yield never emits a blank message ─────────────────────────────────
 
-def test_chat_yield_empty_turn_returns_fallback(minimal_env, mock_client, monkeypatch):
+def test_chat_yield_empty_turn_returns_fallback(minimal_env, native_client, monkeypatch):
     from aria.agent import Agent
     a = Agent()
     # repeated identical tool call → dedup guard returns without a response,
     # so _responses is empty and _last_response is "".
-    call = 'TOOL: shell_run\nINPUT: {"action": "run"}\nARG script <<<\nls\n>>>'
-    a.client = mock_client(call)
+    a.client = native_client({"tool_calls": [("shell_run", {"action": "run"})]})
     monkeypatch.setattr(a, "_execute_tool", lambda n, ar: "out")
     out = a.chat_yield("go")
     assert isinstance(out, list) and len(out) == 1
@@ -185,18 +184,19 @@ def test_recur_zero_minutes_is_rejected():
 
 # ── E: _trim_history trims to a clean turn boundary ───────────────────────────
 
-def test_trim_history_drops_leading_dangling_result(minimal_env):
+def test_trim_history_drops_leading_orphaned_tool_msg(minimal_env):
     from aria.agent import Agent
     a = Agent()
+    # A leading `tool` message whose assistant `tool_calls` was trimmed away is
+    # orphaned — the provider rejects it. Trim must drop to the first user turn.
     a.history = list(a._seed) + [
-        {"role": "user", "content": "RESULT: orphaned tool output"},
+        {"role": "tool", "tool_call_id": "x", "content": "orphaned tool output"},
         {"role": "assistant", "content": "an answer"},
         {"role": "user", "content": "the real question"},
     ]
     a._trim_history()
     real = a.history[len(a._seed):]
     assert real and real[0]["role"] == "user"
-    assert not real[0]["content"].startswith("RESULT:")
     assert real[0]["content"] == "the real question"
 
 

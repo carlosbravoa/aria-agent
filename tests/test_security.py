@@ -10,11 +10,13 @@ rule is a separate, probabilistic concern).
 from __future__ import annotations
 
 
-def test_tool_result_is_wrapped_untrusted(minimal_env, mock_client, monkeypatch):
+def test_tool_result_is_wrapped_untrusted(minimal_env, native_client, monkeypatch):
     from aria.agent import Agent, _UNTRUSTED_OPEN, _UNTRUSTED_CLOSE
     a = Agent()
-    call = 'TOOL: web_fetch\nINPUT: {"url": "https://evil.example"}'
-    a.client = mock_client(call, "Summary of the page.")
+    a.client = native_client(
+        {"tool_calls": [("web_fetch", {"url": "https://evil.example"})]},
+        "Summary of the page.",
+    )
     # simulate a page whose body contains an injection attempt
     monkeypatch.setattr(
         a, "_execute_tool",
@@ -22,20 +24,19 @@ def test_tool_result_is_wrapped_untrusted(minimal_env, mock_client, monkeypatch)
     )
     a.chat_collect("summarize that page")
 
-    result_msgs = [m for m in a.history
-                   if m["role"] == "user" and m["content"].startswith("RESULT:")]
-    assert result_msgs, "no RESULT message recorded"
-    body = result_msgs[-1]["content"]
+    tool_msgs = [m for m in a.history if m.get("role") == "tool"]
+    assert tool_msgs, "no tool message recorded"
+    body = tool_msgs[-1]["content"]
     assert _UNTRUSTED_OPEN in body and _UNTRUSTED_CLOSE in body
     # the injected text is inside the untrusted fence, not presented as a command
     assert "Ignore previous instructions" in body
-    assert body.startswith("RESULT:")  # trim logic compatibility preserved
+    # native tool results reference their call by id
+    assert tool_msgs[-1]["tool_call_id"]
 
 
 def test_wrap_untrusted_helper():
     from aria.agent import _wrap_untrusted, _UNTRUSTED_OPEN, _UNTRUSTED_CLOSE
     w = _wrap_untrusted("hello")
-    assert w.startswith("RESULT:")
     assert _UNTRUSTED_OPEN in w and _UNTRUSTED_CLOSE in w
     assert "hello" in w
 

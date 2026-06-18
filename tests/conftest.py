@@ -94,3 +94,70 @@ def mock_client():
         return _Client(responses)
 
     return _make
+
+
+@pytest.fixture
+def native_client():
+    """Factory for a NON-streaming mock OpenAI client matching the native
+    tool-calling engine. Each argument is one model turn:
+
+      - a plain string                → a content-only final answer
+      - {"content": str|None,
+         "tool_calls": [(name, args), ...]}  → an assistant turn with tool calls
+        where `args` is a dict (json-encoded for you) or a raw JSON string.
+
+    `chat.completions.create(...)` returns an object exposing
+    `.choices[0].message.content` and `.choices[0].message.tool_calls`. After the
+    list is exhausted the last turn repeats (so loop-guard tests terminate)."""
+    import json
+    import itertools
+
+    _ids = itertools.count(1)
+
+    class _Fn:
+        def __init__(self, name, arguments):
+            self.name = name
+            self.arguments = arguments
+
+    class _ToolCall:
+        def __init__(self, name, arguments):
+            self.id = f"call_{next(_ids)}"
+            self.type = "function"
+            self.function = _Fn(name, arguments)
+
+    class _Message:
+        def __init__(self, content, tool_calls):
+            self.content = content
+            self.tool_calls = tool_calls or None
+
+    class _Choice:
+        def __init__(self, msg): self.message = msg
+
+    class _Resp:
+        def __init__(self, msg): self.choices = [_Choice(msg)]
+
+    class _Completions:
+        def __init__(self, turns): self._turns = list(turns); self._i = 0
+
+        def create(self, **kwargs):
+            turn = (self._turns[self._i] if self._i < len(self._turns)
+                    else (self._turns[-1] if self._turns else ""))
+            self._i += 1
+            if isinstance(turn, str):
+                turn = {"content": turn, "tool_calls": []}
+            tcs = []
+            for name, args in turn.get("tool_calls", []):
+                raw = args if isinstance(args, str) else json.dumps(args)
+                tcs.append(_ToolCall(name, raw))
+            return _Resp(_Message(turn.get("content"), tcs))
+
+    class _Chat:
+        def __init__(self, turns): self.completions = _Completions(turns)
+
+    class _Client:
+        def __init__(self, turns): self.chat = _Chat(turns)
+
+    def _make(*turns):
+        return _Client(turns)
+
+    return _make
