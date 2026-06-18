@@ -106,3 +106,71 @@ def test_escape_ctrl_only_inside_strings(minimal_env):
     assert json.loads(_escape_ctrl_in_strings('{"m": "a\nb\tc"}'))["m"] == "a\nb\tc"
     # newlines OUTSIDE strings (structure/whitespace) left untouched
     assert _escape_ctrl_in_strings('{\n"a": 1\n}') == '{\n"a": 1\n}'
+
+
+class TestTruncateFabricatedContinuation:
+    """The text protocol lets the model emit a whole imagined transcript in one
+    message — extra TOOL:/RESULT: lines + fake results — but only the first tool
+    runs. Storing the blob in history makes the model believe it already sent a
+    notify/briefing it never sent. _truncate_after_first_tool_call cuts the
+    fabricated tail so the ReAct loop actually iterates until the real tool runs.
+    """
+
+    def _cut(self, text):
+        from aria.agent import _truncate_after_first_tool_call
+        return _truncate_after_first_tool_call(text)
+
+    def test_transcript_shape_keeps_only_first_tool(self, parse):
+        # The exact failing shape: schedule first, then a fabricated browser +
+        # notify + "[notify] Message sent." tail.
+        blob = (
+            'TOOL: schedule\nINPUT: {"action": "list"}\n\n'
+            'RESULT: [{"id":"abc"}]\n\n'
+            'Voy a hacer el analisis.\n'
+            'TOOL: browser\nINPUT: {"action":"open"}\n\n'
+            'RESULT: {"status":"ok"}\n'
+            'TOOL: notify\nINPUT: {"message":"fake table"}\n\n'
+            'RESULT: [notify] Message sent.\n\nEnviado'
+        )
+        out = self._cut(blob)
+        assert "notify" not in out and "RESULT:" not in out and "browser" not in out
+        name, args = parse(out)
+        assert name == "schedule" and args == {"action": "list"}
+
+    def test_multiline_notify_message_preserved(self):
+        # A RESULT:-looking line INSIDE the message string must NOT trigger a cut.
+        text = ('TOOL: notify\nINPUT: {"message": "line1\nline2\n\n'
+                'RESULT: not a real result\nbye"}')
+        assert self._cut(text) == text
+
+    def test_multiline_notify_with_fabricated_tail(self, parse):
+        text = ('TOOL: notify\nINPUT: {"message": "line1\nline2"}\n\n'
+                'RESULT: [notify] Message sent.\n\nDone')
+        out = self._cut(text)
+        name, args = parse(out)
+        assert args["message"] == "line1\nline2"
+        assert "Done" not in out and "Message sent" not in out
+
+    def test_trailing_heredoc_kept_tail_cut(self, parse):
+        text = (
+            'TOOL: shell_run\nINPUT: {"action": "run"}\n'
+            'ARG script <<<\nfor f in *.py; do echo "$f"; done\n>>>\n\n'
+            'RESULT: fake output\nTOOL: notify\nINPUT: {"message":"x"}'
+        )
+        out = self._cut(text)
+        name, args = parse(out)
+        assert "for f in" in args["script"]
+        assert "fake output" not in out and "notify" not in out
+
+    def test_legit_single_call_unchanged(self, parse):
+        text = 'TOOL: file_access\nINPUT: {"action": "list", "path": "/tmp"}'
+        name, args = parse(self._cut(text))
+        assert name == "file_access" and args["path"] == "/tmp"
+
+    def test_no_tool_call_returned_unchanged(self):
+        assert self._cut("just a normal answer, no tools") == "just a normal answer, no tools"
+
+    def test_heredoc_only_input_left_for_parser(self):
+        # No balanced JSON object — degrade to prior behaviour (unchanged).
+        text = 'TOOL: shell_run\nINPUT:\nARG script <<<\necho hi\n>>>'
+        assert self._cut(text) == text

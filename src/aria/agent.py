@@ -74,10 +74,11 @@ def _strip_fences(s: str) -> str:
     return s.strip()
 
 
-def _extract_json_object(s: str) -> str | None:
-    """Return the first brace-balanced {...} object in `s`, respecting string
-    literals so a '}' inside a JSON string value never terminates the object.
-    This is what fixes the truncation-on-first-'}' bug."""
+def _json_object_span(s: str) -> "tuple[int, int] | None":
+    """Return (start, end) indices of the first brace-balanced {...} object in
+    `s`, respecting string literals so a '}' (or a newline) inside a string value
+    never terminates the object. `end` is exclusive (just past the closing '}').
+    Returns None when no balanced object is found."""
     start = s.find("{")
     if start == -1:
         return None
@@ -98,8 +99,65 @@ def _extract_json_object(s: str) -> str | None:
         elif c == "}":
             depth -= 1
             if depth == 0:
-                return s[start:i + 1]
+                return (start, i + 1)
     return None  # unbalanced — fell off the end
+
+
+def _extract_json_object(s: str) -> str | None:
+    """Return the first brace-balanced {...} object in `s`, respecting string
+    literals so a '}' inside a JSON string value never terminates the object.
+    This is what fixes the truncation-on-first-'}' bug."""
+    span = _json_object_span(s)
+    return s[span[0]:span[1]] if span is not None else None
+
+
+# Anchored heredoc matcher (no `^`) used to walk the trailing ARG <<< >>> blocks
+# of a tool call when truncating a fabricated continuation. Mirrors _HEREDOC_RE.
+_HEREDOC_HEAD_RE = re.compile(
+    r"[ \t]*ARG[ \t]+[\w.\-]+[ \t]*<<<[ \t]*\r?\n"
+    r".*?\r?\n[ \t]*>>>[ \t]*(?:\r?\n|$)",
+    re.DOTALL,
+)
+
+
+def _truncate_after_first_tool_call(text: str) -> str:
+    """Cut a model message down to its first legitimate tool call, discarding any
+    fabricated continuation after it.
+
+    With the text `TOOL:`/`INPUT:` protocol the model can emit an entire imagined
+    transcript — extra `TOOL:`/`RESULT:` lines and their fake results — in a
+    single message (it pattern-completes the format it sees in its own context,
+    and the stream is never stopped at the tool boundary). Only the first tool
+    ever runs, but the whole blob would be stored in history as if it happened,
+    so the model believes it already sent a notify/briefing it never sent.
+
+    We keep the first `TOOL:` line, its `INPUT:` JSON object, and any trailing
+    `ARG <field> <<< … >>>` heredocs, and drop everything after. Returns `text`
+    unchanged when there is no tool call or the call's end can't be located
+    safely (e.g. unbalanced/heredoc-only INPUT) — those degrade to the prior
+    behaviour, which the downstream parser already handles."""
+    m = _TOOL_RE.search(text)
+    if not m:
+        return text
+    args_start = m.start("args")
+    args = text[args_start:]
+
+    span = _json_object_span(args)
+    if span is None:
+        return text  # no balanced JSON object — leave as-is for the parser
+    cursor = span[1]  # just past the INPUT object's closing '}'
+
+    # Absorb any trailing ARG heredoc blocks (the legitimate tail of the call),
+    # allowing only blank lines between them.
+    while True:
+        rest = args[cursor:]
+        lead = len(rest) - len(rest.lstrip())
+        hm = _HEREDOC_HEAD_RE.match(rest, lead)
+        if not hm:
+            break
+        cursor += hm.end()
+
+    return text[:args_start + cursor]
 
 
 def _escape_ctrl_in_strings(s: str) -> str:
@@ -483,9 +541,14 @@ class Agent:
             "To call a tool, output EXACTLY these two lines with no other text before them:\n\n"
             "TOOL: <tool_name>\n"
             'INPUT: {"key": "value"}\n\n'
-            "The system runs it and replies:\n\n"
+            "Then STOP. Emit exactly ONE tool call per message and wait. Do NOT "
+            "write a RESULT: line yourself, do NOT invent or continue the tool's "
+            "output, and do NOT add another TOOL: call in the same message — you "
+            "cannot know a tool's result until the system runs it. The system "
+            "runs the tool and replies on the next turn:\n\n"
             "RESULT: <o>\n\n"
-            "After RESULT, write your final answer in plain text.\n\n"
+            "Only after you receive that RESULT do you write your final answer, or "
+            "the next single tool call, in plain text.\n\n"
             "### Passing code or multi-line values\n"
             "Do NOT embed code, scripts, multi-line text, or anything with quotes "
             "or braces inside the INPUT JSON — escaping it breaks the call. Instead, "
@@ -998,6 +1061,12 @@ class Agent:
             if live is not None:
                 live.update(_renderable())
                 live.stop()
+
+        # Drop any fabricated continuation the model wrote after its first tool
+        # call (extra TOOL:/RESULT: lines + fake results). Without this the blob
+        # is stored in history and the model believes it already sent a
+        # notify/briefing it never sent — so the side-effect tool never runs.
+        full_text = _truncate_after_first_tool_call(full_text)
 
         tool_match = _TOOL_RE.search(full_text)
 
