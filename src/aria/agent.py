@@ -190,6 +190,13 @@ class Agent:
         self._active_profile  = "default"
         self._responses:    list[str] = []  # all clean text responses this turn
         self._con = None  # cached rich Console (lazily built for terminal output)
+        # REPL final-answer token streaming (terminal only; kill-switch for the
+        # rich.Live path). When the answer is streamed live, _live_rendered tells
+        # _render_answer not to print it again.
+        self._repl_stream = os.environ.get(
+            "ARIA_REPL_STREAM", "on"
+        ).strip().lower() not in ("off", "0", "false", "no")
+        self._live_rendered = False
 
         # Restore last used profile (persisted across sessions)
         if _PROFILE_STATE.exists():
@@ -650,20 +657,26 @@ class Agent:
                 for t in self.tool_schemas]
 
     def _call_model(self):
-        """One non-streaming model call. Returns the assistant `message` object,
-        or an `[error] …` string sentinel on failure (never raises)."""
+        """One model call. Returns the assistant `message` (real object, or a
+        SimpleNamespace from the streamed path), or an `[error] …` string
+        sentinel on failure (never raises). The REPL streams the final answer
+        live; channels and `chat_collect`/`chat_yield` use non-streaming."""
+        self._live_rendered = False
         now      = datetime.now(timezone.utc).astimezone()
         time_ctx = f"Current date and time: {now.strftime('%A, %Y-%m-%d %H:%M %Z')}"
         from aria import __version__
         sys_prompt = self.system_prompt + f"\n\n## Context\n{time_ctx}\nVersion: {__version__}\n"
         messages = [{"role": "system", "content": sys_prompt}] + self.history
 
-        kwargs: dict[str, Any] = dict(model=self.model, messages=messages, stream=False)
+        use_stream = self._is_terminal and self._repl_stream
+        kwargs: dict[str, Any] = dict(model=self.model, messages=messages, stream=use_stream)
         if self.tool_schemas:
             kwargs["tools"]       = self._wire_schemas()
             kwargs["tool_choice"] = "auto"
 
         try:
+            if use_stream:
+                return self._stream_call(kwargs)
             if self._is_terminal:
                 with self._console().status("[dim]Thinking…[/dim]", spinner="dots"):
                     resp = self.client.chat.completions.create(**kwargs)
@@ -672,6 +685,89 @@ class Agent:
             return resp.choices[0].message
         except Exception as exc:
             return self._friendly_error(exc)
+
+    def _stream_render(self, content_parts):
+        from rich.text import Text
+        body = "".join(content_parts)
+        if not body:
+            return Text("")
+        if self.markdown_enabled and _has_markdown(body):
+            return _chat_markdown(body)
+        return Text(body)
+
+    def _stream_call(self, kwargs):
+        """Terminal streaming path. Shows a Thinking… spinner until the first
+        delta, then renders streamed content live via rich.Live, accumulating any
+        `delta.tool_calls` fragments. Returns an assembled message-like object."""
+        from rich.live import Live
+        stream = self.client.chat.completions.create(**kwargs)
+        content_parts: list[str] = []
+        frags: dict = {}
+        con = self._console()
+        status = con.status("[dim]Thinking…[/dim]", spinner="dots")
+        status.start()
+        live = None
+        try:
+            for chunk in stream:
+                if not chunk.choices:
+                    continue
+                delta = chunk.choices[0].delta
+                token = getattr(delta, "content", None)
+                if token:
+                    if live is None:
+                        status.stop()
+                        con.print(f"\n  [bold green]{self.name}[/bold green]")
+                        live = Live(console=con, refresh_per_second=12,
+                                    vertical_overflow="visible")
+                        live.start()
+                    content_parts.append(token)
+                    live.update(self._stream_render(content_parts))
+                if getattr(delta, "tool_calls", None):
+                    self._accumulate_tool_frags(frags, delta.tool_calls)
+        finally:
+            if live is not None:
+                live.update(self._stream_render(content_parts))
+                live.stop()
+            else:
+                status.stop()
+        if live is not None:
+            self._live_rendered = True   # already shown — don't re-render
+        return self._assemble_streamed(content_parts, frags)
+
+    @staticmethod
+    def _accumulate_tool_frags(frags: dict, delta_tool_calls) -> dict:
+        """Merge a streamed `delta.tool_calls` fragment list into `frags`, keyed
+        by the call's `index` (id/name arrive once, arguments arrive in pieces)."""
+        for tcd in delta_tool_calls:
+            idx = getattr(tcd, "index", 0) or 0
+            f = frags.setdefault(idx, {"id": None, "name": "", "args": ""})
+            if getattr(tcd, "id", None):
+                f["id"] = tcd.id
+            fn = getattr(tcd, "function", None)
+            if fn is not None:
+                if getattr(fn, "name", None):
+                    f["name"] = fn.name
+                if getattr(fn, "arguments", None):
+                    f["args"] += fn.arguments
+        return frags
+
+    @staticmethod
+    def _assemble_streamed(content_parts, frags: dict):
+        """Build a message-like object (matching the non-streaming SDK shape:
+        `.content`, `.tool_calls[].{id, function.name, function.arguments}`) from
+        accumulated streamed fragments."""
+        from types import SimpleNamespace
+        content = "".join(content_parts)
+        tool_calls = [
+            SimpleNamespace(
+                id=f.get("id") or f"call_{i}",
+                type="function",
+                function=SimpleNamespace(name=f.get("name") or "",
+                                         arguments=f.get("args") or ""),
+            )
+            for i, f in sorted(frags.items())
+        ]
+        return SimpleNamespace(content=content, tool_calls=tool_calls or None)
 
     @staticmethod
     def _assistant_msg(message, tool_calls) -> dict:
@@ -809,8 +905,9 @@ class Agent:
         self._console().print(line)
 
     def _render_answer(self, text: str) -> None:
-        """Render the agent's answer under its name header, markdown if enabled."""
-        if not self._is_terminal:
+        """Render the agent's answer under its name header, markdown if enabled.
+        No-op when the content was already streamed live this turn."""
+        if not self._is_terminal or self._live_rendered:
             return
         from rich.text import Text
         con = self._console()

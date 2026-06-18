@@ -76,6 +76,45 @@ def test_wire_schemas_strips_internal_keys(minimal_env):
         assert "name" in t["function"]
 
 
+def _frag(index, id=None, name=None, args=None):
+    """Build a fake streamed delta.tool_calls fragment."""
+    from types import SimpleNamespace
+    fn = SimpleNamespace(name=name, arguments=args) if (name or args) else None
+    return SimpleNamespace(index=index, id=id, function=fn)
+
+
+def test_streamed_tool_call_assembles_from_fragments():
+    """Phase 3: id/name arrive once; arguments stream in pieces across deltas."""
+    import json
+    from aria.agent import Agent
+    frags = {}
+    Agent._accumulate_tool_frags(frags, [_frag(0, id="call_x", name="web_fetch", args='{"url"')])
+    Agent._accumulate_tool_frags(frags, [_frag(0, args=': "https://a"}')])
+    msg = Agent._assemble_streamed(["Here you go."], frags)
+    assert msg.content == "Here you go."
+    assert len(msg.tool_calls) == 1
+    tc = msg.tool_calls[0]
+    assert tc.id == "call_x"
+    assert tc.function.name == "web_fetch"
+    assert json.loads(tc.function.arguments) == {"url": "https://a"}
+
+
+def test_streamed_content_only_has_no_tool_calls():
+    from aria.agent import Agent
+    msg = Agent._assemble_streamed(["a", "b", "c"], {})
+    assert msg.content == "abc"
+    assert msg.tool_calls is None
+
+
+def test_streamed_multiple_calls_kept_in_index_order():
+    from aria.agent import Agent
+    frags = {}
+    Agent._accumulate_tool_frags(frags, [_frag(1, id="b", name="t2", args="{}")])
+    Agent._accumulate_tool_frags(frags, [_frag(0, id="a", name="t1", args="{}")])
+    msg = Agent._assemble_streamed([], frags)
+    assert [tc.id for tc in msg.tool_calls] == ["a", "b"]   # sorted by index
+
+
 def test_assistant_msg_shapes_tool_calls():
     from aria.agent import Agent
 

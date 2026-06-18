@@ -72,8 +72,10 @@ def test_required_symbol_exists(minimal_env, module, symbol):
 
 
 @pytest.mark.parametrize("method", [
-    "_call_model", "_run_one_call", "_assistant_msg", "_wire_schemas",
-    "_render_answer", "_render_tool", "_console", "_trim_history",
+    "_call_model", "_run_one_call", "_execute_call", "_assistant_msg",
+    "_wire_schemas", "_render_answer", "_render_tool", "_console",
+    "_trim_history", "_run_calls_concurrent", "_stream_call",
+    "_accumulate_tool_frags", "_assemble_streamed",
 ])
 def test_native_agent_methods_exist(minimal_env, method):
     """Guards the native loop's method surface — a deleted/renamed helper here

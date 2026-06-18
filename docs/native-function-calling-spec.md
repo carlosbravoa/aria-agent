@@ -334,10 +334,17 @@ responses; fully offline, fast).
   reads). Local-state tools (`shell_run`, `browser`, `file_access`, `notify`,
   `schedule`, `remember`, `learn`) stay sequential. Terminal concurrent batches
   render a single `⚙ Running N tools…` spinner, then per-call lines in order.
-- **Phase 3 — REPL final-answer streaming.** `delta.tool_calls` assembly + live
-  token render. Pure UX; optional. NOT started.
+- **Phase 3 — DONE.** REPL final-answer token streaming. `_call_model` streams in
+  terminal mode (`stream=True`), `_stream_call` shows a Thinking… spinner until the
+  first delta then renders content live via `rich.Live`, accumulating
+  `delta.tool_calls` fragments by index (`_accumulate_tool_frags`) and assembling a
+  message-like object (`_assemble_streamed`). `_render_answer` is suppressed when
+  the answer was already streamed (`_live_rendered`). Channels and
+  `chat_collect`/`chat_yield` stay non-streaming. Kill-switch: `ARIA_REPL_STREAM`
+  (default on).
 
-Cut **2.0** when Phase 1+2 is solid (now). There is no `auto` default to gate on.
+All three phases are landed — 2.0 is functionally complete. There is no `auto`
+default to gate on.
 
 ---
 
