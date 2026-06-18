@@ -12,8 +12,9 @@ Safety policy (applies to BOTH command and script content):
   so chaining like `echo ok && rm -rf ~` is caught.
 
 Special fields:
-  - script: pass raw script content; written to a temp file and executed.
-    Bypasses JSON escaping issues for code with quotes/braces/backslashes.
+  - script: raw script content; written to a temp file and run via
+    [interpreter, tmp_path] with shell=False — multi-line, any allowed
+    interpreter, and no shell re-parsing of quotes/backticks.
   - stdin:  pipe text into the command's stdin.
 """
 
@@ -30,22 +31,17 @@ from aria.tools._env import build_env, is_tty_command
 DEFINITION = {
     "name": "shell_run",
     "description": (
-        "Run a shell command or script.\n"
-        "\n"
-        "IMPORTANT — choose the right field to avoid JSON escaping failures:\n"
-        "  'script' — PREFERRED for any command containing double quotes, single quotes,\n"
-        "             backticks, backslashes, AWS/jq/SQL query filters, or multi-line logic.\n"
-        "             The script is written to a temp file so no JSON escaping is needed.\n"
-        "             This is always the safest choice.\n"
-        "  'command' — Only for simple commands with no quotes or special characters.\n"
-        "             If the command contains ANY quote character, use 'script' instead.\n"
-        "\n"
-        "Examples:\n"
-        "  Simple:  {\"command\": \"ls -la\"}\n"
-        "  Quotes:  {\"script\": \"aws ec2 describe-instances --query 'Reservations[*].Instances[*].InstanceId'\"}\n"
-        "  Python:  {\"script\": \"import json\\nprint(json.dumps({'key': 'value'}))\", \"interpreter\": \"python3\"}\n"
-        "\n"
-        "Destructive commands require confirmation in interactive mode and are auto-rejected otherwise."
+        "Run a shell command or script. Provide exactly ONE of:\n"
+        "  'command' — a single shell line, run through the shell so pipes (|), "
+        "&&, redirects (>) and globs (*) work. Best for simple one-liners.\n"
+        "  'script'  — multi-line code written to a temp file and run by "
+        "'interpreter' (bash default; also python3, node, ruby, perl) WITHOUT a "
+        "shell. Use for multi-line logic, non-bash languages, or any command with "
+        "quotes/backticks/filters (a command containing quotes is auto-run as a "
+        "script anyway).\n"
+        "Destructive ops (rm, dd, mv, kill, …) and commands touching secret paths "
+        "(~/.ssh, cloud credentials) need confirmation in the interactive REPL and "
+        "are refused in unattended channel/supervisor contexts."
     ),
     "parameters": {
         "type": "object",
@@ -53,17 +49,19 @@ DEFINITION = {
             "command": {
                 "type": "string",
                 "description": (
-                    "Simple shell command with NO quotes or special characters. "
-                    "If your command contains quotes, use 'script' instead to avoid JSON escaping failures."
+                    "A single shell command line, run through the shell so pipes, "
+                    "&&, redirects and globs work. For multi-line logic or non-bash "
+                    "code, use 'script' instead."
                 ),
             },
             "script": {
                 "type": "string",
                 "description": (
-                    "Script content written to a temp file and executed — no JSON escaping needed. "
-                    "Use for any command with double quotes, single quotes, backticks, backslashes, "
-                    "AWS CLI filters, jq expressions, SQL, or multi-line logic. "
-                    "Default interpreter: bash. Set 'interpreter' to 'python3' for Python scripts."
+                    "Multi-line code written to a temp file and executed with "
+                    "'interpreter' (default bash) without a shell, so quotes and "
+                    "backticks are not re-parsed. Use for multi-line logic, "
+                    "Python/Node/etc., or any command with quotes, backticks, or "
+                    "AWS/jq/SQL filters."
                 ),
             },
             "interpreter": {
@@ -229,9 +227,8 @@ def execute(args: dict) -> str:
     timeout        = int(args.get("timeout", 60))
 
     # ── Auto-redirect: command with quotes → script mode ──────────────────
-    # If the agent passed a command containing quotes, automatically treat it
-    # as a script rather than failing with JSON escaping errors. This is always
-    # safe — same execution, better DX.
+    # A command containing quotes/backticks runs more predictably as a script
+    # (shell=False, no shell re-parsing of the quotes). Same result, safer exec.
     if command and not script_content and ('"' in command or "'" in command or '`' in command):
         script_content = command
         command = ""

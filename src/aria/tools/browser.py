@@ -65,7 +65,7 @@ DEFINITION = {
             "name":      {"type": "string",  "description": "Accessible name or label of the element."},
             "text":      {"type": "string",  "description": "Text content to match (alternative to role+name)."},
             "value":     {"type": "string",  "description": "Text to type into a field."},
-            "direction": {"type": "string",  "enum": ["down", "up"], "default": "down"},
+            "direction": {"type": "string",  "enum": ["down", "up"], "default": "down", "description": "Scroll direction for the scroll action (default down)."},
             "amount":    {"type": "integer", "description": "Scroll pixels (default 500).", "default": 500},
             "progress":  {"type": "string",  "description": "Task progress note (saved for resume)."},
             "selector":  {"type": "string",  "description": "CSS selector to scope snapshot to a specific part of the page."},
