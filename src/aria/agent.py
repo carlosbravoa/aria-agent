@@ -162,6 +162,10 @@ class Agent:
         self.ws.set_window_key(self.window_key)
         self.tool_schemas = tools.load_all(config.tools_dir())
         self.ws.update_tools_registry(self.tool_schemas)
+        # Names of tools whose calls may run concurrently (opt-in PARALLEL_SAFE).
+        self._parallel_safe = {
+            t["function"]["name"] for t in self.tool_schemas if t.get("parallel_safe")
+        }
 
         self.system_prompt = self._build_system_prompt()
         # History holds only genuine conversation — no seeded examples. (Native
@@ -612,11 +616,19 @@ class Agent:
                 return
             seen_calls.append(call_sig)
 
-            # Execute each call (sequential in Phase 1) and append one tool
-            # message per call — EVERY tool_call_id must get a reply or the next
-            # request is rejected.
-            for idx, tc in enumerate(tool_calls, 1):
-                result = self._run_one_call(tc, idx)
+            # Execute each call and append one tool message per call — EVERY
+            # tool_call_id must get a reply or the next request is rejected.
+            # A batch runs concurrently only when it has >1 call and every tool
+            # in it is PARALLEL_SAFE; otherwise it runs sequentially in order.
+            indexed = list(enumerate(tool_calls, 1))
+            concurrent = (len(indexed) > 1 and
+                          all(tc.function.name in self._parallel_safe
+                              for _, tc in indexed))
+            if concurrent:
+                results = self._run_calls_concurrent(indexed)
+            else:
+                results = [self._run_one_call(tc, idx) for idx, tc in indexed]
+            for (idx, tc), result in zip(indexed, results):
                 self.history.append({
                     "role": "tool",
                     "tool_call_id": tc.id,
@@ -679,48 +691,81 @@ class Agent:
             ]
         return msg
 
-    def _run_one_call(self, tc, idx: int) -> str:
-        """Parse args, execute one tool call (with a live spinner in the REPL),
-        render its activity line, and return the raw result string that becomes
-        the tool message content."""
-        import time
-        name = tc.function.name
-        raw  = tc.function.arguments or "{}"
-
+    def _parse_call_args(self, tc):
+        """Parse one tool call's JSON arguments. Returns (args, parse_err,
+        preview). args is always a dict; parse_err is None on success."""
+        raw = tc.function.arguments or "{}"
         try:
             args = json.loads(raw) if raw.strip() else {}
             if not isinstance(args, dict):
                 args = {}
-            parse_err = None
+            return args, None, self._arg_preview(args)
         except Exception as exc:
-            args, parse_err = {}, str(exc)
+            return {}, str(exc), raw.replace("\n", " ")[:50]
 
+    def _execute_call(self, tc, idx: int) -> dict:
+        """Execute one tool call and log it — no spinner, no rendering (safe to
+        run in a worker thread). Returns a record for _render_tool + the result."""
+        import time
+        name = tc.function.name
+        raw  = tc.function.arguments or "{}"
+        args, parse_err, preview = self._parse_call_args(tc)
         if parse_err is not None:
             result, ok, elapsed = (
                 f"[agent] Could not parse arguments for {name}: {parse_err}",
                 False, 0.0,
             )
-            preview = raw.replace("\n", " ")[:50]
         else:
-            preview = self._arg_preview(args)
             start = time.monotonic()
-            if self._is_terminal:
-                label = f"[dim]⚙ [{idx}] {name}[/dim]"
-                if preview:
-                    label += f" [dim]· {preview}[/dim]"
-                with self._console().status(label, spinner="dots"):
-                    result = self._execute_tool(name, args)
-            else:
-                result = self._execute_tool(name, args)
+            result = self._execute_tool(name, args)
             elapsed = time.monotonic() - start
             ok = not _looks_like_error(result)
-
         self.ws.log_session(
             self.session_log, f"tool:{name}",
             f"**Input:** `{raw}`\n\n**Output:**\n```\n{result}\n```",
         )
-        self._render_tool(idx, name, preview, ok, elapsed, "" if ok else result)
-        return result
+        return {"idx": idx, "name": name, "preview": preview,
+                "ok": ok, "elapsed": elapsed, "result": result}
+
+    def _run_one_call(self, tc, idx: int) -> str:
+        """Sequential path: execute one call behind a live REPL spinner, render
+        its activity line, and return the result string."""
+        if self._is_terminal:
+            _, _, preview = self._parse_call_args(tc)
+            label = f"[dim]⚙ [{idx}] {tc.function.name}[/dim]"
+            if preview:
+                label += f" [dim]· {preview}[/dim]"
+            with self._console().status(label, spinner="dots"):
+                rec = self._execute_call(tc, idx)
+        else:
+            rec = self._execute_call(tc, idx)
+        self._render_tool(rec["idx"], rec["name"], rec["preview"],
+                          rec["ok"], rec["elapsed"], "" if rec["ok"] else rec["result"])
+        return rec["result"]
+
+    def _run_calls_concurrent(self, indexed) -> list[str]:
+        """Concurrent path for an all-PARALLEL_SAFE batch. `indexed` is a list of
+        (idx, tool_call). Executes all via a thread pool, then renders one
+        activity line per call in order. Returns results aligned to `indexed`."""
+        from concurrent.futures import ThreadPoolExecutor
+
+        def _work(item):
+            idx, tc = item
+            return self._execute_call(tc, idx)
+
+        max_workers = min(8, len(indexed))
+        if self._is_terminal:
+            with self._console().status(
+                    f"[dim]⚙ Running {len(indexed)} tools…[/dim]", spinner="dots"):
+                with ThreadPoolExecutor(max_workers=max_workers) as ex:
+                    records = list(ex.map(_work, indexed))   # map preserves order
+        else:
+            with ThreadPoolExecutor(max_workers=max_workers) as ex:
+                records = list(ex.map(_work, indexed))
+        for rec in records:
+            self._render_tool(rec["idx"], rec["name"], rec["preview"],
+                              rec["ok"], rec["elapsed"], "" if rec["ok"] else rec["result"])
+        return [rec["result"] for rec in records]
 
     @staticmethod
     def _arg_preview(args: dict) -> str:

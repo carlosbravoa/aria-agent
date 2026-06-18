@@ -24,6 +24,10 @@ from aria.tools._env import build_env, gog_keyring_hint
 
 _CLI = os.getenv("GMAIL_CLI", "gog")
 
+# Independent gog subprocesses (shared keyring is read-only) — a batch may run
+# concurrently. Useful for "check mail and calendar" style multi-source reads.
+PARALLEL_SAFE = True
+
 DEFINITION = {
     "name": "gmail",
     "description": (

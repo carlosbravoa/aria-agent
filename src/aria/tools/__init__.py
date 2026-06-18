@@ -29,7 +29,13 @@ def load_all(extra_dir: Path | None = None) -> list[dict[str, Any]]:
             continue
         mod = importlib.import_module(f"aria.tools.{name}")
         if hasattr(mod, "DEFINITION") and hasattr(mod, "execute"):
-            schemas[mod.DEFINITION["name"]] = {"type": "function", "function": mod.DEFINITION}
+            schemas[mod.DEFINITION["name"]] = {
+                "type": "function",
+                "function": mod.DEFINITION,
+                # Opt-in concurrency: a batch of calls is run in parallel only
+                # when every tool in it is marked safe. Default False.
+                "parallel_safe": bool(getattr(mod, "PARALLEL_SAFE", False)),
+            }
 
     # 2. User tools (loose .py files in extra_dir)
     if extra_dir and extra_dir.is_dir():
@@ -49,6 +55,7 @@ def load_all(extra_dir: Path | None = None) -> list[dict[str, Any]]:
                             "type": "function",
                             "function": mod.DEFINITION,
                             "_module": mod,
+                            "parallel_safe": bool(getattr(mod, "PARALLEL_SAFE", False)),
                         }
             except Exception as exc:
                 import logging

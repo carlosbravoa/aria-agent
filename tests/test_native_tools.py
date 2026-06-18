@@ -56,6 +56,15 @@ def test_arg_preview_truncates_and_flattens():
     assert Agent._arg_preview({}) == ""
 
 
+def test_parallel_safe_flag_surfaced(minimal_env):
+    from aria import tools
+    schemas = {t["function"]["name"]: t for t in tools.load_all()}
+    # read/stateless tools opt in; everything else defaults False
+    assert schemas["web_fetch"]["parallel_safe"] is True
+    assert schemas["shell_run"]["parallel_safe"] is False
+    assert schemas["remember"]["parallel_safe"] is False
+
+
 def test_wire_schemas_strips_internal_keys(minimal_env):
     from aria.agent import Agent
     a = Agent()

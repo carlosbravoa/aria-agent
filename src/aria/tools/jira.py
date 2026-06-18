@@ -18,6 +18,10 @@ from __future__ import annotations
 
 import os
 
+# Stateless REST calls over httpx, no shared local state — a batch may run
+# concurrently.
+PARALLEL_SAFE = True
+
 DEFINITION = {
     "name": "jira",
     "description": (

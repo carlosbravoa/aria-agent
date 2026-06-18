@@ -15,6 +15,9 @@ from __future__ import annotations
 import re
 import httpx
 
+# Pure read, no shared local state — a batch of fetches may run concurrently.
+PARALLEL_SAFE = True
+
 DEFINITION = {
     "name": "web_fetch",
     "description": (

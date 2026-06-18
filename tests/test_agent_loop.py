@@ -176,6 +176,55 @@ def test_multiline_tool_arg_executes(minimal_env, native_client, monkeypatch):
     assert "9am standup" in sent[0][1]      # full briefing actually reached notify
 
 
+def _concurrency_probe():
+    """Returns (fake_execute, state). state['max'] is the peak number of
+    fake_execute calls running at once — 2 proves concurrency, 1 proves serial."""
+    import threading
+    import time
+    state = {"now": 0, "max": 0}
+    lock = threading.Lock()
+
+    def fake(name, args):
+        with lock:
+            state["now"] += 1
+            state["max"] = max(state["max"], state["now"])
+        time.sleep(0.05)
+        with lock:
+            state["now"] -= 1
+        return f"ok:{name}"
+
+    return fake, state
+
+
+def test_parallel_safe_batch_runs_concurrently(minimal_env, native_client, monkeypatch):
+    """Two PARALLEL_SAFE calls (web_fetch) in one turn run at the same time."""
+    a = _agent()
+    a.client = native_client(
+        {"tool_calls": [("web_fetch", {"url": "a"}), ("web_fetch", {"url": "b"})]},
+        "done",
+    )
+    fake, state = _concurrency_probe()
+    monkeypatch.setattr(a, "_execute_tool", fake)
+    out = a.chat_collect("fetch both")
+    assert out == "done"
+    assert state["max"] == 2                       # both in flight at once
+    assert len([m for m in a.history if m.get("role") == "tool"]) == 2
+
+
+def test_mixed_batch_runs_sequentially(minimal_env, native_client, monkeypatch):
+    """A batch with any non-PARALLEL_SAFE tool (shell_run) runs serially."""
+    a = _agent()
+    a.client = native_client(
+        {"tool_calls": [("web_fetch", {"url": "a"}), ("shell_run", {"action": "run"})]},
+        "done",
+    )
+    fake, state = _concurrency_probe()
+    monkeypatch.setattr(a, "_execute_tool", fake)
+    out = a.chat_collect("do both")
+    assert out == "done"
+    assert state["max"] == 1                        # never concurrent
+
+
 class TestResumeDropsInterruptedExchange:
     """A session that breaks mid-task (error sentinel / loop-limit / closed
     mid-run) writes the user turn to the window but never an assistant reply.

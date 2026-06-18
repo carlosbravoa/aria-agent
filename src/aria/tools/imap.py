@@ -35,6 +35,9 @@ import os
 import re
 from email.utils import parsedate_to_datetime
 
+# Each call opens its own IMAP connection — a batch may run concurrently.
+PARALLEL_SAFE = True
+
 DEFINITION = {
     "name": "imap",
     "description": (

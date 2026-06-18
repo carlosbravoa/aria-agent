@@ -324,15 +324,20 @@ responses; fully offline, fast).
 
 ## Phasing / release ladder
 
-- **Phase 1 — native core, non-streaming.** New loop, list-handling, history/wire,
-  capability check, system-prompt slimming, `remember`/`learn` tools. Ships
-  channels complete. REPL functional via the activity layer (spinner + tool log).
-- **Phase 2 — `PARALLEL_SAFE` concurrency.** ThreadPoolExecutor + the `all(...)`
-  gate + per-tool flags. (Small enough it may land with Phase 1.)
+- **Phase 1 — DONE.** Native core, non-streaming. New loop, list-handling,
+  history/wire, capability check, system-prompt slimming, `remember`/`learn`
+  tools. Ships channels complete; REPL functional via the activity layer.
+- **Phase 2 — DONE.** `PARALLEL_SAFE` concurrency: `load_all()` reads the per-tool
+  flag, `_run_loop` runs a batch concurrently (ThreadPoolExecutor) only when it
+  has >1 call and every tool is safe, else sequentially. Marked safe:
+  `web_fetch`, `gmail`, `calendar`, `drive`, `jira`, `imap` (network/stateless
+  reads). Local-state tools (`shell_run`, `browser`, `file_access`, `notify`,
+  `schedule`, `remember`, `learn`) stay sequential. Terminal concurrent batches
+  render a single `⚙ Running N tools…` spinner, then per-call lines in order.
 - **Phase 3 — REPL final-answer streaming.** `delta.tool_calls` assembly + live
-  token render. Pure UX; optional.
+  token render. Pure UX; optional. NOT started.
 
-Cut **2.0** when Phase 1 (+2) is solid. There is no `auto` default to gate on.
+Cut **2.0** when Phase 1+2 is solid (now). There is no `auto` default to gate on.
 
 ---
 
