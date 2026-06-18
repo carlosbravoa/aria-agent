@@ -140,3 +140,46 @@ def test_multiline_notify_message_executes(minimal_env, mock_client, monkeypatch
     a.chat_collect("send briefing")
     assert sent and sent[0][0] == "notify"
     assert "9am standup" in sent[0][1]      # full briefing actually reached notify
+
+
+class TestResumeDropsInterruptedExchange:
+    """A session that breaks mid-task (error sentinel / loop-limit / closed
+    mid-run) writes the user turn to the window but never an assistant reply.
+    On resume that dangling user turn must NOT be seeded as a pending request,
+    or the model hijacks the next message to resume the unfinished task."""
+
+    def _seed_window(self, ws_path, turns):
+        from aria.workspace import Workspace
+        ws = Workspace(ws_path)
+        ws.set_window_key("repl")
+        for role, content in turns:
+            ws.append_conversation_window(role, content, "Aria")
+
+    def test_dangling_user_turn_dropped(self, minimal_env):
+        from aria.agent import Agent
+        self._seed_window(minimal_env, [
+            ("user", "hello"),
+            ("assistant", "hi there"),
+            ("user", "do the long broken task"),   # interrupted — no reply
+        ])
+        a = Agent()
+        contents = [m["content"] for m in a.history]
+        assert "do the long broken task" not in contents
+        assert contents == ["hello", "hi there"]
+        assert a.history[-1]["role"] == "assistant"   # well-formed past context
+
+    def test_clean_window_preserved(self, minimal_env):
+        from aria.agent import Agent
+        self._seed_window(minimal_env, [
+            ("user", "hello"),
+            ("assistant", "hi there"),
+        ])
+        a = Agent()
+        contents = [m["content"] for m in a.history]
+        assert contents == ["hello", "hi there"]   # nothing over-trimmed
+
+    def test_user_only_window_seeds_empty(self, minimal_env):
+        from aria.agent import Agent
+        self._seed_window(minimal_env, [("user", "the only, interrupted message")])
+        a = Agent()
+        assert a.history == []   # no pending turn to resume

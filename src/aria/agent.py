@@ -370,6 +370,15 @@ class Agent:
         # Resume the prior conversation as real history turns so a restarted
         # REPL/Telegram session continues with genuine immediate context.
         prior = self.ws.load_conversation_window_messages()
+        # A clean turn always ends with the assistant's final reply. A resumed
+        # window ending on a user turn is an interrupted/failed exchange from a
+        # prior session (error sentinel, loop-limit, or the session was closed
+        # mid-run — none of those write an assistant turn). Drop trailing user
+        # turns so the model resumes with well-formed PAST context and never
+        # treats the unfinished request as still pending, hijacking the next
+        # message to resume it instead of answering.
+        while prior and prior[-1]["role"] == "user":
+            prior.pop()
         self.history: list[dict[str, Any]] = list(self._seed) + prior
         self.session_log    = self.ws.new_session_path()
         self._last_response   = ""  # last clean text response
