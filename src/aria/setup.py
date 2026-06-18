@@ -18,7 +18,9 @@ LLM_BASE_URL=http://localhost:11434/v1
 # API key — use any string for local models (Ollama, LM Studio, etc.)
 LLM_API_KEY=ollama
 
-# Model name — must be available at your endpoint
+# Model name — must be available at your endpoint.
+# Aria 2.0 requires a model that supports native tool/function calling
+# (e.g. Claude, GPT-4o). Models without tool support → use Aria 1.x.
 LLM_MODEL=llama3.2
 
 # Display name used in the terminal

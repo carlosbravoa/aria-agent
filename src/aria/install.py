@@ -165,6 +165,10 @@ def configure_env(dry_run: bool = False) -> tuple[dict[str, str], set[str]]:
     info("  Anthropic: https://api.anthropic.com/v1")
     info("  OpenAI:    https://api.openai.com/v1")
     info("  Ollama:    http://localhost:11434/v1")
+    info("")
+    info("Aria 2.0 uses native tool calling — your model/endpoint must support it.")
+    info("Hosted models (Claude, GPT-4o) do; many local models do too if the")
+    info("runtime exposes the tools API. If yours doesn't, use Aria 1.x instead.")
 
     values["LLM_BASE_URL"] = _ask("LLM_BASE_URL", e("LLM_BASE_URL") or "http://localhost:11434/v1", required=True)
     values["LLM_API_KEY"]  = _ask("LLM_API_KEY",  e("LLM_API_KEY")  or "ollama", secret=True,
