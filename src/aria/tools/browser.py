@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 import os
+import random
 import subprocess
 import time
 from pathlib import Path
@@ -39,7 +40,7 @@ DEFINITION = {
         "when the user explicitly asks to use the browser. "
         "Actions: open (navigate to URL), snapshot (get page structure for interaction), "
         "read (extract full readable text content — use for articles, emails, docs), "
-        "click (click an element by role/name/text), type (fill a field), "
+        "click (click an element by role/name/text), type (fill a field; set submit=true to press Enter), "
         "eval (run JavaScript directly in the page), scroll (scroll the page), "
         "back (go back), resume (continue a paused browser task), "
         "close_tab (close current tab). "
@@ -64,7 +65,8 @@ DEFINITION = {
             "role":      {"type": "string",  "description": "ARIA role of element (button, link, textbox...)."},
             "name":      {"type": "string",  "description": "Accessible name or label of the element."},
             "text":      {"type": "string",  "description": "Text content to match (alternative to role+name)."},
-            "value":     {"type": "string",  "description": "Text to type into a field."},
+            "value":     {"type": "string",  "description": "Text to type into a field (for type)."},
+            "submit":    {"type": "boolean", "default": False, "description": "For type: press Enter after typing to submit the field/form."},
             "direction": {"type": "string",  "enum": ["down", "up"], "default": "down", "description": "Scroll direction for the scroll action (default down)."},
             "amount":    {"type": "integer", "description": "Scroll pixels (default 500).", "default": 500},
             "progress":  {"type": "string",  "description": "Task progress note (saved for resume)."},
@@ -84,6 +86,16 @@ _STATE     = Path.home() / ".aria" / "browser_state.json"
 # Chrome 149: evil origins are rejected, this one connects.
 _CDP_ORIGIN = "http://localhost"
 _PROFILE   = os.environ.get("CHROME_PROFILE_DIR", "").strip()
+
+# Human-like interaction: real pointer paths, typing cadence, wheel scrolling,
+# and occasional idle motion. On by default; ARIA_BROWSER_HUMANIZE=off reverts to
+# fast direct dispatch. Kept lean so it never feels sluggish.
+_HUMANIZE = os.environ.get("ARIA_BROWSER_HUMANIZE", "on").strip().lower() not in (
+    "off", "0", "false", "no")
+# Process-level cursor position so motion is continuous across actions.
+_last_mouse = [300.0, 300.0]
+# Above this length, typing skips per-char cadence (stays snappy on long values).
+_FAST_TYPE_THRESHOLD = 80
 
 
 # ── Chrome detection ──────────────────────────────────────────────────────────
@@ -486,6 +498,224 @@ def _load_state() -> dict | None:
     return None
 
 
+# ── Human-like interaction ─────────────────────────────────────────────────
+#
+# The CDP-dispatch helpers (_move_to/_human_click_at/_type_text/_wheel_scroll)
+# need a live browser. The *planners* below (_ease/_mouse_path/_target_point/
+# _type_plan/_scroll_plan) are pure and unit-tested — they hold the timing and
+# geometry logic so the dispatch layer stays trivial.
+
+def _ease(t: float) -> float:
+    """easeInOutQuad on [0,1] — slow-fast-slow, like a real hand."""
+    return 2 * t * t if t < 0.5 else 1 - (-2 * t + 2) ** 2 / 2
+
+
+def _mouse_path(start, end, steps: int | None = None):
+    """Eased list of (x,y) points from start to end with small perpendicular
+    jitter (max mid-path). First point steps off `start`; last point == `end`."""
+    sx, sy = start
+    ex, ey = end
+    dist = ((ex - sx) ** 2 + (ey - sy) ** 2) ** 0.5
+    if steps is None:
+        steps = max(4, min(14, int(dist / 40) + 3))
+    px, py = (-(ey - sy) / dist, (ex - sx) / dist) if dist else (0.0, 0.0)
+    pts = []
+    for i in range(1, steps + 1):
+        t = i / steps
+        e = _ease(t)
+        x = sx + (ex - sx) * e
+        y = sy + (ey - sy) * e
+        if i < steps:
+            j = random.uniform(-2.5, 2.5) * (1 - abs(2 * t - 1))  # 0 at ends, max mid
+            x += px * j
+            y += py * j
+        pts.append((x, y))
+    pts[-1] = (ex, ey)
+    return pts
+
+
+def _target_point(rect):
+    """A click point inside rect — randomized off-centre when humanizing, so we
+    never hit the exact pixel centre every time."""
+    cx = rect["x"] + rect["width"] / 2
+    cy = rect["y"] + rect["height"] / 2
+    if not _HUMANIZE:
+        return cx, cy
+    return (cx + rect["width"] * random.uniform(-0.25, 0.25),
+            cy + rect["height"] * random.uniform(-0.25, 0.25))
+
+
+def _type_plan(text: str):
+    """Per-char delays (seconds) for human typing cadence: a quick base with an
+    occasional 'thinking' pause and a touch extra after spaces."""
+    plan = []
+    for ch in text:
+        d = random.uniform(0.018, 0.055)
+        if random.random() < 0.07:
+            d += random.uniform(0.10, 0.18)
+        elif ch == " ":
+            d += random.uniform(0.0, 0.03)
+        plan.append(d)
+    return plan
+
+
+def _scroll_plan(total: int):
+    """Split a scroll delta into 2-4 wheel increments summing EXACTLY to total
+    (single increment when not humanizing)."""
+    n = random.randint(2, 4) if _HUMANIZE else 1
+    if n == 1:
+        return [total]
+    weights = [random.uniform(0.8, 1.2) for _ in range(n)]
+    s = sum(weights)
+    chunks = [int(total * w / s) for w in weights]
+    chunks[-1] = total - sum(chunks[:-1])   # exact remainder, no drift
+    return chunks
+
+
+def _move_to(session: "CDPSession", x: float, y: float) -> None:
+    """Move the cursor to (x,y) — an eased, jittered path when humanizing, else a
+    single hop. Updates the process-level cursor position."""
+    global _last_mouse
+    if _HUMANIZE:
+        for px, py in _mouse_path(_last_mouse, (x, y)):
+            session.send("Input.dispatchMouseEvent",
+                         {"type": "mouseMoved", "x": px, "y": py, "buttons": 0})
+            time.sleep(random.uniform(0.006, 0.014))
+    else:
+        session.send("Input.dispatchMouseEvent",
+                     {"type": "mouseMoved", "x": x, "y": y, "buttons": 0})
+    _last_mouse = [x, y]
+
+
+def _human_click_at(session: "CDPSession", x: float, y: float) -> None:
+    """Move to the point, dwell briefly, then press/release with a real gap."""
+    _move_to(session, x, y)
+    if _HUMANIZE:
+        time.sleep(random.uniform(0.03, 0.08))
+    session.send("Input.dispatchMouseEvent",
+                 {"type": "mousePressed", "x": x, "y": y,
+                  "button": "left", "buttons": 1, "clickCount": 1})
+    time.sleep(random.uniform(0.04, 0.09) if _HUMANIZE else 0.02)
+    session.send("Input.dispatchMouseEvent",
+                 {"type": "mouseReleased", "x": x, "y": y,
+                  "button": "left", "buttons": 0, "clickCount": 1})
+
+
+def _type_text(session: "CDPSession", text: str) -> None:
+    """Type via real key events. Humanized cadence for short values; a fast burst
+    for long ones (and when humanizing is off) so it never feels sluggish."""
+    if _HUMANIZE and len(text) <= _FAST_TYPE_THRESHOLD:
+        for ch, d in zip(text, _type_plan(text)):
+            session.send("Input.dispatchKeyEvent", {"type": "keyDown", "key": ch})
+            session.send("Input.dispatchKeyEvent", {"type": "char", "text": ch})
+            session.send("Input.dispatchKeyEvent", {"type": "keyUp", "key": ch})
+            time.sleep(d)
+    else:
+        for ch in text:
+            session.send("Input.dispatchKeyEvent", {"type": "char", "text": ch})
+
+
+def _press_enter(session: "CDPSession") -> None:
+    for t in ("keyDown", "keyUp"):
+        session.send("Input.dispatchKeyEvent",
+                     {"type": t, "key": "Enter", "code": "Enter",
+                      "windowsVirtualKeyCode": 13, "text": "\r"})
+
+
+def _wheel_scroll(session: "CDPSession", total_delta: int) -> None:
+    x, y = _last_mouse
+    for chunk in _scroll_plan(total_delta):
+        session.send("Input.dispatchMouseEvent",
+                     {"type": "mouseWheel", "x": x, "y": y,
+                      "deltaX": 0, "deltaY": chunk})
+        if _HUMANIZE:
+            time.sleep(random.uniform(0.04, 0.10))
+
+
+def _ambient_noise(session: "CDPSession") -> None:
+    """Occasional cheap idle motion (~30%) so interaction isn't robotically
+    direct — a small cursor drift or a micro-scroll. No-op when humanizing off."""
+    if not _HUMANIZE or random.random() > 0.3:
+        return
+    if random.random() < 0.5:
+        _move_to(session,
+                 max(0.0, _last_mouse[0] + random.uniform(-40, 40)),
+                 max(0.0, _last_mouse[1] + random.uniform(-30, 30)))
+    else:
+        session.send("Input.dispatchMouseEvent",
+                     {"type": "mouseWheel", "x": _last_mouse[0], "y": _last_mouse[1],
+                      "deltaX": 0, "deltaY": random.choice([-60, 40, 60])})
+        time.sleep(0.05)
+
+
+def _wait_ready(session: "CDPSession", timeout: float = 5.0) -> None:
+    """Poll document.readyState until 'complete' (capped), then a small settle.
+    Replaces fixed sleeps — snappier on fast pages, safer on slow ones."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            r = session.send("Runtime.evaluate",
+                             {"expression": "document.readyState", "returnByValue": True},
+                             timeout=3)
+            if r.get("result", {}).get("value") == "complete":
+                break
+        except Exception:
+            break
+        time.sleep(0.1)
+    time.sleep(0.2)
+
+
+# Unified element finder: ranks candidates (visible, exact > startsWith >
+# substring, in-viewport bonus), scrolls the winner into view, returns its rect.
+# `__SPEC__` is replaced with {"selector": "..."} or {"sel": "...", "needle": "..."}.
+_FINDER_JS = r"""
+(function(spec){
+  function vis(e){var cs=getComputedStyle(e);
+    if(cs.display==='none'||cs.visibility==='hidden'||parseFloat(cs.opacity)<0.1)return false;
+    var r=e.getBoundingClientRect();return r.width>=1&&r.height>=1;}
+  function label(e){return ((e.getAttribute('aria-label')||e.placeholder||e.value||e.innerText||'')+'').trim().toLowerCase();}
+  function rect(e){if(!e)return null;e.scrollIntoView({block:'center',inline:'center'});
+    var r=e.getBoundingClientRect();return {x:r.x,y:r.y,width:r.width,height:r.height};}
+  var el=null;
+  if(spec.selector){ try{ el=document.querySelector(spec.selector); }catch(e){ el=null; } }
+  else {
+    var cands; try{ cands=Array.from(document.querySelectorAll(spec.sel)); }catch(e){ cands=[]; }
+    var needle=(spec.needle||'').toLowerCase(), best=null, bs=-1;
+    for(var i=0;i<cands.length;i++){var e=cands[i]; if(!vis(e))continue;
+      var t=label(e); if(needle && t.indexOf(needle)<0) continue;
+      var sc = t===needle?3 : (t.indexOf(needle)===0?2:1);
+      var r=e.getBoundingClientRect(); if(r.top>=0&&r.bottom<=innerHeight) sc+=0.5;
+      if(sc>bs){bs=sc;best=e;}}
+    el=best;
+  }
+  return rect(el);
+})(__SPEC__)
+"""
+
+# Focus an input/textbox by a fuzzy label match, scroll it in, select existing
+# text (so typing replaces it). Returns true/false. `__NEEDLE__` is a JSON string.
+_FOCUS_JS = r"""
+(function(needle){
+  var el=Array.from(document.querySelectorAll(
+      'input,textarea,[contenteditable="true"],[role="textbox"],[role="searchbox"],[role="combobox"]'))
+    .find(function(e){return (e.placeholder||e.name||e.id||e.getAttribute('aria-label')||'')
+      .toLowerCase().includes(needle);});
+  if(!el) return false;
+  el.scrollIntoView({block:'center'});
+  el.focus();
+  try{ if(el.setSelectionRange) el.setSelectionRange(0,(el.value||'').length);
+       else if(el.select) el.select(); }catch(e){}
+  return true;
+})(__NEEDLE__)
+"""
+
+# Fire input/change on the focused field so controlled (React/Vue) inputs commit.
+_FIRE_INPUT_JS = (
+    "(function(){var el=document.activeElement; if(!el) return;"
+    "['input','change'].forEach(function(t){el.dispatchEvent(new Event(t,{bubbles:true}));});})()"
+)
+
+
 # ── Main execute ──────────────────────────────────────────────────────────────
 
 def execute(args: dict) -> str:
@@ -553,8 +783,10 @@ def _execute_action(session: CDPSession, action: str, args: dict) -> str:
                 # Fallback: navigate in current tab
                 session.send("Page.navigate", {"url": url}, timeout=15)
 
-            # Wait for page to settle
-            time.sleep(2)
+            # Wait for the page to actually finish loading (capped), not a fixed
+            # sleep — faster on quick pages, safer on slow ones.
+            _wait_ready(session, timeout=6)
+            _ambient_noise(session)
             return _get_snapshot(session)
 
         case "snapshot":
@@ -646,49 +878,20 @@ def _execute_action(session: CDPSession, action: str, args: dict) -> str:
             selector = args.get("selector", "")
 
             if selector:
-                expr = (
-                    f"(function(){{"
-                    f"  var el = document.querySelector({json.dumps(selector)});"
-                    f"  return el ? el.getBoundingClientRect() : null;"
-                    f"}})()"
-                )
+                spec = {"selector": selector}
             elif role and name:
-                expr = (
-                    f"(function(){{"
-                    f"  var role = {json.dumps(role)};"
-                    f"  var name = {json.dumps(name.lower())};"
-                    f"  var els = document.querySelectorAll('[role="' + role + '"], ' + role);"
-                    f"  var el = Array.from(els).find(e => "
-                    f"    (e.innerText||e.getAttribute('aria-label')||'').toLowerCase().includes(name));"
-                    f"  return el ? el.getBoundingClientRect() : null;"
-                    f"}})()"
-                )
+                spec = {"sel": f'[role="{role}"], {role}', "needle": name}
             elif name:
-                expr = (
-                    f"(function(){{"
-                    f"  var name = {json.dumps(name.lower())};"
-                    f"  var candidates = document.querySelectorAll("
-                    f"    'a,button,input,select,textarea,[role]');"
-                    f"  var el = Array.from(candidates).find(e => "
-                    f"    (e.getAttribute('aria-label')||e.placeholder||"
-                    f"     e.innerText||'').toLowerCase().includes(name));"
-                    f"  return el ? el.getBoundingClientRect() : null;"
-                    f"}})()"
-                )
+                spec = {"sel": "a,button,input,select,textarea,[role]", "needle": name}
             elif text:
-                expr = (
-                    f"(function(){{"
-                    f"  var txt = {json.dumps(text.lower())};"
-                    f"  var candidates = document.querySelectorAll("
-                    f"    'a,button,input,label,[role=\"button\"],[role=\"link\"],[role=\"menuitem\"]');"
-                    f"  var el = Array.from(candidates).find(e => "
-                    f"    (e.innerText||e.getAttribute('aria-label')||'').toLowerCase().includes(txt));"
-                    f"  return el ? el.getBoundingClientRect() : null;"
-                    f"}})()"
-                )
+                spec = {"sel": 'a,button,input,label,[role="button"],[role="link"],[role="menuitem"]',
+                        "needle": text}
             else:
                 return "[browser] Provide selector, role+name, name, or text to identify the element."
 
+            # The finder ranks candidates, scrolls the winner into view, and
+            # returns its (now on-screen) rect — fixes clicks on off-screen matches.
+            expr = _FINDER_JS.replace("__SPEC__", json.dumps(spec))
             result = session.send("Runtime.evaluate",
                 {"expression": expr, "returnByValue": True}, timeout=5)
             rect = result.get("result", {}).get("value")
@@ -698,53 +901,46 @@ def _execute_action(session: CDPSession, action: str, args: dict) -> str:
                 label = selector or name or text or f"{role}+{name}"
                 return f"[browser] Element not found: '{label}'\n\nCurrent page:\n{snap}"
 
-            x = rect["x"] + rect["width"]  / 2
-            y = rect["y"] + rect["height"] / 2
-
-            for etype in ["mousePressed", "mouseReleased"]:
-                session.send("Input.dispatchMouseEvent", {
-                    "type": etype, "x": x, "y": y,
-                    "button": "left", "clickCount": 1,
-                })
-            time.sleep(1)
+            _ambient_noise(session)
+            x, y = _target_point(rect)
+            _human_click_at(session, x, y)
+            _wait_ready(session, timeout=4)
             return _get_snapshot(session)
 
         case "type":
-            value = args.get("value", "")
+            value  = args.get("value", "")
             if not value:
                 return "[browser] 'value' is required for type."
-            name = args.get("name", "")
+            name   = args.get("name", "")
+            submit = bool(args.get("submit", False))
 
             if name:
-                # Focus the field first
-                expr = (
-                    f"(function(){{"
-                    f"  var el = Array.from(document.querySelectorAll('input,textarea'))"
-                    f"    .find(e => (e.placeholder||e.name||e.id||e.getAttribute('aria-label')||'').toLowerCase().includes({json.dumps(name.lower())}));"
-                    f"  if(el) {{ el.focus(); return true; }}"
-                    f"  return false;"
-                    f"}})()"
-                )
-                session.send("Runtime.evaluate",
-                    {"expression": expr, "returnByValue": True}, timeout=5)
+                # Focus + scroll-in + select existing text (so typing replaces it).
+                focus_expr = _FOCUS_JS.replace("__NEEDLE__", json.dumps(name.lower()))
+                fr = session.send("Runtime.evaluate",
+                    {"expression": focus_expr, "returnByValue": True}, timeout=5)
+                if not fr.get("result", {}).get("value"):
+                    snap = _get_snapshot(session)
+                    return f"[browser] No input field matching '{name}'.\n\nCurrent page:\n{snap}"
 
-            # Type each character
-            for char in value:
-                session.send("Input.dispatchKeyEvent", {
-                    "type": "char", "text": char,
-                })
-            field_label = args.get("name", "") or "focused field"
+            _type_text(session, value)
+            # Commit for controlled (React/Vue) inputs that ignore raw key events.
+            session.send("Runtime.evaluate", {"expression": _FIRE_INPUT_JS, "returnByValue": False})
+
+            field_label = name or "focused field"
+            if submit:
+                _press_enter(session)
+                _wait_ready(session, timeout=4)
+                return (f"Typed {len(value)} chars into [{field_label}] and pressed Enter\n\n"
+                        f"{_get_snapshot(session)}")
             return f"Typed {len(value)} chars into [{field_label}]"
 
         case "scroll":
             direction = args.get("direction", "down")
             amount    = int(args.get("amount", 500))
             delta     = amount if direction == "down" else -amount
-            session.send("Runtime.evaluate", {
-                "expression": f"window.scrollBy(0, {delta})",
-                "returnByValue": False,
-            })
-            time.sleep(0.5)
+            _wheel_scroll(session, delta)
+            time.sleep(0.3)
             return _get_snapshot(session)
 
         case "back":
@@ -752,7 +948,7 @@ def _execute_action(session: CDPSession, action: str, args: dict) -> str:
                 "expression": "window.history.back()",
                 "returnByValue": False,
             })
-            time.sleep(1.5)
+            _wait_ready(session, timeout=4)
             return _get_snapshot(session)
 
         case "close_tab":
