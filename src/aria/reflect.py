@@ -125,12 +125,18 @@ def _ops_consolidation_prompt(current_ops: str, new_observations: str) -> str:
     )
 
 
-def run(notify: bool = False) -> str:
+def run(notify: bool = False, *, base_url: str | None = None,
+        api_key: str | None = None, model: str | None = None) -> str:
     """Run the reflection pass. Returns a status string.
 
     Serialised with a file lock so the supervisor's periodic job and a REPL
     background thread can't run it at the same time (which would double the LLM
-    cost and clobber patterns.md / operational_memory.md)."""
+    cost and clobber patterns.md / operational_memory.md).
+
+    `base_url`/`api_key`/`model` override the default `LLM_*` env profile. The
+    REPL background pass passes its active profile so reflection uses the same
+    endpoint the user is actually on — the default profile may be down (which is
+    often why they switched). Foreground `aria-reflect` passes nothing → env."""
     from aria import config
     from aria.workspace import Workspace
 
@@ -141,7 +147,8 @@ def run(notify: bool = False) -> str:
     if lock is False:
         return "Reflection: another pass is already running — skipped."
     try:
-        return _run_locked(ws, notify)
+        return _run_locked(ws, notify, base_url=base_url,
+                           api_key=api_key, model=model)
     finally:
         _release_reflect_lock(lock)
 
@@ -176,7 +183,8 @@ def _release_reflect_lock(lock) -> None:
         pass
 
 
-def _run_locked(ws, notify: bool) -> str:
+def _run_locked(ws, notify: bool, *, base_url: str | None = None,
+                api_key: str | None = None, model: str | None = None) -> str:
     from openai import OpenAI
 
     unanalysed = ws.unanalysed_sessions()
@@ -188,10 +196,10 @@ def _run_locked(ws, notify: bool) -> str:
     log.info("Reflection: %d new sessions, batches of %d", len(unanalysed), _BATCH_SIZE)
 
     client = OpenAI(
-        base_url=os.environ["LLM_BASE_URL"],
-        api_key=os.environ.get("LLM_API_KEY", "local"),
+        base_url=base_url or os.environ["LLM_BASE_URL"],
+        api_key=api_key or os.environ.get("LLM_API_KEY", "local"),
     )
-    model = os.environ.get("LLM_MODEL", "llama3.2")
+    model = model or os.environ.get("LLM_MODEL", "llama3.2")
 
     # ── Phase 1: extract raw observations from each batch ────────────────────
     all_observations: list[str] = []

@@ -59,10 +59,21 @@ def _parse_window(text: str) -> list[str]:
 
 
 def _format_entry(role: str, content: str, agent_name: str) -> str:
-    label   = "User" if role == "user" else agent_name
-    snippet = content.strip()[:_WINDOW_MSG_CHARS]
-    if len(content.strip()) > _WINDOW_MSG_CHARS:
-        snippet += "…"
+    label = "User" if role == "user" else agent_name
+    full  = content.strip()
+    if len(full) > _WINDOW_MSG_CHARS:
+        # The window stores only an excerpt to bound context cost. Mark it
+        # explicitly so that when this turn is reloaded as history next session
+        # the model understands the rest was DELIVERED at the time — not cut off
+        # or left unfinished. Without this, a truncated long reply ending in "…"
+        # reads as an incomplete/undelivered answer and the model re-does work.
+        snippet = (
+            full[:_WINDOW_MSG_CHARS]
+            + f" […excerpt: {len(full)} chars total, full reply was delivered "
+              "at the time; this is a trimmed history record]"
+        )
+    else:
+        snippet = full
     return f"**{label}:** {snippet}"
 
 

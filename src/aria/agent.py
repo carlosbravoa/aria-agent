@@ -139,10 +139,12 @@ class Agent:
         # Rich is used for status lines (tool calls, memory saves) via console.print.
         self._output = output_callback or (lambda t: print(t, end="", flush=True))
         self._is_terminal = output_callback is None
-        self.client = OpenAI(
-            base_url=os.environ["LLM_BASE_URL"],
-            api_key=os.environ.get("LLM_API_KEY", "local"),
-        )
+        # Track the active connection so background jobs (reflection) reuse the
+        # SAME endpoint/model the user is actually on — not the default profile,
+        # which may be down (that's often why the user switched profiles).
+        self._base_url = os.environ["LLM_BASE_URL"]
+        self._api_key  = os.environ.get("LLM_API_KEY", "local")
+        self.client = OpenAI(base_url=self._base_url, api_key=self._api_key)
         self.model: str = os.environ.get("LLM_MODEL", "llama3.2")
         self.name: str  = os.environ.get("AGENT_NAME", "Agent")
         # Terminal Markdown rendering. Default from ARIA_REPL_MARKDOWN (on);
@@ -236,13 +238,30 @@ class Agent:
                 return  # Not due yet
 
         import threading
+        import logging
+
+        # Reflection talks to the LLM directly; reuse the connection the agent is
+        # ACTUALLY on (active profile), not the default env profile — the default
+        # may be unreachable, which is often why the user switched. Snapshot the
+        # values now so the thread doesn't race a later profile switch.
+        base_url, api_key, model = self._base_url, self._api_key, self.model
 
         def _run() -> None:
+            # Hard-silence reflection's own logger for the duration of this
+            # background pass so a transient LLM error (e.g. model unavailable)
+            # never prints into the REPL. Foreground `aria-reflect` is unaffected.
+            rlog = logging.getLogger("aria.reflect")
+            prev_level, prev_disabled = rlog.level, rlog.disabled
+            rlog.disabled = True
             try:
                 from aria import reflect as _reflect
-                _reflect.run(notify=False)
+                _reflect.run(notify=False, base_url=base_url,
+                             api_key=api_key, model=model)
             except Exception:
                 pass  # Never surface errors from background reflection
+            finally:
+                rlog.disabled = prev_disabled
+                rlog.setLevel(prev_level)
 
         t = threading.Thread(target=_run, daemon=True, name="aria-reflect-bg")
         t.start()
@@ -287,10 +306,9 @@ class Agent:
         name = name.strip().lower()
 
         if name == "default":
-            self.client = OpenAI(
-                base_url=os.environ["LLM_BASE_URL"],
-                api_key=os.environ.get("LLM_API_KEY", "local"),
-            )
+            self._base_url = os.environ["LLM_BASE_URL"]
+            self._api_key  = os.environ.get("LLM_API_KEY", "local")
+            self.client = OpenAI(base_url=self._base_url, api_key=self._api_key)
             self.model = os.environ.get("LLM_MODEL", "llama3.2")
             self._active_profile = "default"
             try:
@@ -310,6 +328,8 @@ class Agent:
                                            os.environ.get("LLM_BASE_URL", ""))
                 api_key  = os.environ.get(f"LLM_PROFILE{i}_API_KEY",
                                            os.environ.get("LLM_API_KEY", "local"))
+                self._base_url = base_url
+                self._api_key  = api_key
                 self.client = OpenAI(base_url=base_url, api_key=api_key)
                 self.model  = model
                 self._active_profile = name
@@ -346,6 +366,26 @@ class Agent:
         notify_feed  = self.ws.load_notify_feed()
         notify_block = (f"## Recent Proactive Messages\n{notify_feed}\n\n"
                         if notify_feed else "")
+        # Terminal sessions (REPL / single-shot CLI) are launched from inside a
+        # project directory — give the model that cwd so "this project", "here",
+        # and relative paths resolve without the user re-typing the full path.
+        # Channels (Telegram/WhatsApp/supervisor) run as services with no
+        # meaningful cwd, so this is gated on terminal launch.
+        cwd_block = ""
+        if self._is_terminal:
+            try:
+                cwd = os.getcwd()
+                cwd_block = (
+                    "## Working Directory\n"
+                    "You are running in a terminal session launched from this "
+                    f"directory:\n`{cwd}`\n"
+                    "When the user says \"this project\", \"here\", \"the current "
+                    "directory\", or uses a relative path, resolve it against this "
+                    "directory and use your file/shell tools there. Don't ask for "
+                    "the full path again — you already have it.\n\n"
+                )
+            except OSError:
+                pass
         ops_mem      = self.ws.load_operational_memory()
         ops_block    = (
             "## Operational Memory (suggestions from past sessions)\n"
@@ -360,7 +400,7 @@ class Agent:
             f"{soul}\n\n"
             "## Core Memory\n"
             f"{memory}\n\n"
-            f"{onboard_block}{ops_block}{notify_block}"
+            f"{cwd_block}{onboard_block}{ops_block}{notify_block}"
             "## Memory\n"
             "Two tools tailor you to this user — use them proactively. You may "
             "answer the user in the same turn you call them.\n"

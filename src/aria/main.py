@@ -107,6 +107,23 @@ def _make_prompt_session():
     def _(event) -> None:
         event.current_buffer.insert_text("\n")
 
+    @kb.add("tab")                      # Tab → complete /command, else accept ghost
+    def _(event) -> None:
+        """Deterministic Tab: cycle an open completion menu, start completion for
+        a slash command, otherwise accept the history auto-suggestion (ghost
+        text). We bind it explicitly because the default menu-complete behaviour
+        is unreliable alongside complete_while_typing + auto-suggest."""
+        buff = event.current_buffer
+        if buff.complete_state:                      # menu already open → next item
+            buff.complete_next()
+            return
+        if buff.document.text_before_cursor.lstrip().startswith("/"):
+            buff.start_completion(select_first=True)  # /command → fill first match
+            return
+        suggestion = buff.suggestion                  # else accept ghost text
+        if suggestion and suggestion.text:
+            buff.insert_text(suggestion.text)
+
     style = Style.from_dict({
         "prompt": "bold ansicyan",
         "cmd":    "bold ansiyellow",
