@@ -1056,7 +1056,8 @@ class Agent:
         sessions only), or None when there's nothing to diff."""
         if not self._is_terminal or name != "file_access":
             return None
-        if args.get("action") not in ("write", "append", "patch", "delete"):
+        if args.get("action") not in ("write", "append", "patch", "edit",
+                                      "replace_lines", "delete", "undo"):
             return None
         raw = args.get("path") or ""
         try:

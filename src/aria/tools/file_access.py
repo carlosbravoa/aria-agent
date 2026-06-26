@@ -70,6 +70,53 @@ _MAX_READ_LINES = int(os.environ.get("ARIA_FILE_MAX_LINES", "500"))
 # Authorized dirs file — written by authorize action, read at every _safe_path call
 _AUTH_FILE = Path.home() / ".aria" / "authorized_dirs.json"
 
+# Single-level undo store: the pre-edit content of each mutated file, keyed by a
+# hash of its absolute path. Lets `action=undo` revert the last write/patch/edit/
+# delete on a path. Internal — written directly, never through the allow-list.
+_BACKUP_DIR = Path.home() / ".aria" / ".file_backups"
+
+
+def _backup_file(path: Path) -> Path:
+    import hashlib
+    h = hashlib.sha1(str(path.resolve()).encode("utf-8")).hexdigest()
+    return _BACKUP_DIR / f"{h}.json"
+
+
+def _save_backup(path: Path) -> None:
+    """Snapshot a file's current state before mutating it (best-effort)."""
+    try:
+        _BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+        if path.exists():
+            data = base64.b64encode(path.read_bytes()).decode("ascii")
+            payload = {"path": str(path), "existed": True, "content_b64": data}
+        else:
+            payload = {"path": str(path), "existed": False}
+        bp = _backup_file(path)
+        bp.write_text(json.dumps(payload), encoding="utf-8")
+        bp.chmod(0o600)
+    except Exception:
+        pass  # never let backup failure block the actual operation
+
+
+def _undo(path: Path) -> str:
+    bp = _backup_file(path)
+    if not bp.exists():
+        return f"[file_access] No undo state for {path}."
+    try:
+        payload = json.loads(bp.read_text(encoding="utf-8"))
+    except Exception as exc:
+        return f"[file_access] Undo state unreadable: {exc}"
+    if payload.get("existed"):
+        path.write_bytes(base64.b64decode(payload["content_b64"]))
+        result = f"[file_access] Reverted {path} to its previous content."
+    else:
+        # The last op created the file — undo removes it.
+        if path.exists():
+            path.unlink()
+        result = f"[file_access] Removed {path} (it was newly created)."
+    bp.unlink(missing_ok=True)
+    return result
+
 
 def _blocked_paths() -> list[Path]:
     return [Path(p).expanduser().resolve() for p in _BLOCKED]
@@ -187,7 +234,8 @@ def _safe_path(raw: str, allow: list[Path], action: str = "") -> Path:
     # 3. Not in allow-list — request authorization
     # Find the appropriate parent directory to request access to
     parent = p if p.is_dir() else p.parent
-    level  = "write" if action in ("write", "append", "patch") else "read"
+    level  = "write" if action in ("write", "append", "patch", "edit",
+                                   "replace_lines", "undo") else "read"
     raise PermissionError(
         f"{_AUTH_REQUEST} "
         f"path={parent} "
@@ -209,25 +257,50 @@ def _format_auth_request(parent: Path, level: str) -> str:
 DEFINITION = {
     "name": "file_access",
     "description": (
-        "Read, write, append, patch, list, or delete local files. "
-        "Operations are restricted to the workspace and configured directories. "
-        "If a path is outside the allowed directories, the tool will ask the user "
-        "for authorization — use action='authorize' once the user agrees. "
-        "Use encoding='base64' for binary content. "
-        "Use action='patch' to replace a specific string in a file. "
-        "Use offset/limit for reading large files in chunks."
+        "Read, write, append, patch, edit, replace_lines, list, delete, or undo "
+        "local files. Operations are restricted to the workspace and configured "
+        "directories. If a path is outside the allowed directories, the tool will "
+        "ask the user for authorization — use action='authorize' once the user "
+        "agrees. Use encoding='base64' for binary content. "
+        "action='patch' replaces ONE unique string. action='edit' applies SEVERAL "
+        "{old,new} replacements atomically in one call (prefer this for multi-spot "
+        "changes — fewer round-trips). action='replace_lines' replaces a line range "
+        "[start_line,end_line]. action='undo' reverts the last write/patch/edit/"
+        "delete on a path. Use offset/limit for reading large files in chunks."
     ),
     "parameters": {
         "type": "object",
         "properties": {
             "action": {
                 "type": "string",
-                "enum": ["read", "write", "append", "patch", "list", "delete", "authorize"],
+                "enum": ["read", "write", "append", "patch", "edit",
+                         "replace_lines", "list", "delete", "undo", "authorize"],
                 "description": (
                     "Operation to perform. "
                     "Use 'authorize' to grant access to a directory after the user agrees — "
                     "provide path and level ('read' or 'write')."
                 ),
+            },
+            "edits": {
+                "type": "array",
+                "description": "For action='edit': a list of {old, new} replacements "
+                               "applied in order; each 'old' must be unique. "
+                               "All-or-nothing — no write if any fails.",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "old": {"type": "string"},
+                        "new": {"type": "string"},
+                    },
+                },
+            },
+            "start_line": {
+                "type": "integer",
+                "description": "For replace_lines: first line to replace (1-based).",
+            },
+            "end_line": {
+                "type": "integer",
+                "description": "For replace_lines: last line to replace (inclusive).",
             },
             "path": {
                 "type": "string",
@@ -346,6 +419,7 @@ def execute(args: dict) -> str:
 
         case "write":
             path.parent.mkdir(parents=True, exist_ok=True)
+            _save_backup(path)
             data = _decode_content(args)
             if isinstance(data, bytes):
                 path.write_bytes(data)
@@ -355,6 +429,7 @@ def execute(args: dict) -> str:
 
         case "append":
             path.parent.mkdir(parents=True, exist_ok=True)
+            _save_backup(path)
             data = _decode_content(args)
             if isinstance(data, bytes):
                 with path.open("ab") as f:
@@ -380,8 +455,63 @@ def execute(args: dict) -> str:
                 # of several matches (which could change the wrong line).
                 return (f"[file_access] '{old[:50]}…' appears {count} times in {path}. "
                         "Provide a longer, unique string so the right occurrence is patched.")
+            _save_backup(path)
             path.write_text(text.replace(old, new, 1), encoding="utf-8")
             return f"[file_access] Patched: {path}"
+
+        case "edit":
+            edits = args.get("edits") or []
+            if not edits:
+                return "[file_access] 'edits' (list of {old,new}) is required for edit."
+            if not path.exists():
+                return f"[file_access] Not found: {path}"
+            work = path.read_text(encoding="utf-8")
+            # Validate + apply on a working copy; write only if ALL succeed, so a
+            # bad edit never leaves the file half-changed.
+            for i, e in enumerate(edits):
+                old = e.get("old", "")
+                new = e.get("new", "")
+                if not old:
+                    return f"[file_access] edit #{i+1}: 'old' is required — no changes made."
+                count = work.count(old)
+                if count == 0:
+                    return (f"[file_access] edit #{i+1}: '{old[:40]}…' not found "
+                            "— no changes made.")
+                if count > 1:
+                    return (f"[file_access] edit #{i+1}: '{old[:40]}…' appears {count} "
+                            "times — make it unique. No changes made.")
+                work = work.replace(old, new, 1)
+            _save_backup(path)
+            path.write_text(work, encoding="utf-8")
+            return f"[file_access] Applied {len(edits)} edit(s) to {path}"
+
+        case "replace_lines":
+            if not path.exists():
+                return f"[file_access] Not found: {path}"
+            try:
+                start = int(args.get("start_line"))
+                end   = int(args.get("end_line", start))
+            except (TypeError, ValueError):
+                return "[file_access] replace_lines needs integer start_line/end_line."
+            lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+            n = len(lines)
+            if start < 1 or end < start or start > n + 1:
+                return (f"[file_access] Invalid range {start}-{end} for a "
+                        f"{n}-line file.")
+            content = args.get("content", "")
+            if content == "":
+                repl = []                            # pure deletion of the range
+            else:
+                body = content[:-1] if content.endswith("\n") else content
+                repl = [ln + "\n" for ln in body.split("\n")]
+            _save_backup(path)
+            new_lines = lines[:start - 1] + repl + lines[min(end, n):]
+            path.write_text("".join(new_lines), encoding="utf-8")
+            return (f"[file_access] Replaced lines {start}-{min(end, n)} of {path} "
+                    f"({len(repl)} new line(s)).")
+
+        case "undo":
+            return _undo(path)
 
         case "list":
             if not path.exists():
@@ -402,6 +532,7 @@ def execute(args: dict) -> str:
                 import shutil
                 shutil.rmtree(path)
             else:
+                _save_backup(path)              # file deletes are undo-able
                 path.unlink()
             return f"[file_access] Deleted: {path}"
 
