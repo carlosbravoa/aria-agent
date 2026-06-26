@@ -138,3 +138,84 @@ def test_assistant_msg_shapes_tool_calls():
     # No tool calls → plain content message, no tool_calls key.
     plain = Agent._assistant_msg(_Msg(), [])
     assert "tool_calls" not in plain
+
+
+# ── REPL UX: token usage, soft-interrupt cleanup, @file mentions ──────────────
+
+def test_record_usage_accumulates(minimal_env):
+    from types import SimpleNamespace
+    from aria.agent import Agent
+    a = Agent()
+    a._record_usage(SimpleNamespace(prompt_tokens=10, completion_tokens=4))
+    a._record_usage(SimpleNamespace(prompt_tokens=5,  completion_tokens=1))
+    a._record_usage(None)  # endpoints without usage leave the count flat
+    assert a._session_tokens == {"in": 15, "out": 5}
+
+
+def test_finalize_interrupt_drops_dangling_tool_calls(minimal_env):
+    """A trailing assistant tool_calls msg with no tool replies would break the
+    next request — finalize must strip it so the session stays usable."""
+    from aria.agent import Agent
+    a = Agent()
+    a._is_terminal = False
+    a.history = [{"role": "user", "content": "hi"},
+                 {"role": "assistant", "content": "", "tool_calls": [{"id": "1"}]}]
+    a._finalize_interrupt()
+    assert a.history[-1]["role"] == "user"   # empty dangling assistant dropped
+
+
+def test_finalize_interrupt_cleans_partial_tool_batch(minimal_env):
+    from aria.agent import Agent
+    a = Agent()
+    a._is_terminal = False
+    a.history = [{"role": "user", "content": "hi"},
+                 {"role": "assistant", "content": "working",
+                  "tool_calls": [{"id": "1"}, {"id": "2"}]},
+                 {"role": "tool", "tool_call_id": "1", "content": "x"}]
+    a._finalize_interrupt()
+    # the stray tool reply is dropped and the unsatisfied tool_calls stripped,
+    # but the assistant's content is preserved (it isn't empty).
+    assert a.history[-1]["role"] == "assistant"
+    assert "tool_calls" not in a.history[-1]
+    assert a.history[-1]["content"] == "working"
+
+
+def test_expand_mentions_attaches_and_flags(tmp_path):
+    from aria import main as M
+    p = tmp_path / "note.txt"
+    p.write_text("hello world contents")
+    out = M._expand_mentions(f"summarize @{p} please")
+    assert "--- Attached files ---" in out
+    assert "hello world contents" in out
+    # missing files are flagged, not silently dropped
+    assert "no such file" in M._expand_mentions("@/no/such/file.txt")
+    # prose without a mention is returned unchanged
+    assert M._expand_mentions("just a question") == "just a question"
+
+
+def test_make_diff_reports_changes():
+    from aria.agent import Agent
+    assert Agent._make_diff("same", "same") is None          # unchanged → no diff
+    lines, total = Agent._make_diff("a\nb\nc", "a\nB\nc")
+    joined = "\n".join(lines)
+    assert "-b" in joined and "+B" in joined
+    assert total == len(lines)
+
+
+def test_make_diff_caps_lines():
+    from aria.agent import Agent
+    old = "\n".join(str(i) for i in range(200))
+    new = "\n".join(str(i) + "x" for i in range(200))
+    lines, total = Agent._make_diff(old, new, max_lines=10)
+    assert len(lines) == 10 and total > 10   # capped for display, total preserved
+
+
+def test_file_edit_target_only_for_terminal_mutations(minimal_env):
+    from aria.agent import Agent
+    a = Agent()
+    a._is_terminal = True
+    assert a._file_edit_target("file_access", {"action": "write", "path": "~/x"}) is not None
+    assert a._file_edit_target("file_access", {"action": "read", "path": "~/x"}) is None
+    assert a._file_edit_target("shell_run", {"action": "write", "path": "~/x"}) is None
+    a._is_terminal = False
+    assert a._file_edit_target("file_access", {"action": "write", "path": "~/x"}) is None

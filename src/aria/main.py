@@ -12,6 +12,8 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import os
+import re
 import sys
 
 # ── First-run check (before anything else) ───────────────────────────────────
@@ -48,23 +50,27 @@ console = Console(theme=_THEME, highlight=False)
 
 _COMMANDS = [
     "/help", "/memory", "/tools", "/clear", "/save ", "/markdown ",
-    "/version", "/models", "/model ", "/discard", "/quit", "/exit",
+    "/version", "/cost", "/models", "/model ", "/discard", "/quit", "/exit",
 ]
 
 
-def _make_prompt_session():
+def _make_prompt_session(agent=None):
     """
     Build a prompt_toolkit session for the REPL input box: persistent history,
     autosuggest from history (ghost text), fuzzy reverse-search (Ctrl+R),
-    slash-command completion + highlighting, and Alt+Enter for a newline so the
-    user can compose multi-line messages while plain Enter still submits.
+    slash-command completion + highlighting, @file path completion, a status-line
+    footer (model · cwd · tokens), and Alt+Enter for a newline so the user can
+    compose multi-line messages while plain Enter still submits.
 
-    Returns None if prompt_toolkit is unavailable (e.g. minimal Windows
-    install) — the REPL then falls back to a plain input() prompt.
+    `agent` feeds the status line (model/token state). Returns None if
+    prompt_toolkit is unavailable (e.g. minimal Windows install) — the REPL then
+    falls back to a plain input() prompt.
     """
     try:
+        import glob
         from pathlib import Path
         from prompt_toolkit import PromptSession
+        from prompt_toolkit.formatted_text import HTML
         from prompt_toolkit.history import FileHistory
         from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
         from prompt_toolkit.completion import Completer, Completion
@@ -78,14 +84,26 @@ def _make_prompt_session():
     history_file.parent.mkdir(parents=True, exist_ok=True)
 
     class _SlashCompleter(Completer):
-        """Complete /commands; stay silent for ordinary prose."""
+        """Complete /commands at line start, and @paths anywhere; stay silent for
+        ordinary prose."""
         def get_completions(self, document, complete_event):
             text = document.text_before_cursor
-            if not text.startswith("/") or "\n" in text:
+            if "\n" not in text and text.startswith("/"):
+                for c in _COMMANDS:
+                    if c.startswith(text) and c != text:
+                        yield Completion(c, start_position=-len(text))
                 return
-            for c in _COMMANDS:
-                if c.startswith(text) and c != text:
-                    yield Completion(c, start_position=-len(text))
+            # @file mention → complete filesystem paths (relative to cwd).
+            word = text.rsplit(" ", 1)[-1].rsplit("\n", 1)[-1]
+            if word.startswith("@"):
+                frag = word[1:]
+                try:
+                    matches = sorted(glob.glob(os.path.expanduser(frag) + "*"))
+                except OSError:
+                    matches = []
+                for m in matches[:30]:
+                    disp = m + ("/" if os.path.isdir(m) else "")
+                    yield Completion(disp, start_position=-len(frag))
 
     class _SlashLexer(Lexer):
         """Colour a leading /command token; leave the rest as plain text."""
@@ -125,9 +143,26 @@ def _make_prompt_session():
             buff.insert_text(suggestion.text)
 
     style = Style.from_dict({
-        "prompt": "bold ansicyan",
-        "cmd":    "bold ansiyellow",
+        "prompt":         "bold ansicyan",
+        "cmd":            "bold ansiyellow",
+        "bottom-toolbar": "fg:ansiwhite bg:ansiblack",
     })
+
+    def _toolbar():
+        """Persistent footer: agent · model · cwd · session tokens."""
+        if agent is None:
+            return None
+        cwd = os.getcwd()
+        home = os.path.expanduser("~")
+        if cwd.startswith(home):
+            cwd = "~" + cwd[len(home):]
+        if len(cwd) > 40:
+            cwd = "…" + cwd[-39:]
+        tok = agent._session_tokens
+        return HTML(
+            f" {agent.name} · {agent.model} · {cwd} · "
+            f"↑{tok['in']:,} ↓{tok['out']:,} tok"
+        )
 
     return PromptSession(
         history=FileHistory(str(history_file)),
@@ -137,6 +172,7 @@ def _make_prompt_session():
         lexer=_SlashLexer(),
         key_bindings=kb,
         style=style,
+        bottom_toolbar=_toolbar,
     )
 
 
@@ -148,9 +184,52 @@ _HELP_TEXT = """
 [cmd]/clear[/]       Clear conversation history
 [cmd]/save[/] [meta]<note>[/]  Append a note to memory
 [cmd]/markdown[/] [meta][on|off][/]  Toggle Markdown rendering
+[cmd]/cost[/]        Show session token usage
 [cmd]/version[/]     Show version
 [cmd]/quit[/]        Exit  [meta](or Ctrl+D)[/]
+
+[meta]Tips: [cmd]@path/to/file[/] attaches a file · [cmd]Esc[/]/[cmd]Ctrl+C[/] interrupts a reply (keeps context) · [cmd]Alt+Enter[/] newline[/]
 """
+
+
+_MENTION_RE = re.compile(r"(?<![\w@])@([^\s@]+)")
+_MENTION_MAX_BYTES = 100_000  # per-file cap; keeps a stray @bigfile from blowing context
+
+
+def _expand_mentions(text: str) -> str:
+    """Expand `@path` mentions into attached file contents, resolved against the
+    current working directory. The original message keeps the @reference; the
+    file bodies are appended in a clearly-fenced block. Missing/binary/oversized
+    files are flagged inline rather than silently dropped. Terminal-only sugar."""
+    seen: list[str] = []
+    attachments: list[str] = []
+    for m in _MENTION_RE.finditer(text):
+        raw = m.group(1).rstrip(".,;:)")          # drop trailing punctuation
+        if raw in seen:
+            continue
+        seen.append(raw)
+        path = os.path.expanduser(raw)
+        if not os.path.isfile(path):
+            attachments.append(f"### @{raw}\n_(no such file — ignored)_")
+            console.print(f"  [meta]@{raw}: no such file — sent as plain text.[/]")
+            continue
+        try:
+            data = open(path, "rb").read(_MENTION_MAX_BYTES + 1)
+        except OSError as exc:
+            attachments.append(f"### @{raw}\n_(could not read: {exc})_")
+            continue
+        if b"\x00" in data:
+            attachments.append(f"### @{raw}\n_(binary file — skipped)_")
+            console.print(f"  [meta]@{raw}: binary — skipped.[/]")
+            continue
+        body = data[:_MENTION_MAX_BYTES].decode("utf-8", "replace")
+        truncated = "\n…[truncated]" if len(data) > _MENTION_MAX_BYTES else ""
+        attachments.append(f"### @{raw}\n```\n{body}{truncated}\n```")
+        console.print(f"  [meta]attached @{raw} "
+                      f"({len(body):,} chars)[/]")
+    if not attachments:
+        return text
+    return text + "\n\n--- Attached files ---\n" + "\n\n".join(attachments)
 
 
 def _print_banner(agent: Agent) -> None:
@@ -191,7 +270,7 @@ def _prompt(session) -> str:
 
 
 def repl(agent: Agent) -> None:
-    session = _make_prompt_session()
+    session = _make_prompt_session(agent)
     _print_banner(agent)
 
     while True:
@@ -225,6 +304,14 @@ def repl(agent: Agent) -> None:
 
         elif cmd == "/version":
             console.print(f"  [agent]{agent.name}[/] [meta]v{__version__}[/]")
+
+        elif cmd == "/cost":
+            tok = agent._session_tokens
+            total = tok["in"] + tok["out"]
+            console.print(
+                f"  [meta]Session tokens —[/] in [cmd]{tok['in']:,}[/]  "
+                f"out [cmd]{tok['out']:,}[/]  total [cmd]{total:,}[/]"
+            )
 
         elif cmd == "/models":
             console.rule("[meta]Model profiles[/]")
@@ -286,7 +373,7 @@ def repl(agent: Agent) -> None:
 
         else:
             try:
-                agent.chat(user)
+                agent.chat(_expand_mentions(user))
             except KeyboardInterrupt:
                 # Ctrl+C mid-response — cancel this turn, keep the session
                 console.print("\n  [meta](interrupted)[/]")

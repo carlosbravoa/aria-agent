@@ -199,6 +199,8 @@ class Agent:
             "ARIA_REPL_STREAM", "on"
         ).strip().lower() not in ("off", "0", "false", "no")
         self._live_rendered = False
+        # Token usage accumulated this process (shown in the REPL status line).
+        self._session_tokens = {"in": 0, "out": 0}
 
         # Restore last used profile (persisted across sessions)
         if _PROFILE_STATE.exists():
@@ -451,7 +453,30 @@ class Agent:
         self.ws.log_session(self.session_log, "user", user_input)
         self.ws.append_conversation_window("user", user_input, self.name)
         self._trim_history()
-        self._run_loop()
+        try:
+            self._run_loop()
+        except KeyboardInterrupt:
+            # Interrupt landed outside the streaming path (a tool call, or a
+            # non-streamed model call). Keep the session usable for redirection.
+            self._finalize_interrupt()
+
+    def _finalize_interrupt(self) -> None:
+        """Make history well-formed after a mid-turn interrupt. A trailing
+        assistant message that carries tool_calls but never received its tool
+        replies would make the NEXT request fail (every tool_call needs a
+        matching tool result), so strip the dangling calls or drop the message."""
+        # Drop trailing tool replies first — if some of a batch landed but not
+        # all, the assistant tool_calls above them is still unsatisfied.
+        while self.history and self.history[-1].get("role") == "tool":
+            self.history.pop()
+        if self.history and self.history[-1].get("role") == "assistant" \
+                and self.history[-1].get("tool_calls"):
+            self.history[-1].pop("tool_calls", None)
+            if not (self.history[-1].get("content") or "").strip():
+                self.history.pop()
+        if self._is_terminal:
+            self._console().print("  [yellow](interrupted — type a redirection "
+                                  "or new message)[/yellow]")
 
     def chat_collect(self, user_input: str) -> str:
         """
@@ -710,6 +735,9 @@ class Agent:
 
         use_stream = self._is_terminal and self._repl_stream
         kwargs: dict[str, Any] = dict(model=self.model, messages=messages, stream=use_stream)
+        if use_stream:
+            # Ask for a final usage chunk so the status line can show token cost.
+            kwargs["stream_options"] = {"include_usage": True}
         if self.tool_schemas:
             kwargs["tools"]       = self._wire_schemas()
             kwargs["tool_choice"] = "auto"
@@ -722,9 +750,21 @@ class Agent:
                     resp = self.client.chat.completions.create(**kwargs)
             else:
                 resp = self.client.chat.completions.create(**kwargs)
+            self._record_usage(getattr(resp, "usage", None))
             return resp.choices[0].message
         except Exception as exc:
             return self._friendly_error(exc)
+
+    def _record_usage(self, usage) -> None:
+        """Accumulate prompt/completion tokens from a response or final stream
+        chunk. Best-effort — endpoints that omit usage just leave the count flat."""
+        if not usage:
+            return
+        try:
+            self._session_tokens["in"]  += getattr(usage, "prompt_tokens", 0) or 0
+            self._session_tokens["out"] += getattr(usage, "completion_tokens", 0) or 0
+        except Exception:
+            pass
 
     def _stream_render(self, content_parts):
         from rich.text import Text
@@ -740,15 +780,25 @@ class Agent:
         delta, then renders streamed content live via rich.Live, accumulating any
         `delta.tool_calls` fragments. Returns an assembled message-like object."""
         from rich.live import Live
-        stream = self.client.chat.completions.create(**kwargs)
+        try:
+            stream = self.client.chat.completions.create(**kwargs)
+        except Exception:
+            # Some endpoints reject stream_options=include_usage — retry without
+            # it (we just lose the token count for this call, not the stream).
+            if kwargs.pop("stream_options", None) is None:
+                raise
+            stream = self.client.chat.completions.create(**kwargs)
         content_parts: list[str] = []
         frags: dict = {}
         con = self._console()
         status = con.status("[dim]Thinking…[/dim]", spinner="dots")
         status.start()
         live = None
+        interrupted = False
         try:
             for chunk in stream:
+                # The include_usage final chunk carries usage and empty choices.
+                self._record_usage(getattr(chunk, "usage", None))
                 if not chunk.choices:
                     continue
                 delta = chunk.choices[0].delta
@@ -764,12 +814,31 @@ class Agent:
                     live.update(self._stream_render(content_parts))
                 if getattr(delta, "tool_calls", None):
                     self._accumulate_tool_frags(frags, delta.tool_calls)
+        except KeyboardInterrupt:
+            # Soft interrupt: stop generation but KEEP what was produced so the
+            # user can redirect with full context, instead of discarding the turn.
+            interrupted = True
         finally:
             if live is not None:
                 live.update(self._stream_render(content_parts))
                 live.stop()
             else:
                 status.stop()
+
+        if interrupted:
+            try:
+                stream.close()
+            except Exception:
+                pass
+            con.print("  [yellow](interrupted — type a redirection or new "
+                      "message)[/yellow]")
+            content_parts.append("\n\n_[interrupted by user]_")
+            self._live_rendered = bool(live)
+            # Force a final-answer shape (drop any half-streamed tool call) so the
+            # loop ends cleanly and history stays well-formed.
+            from types import SimpleNamespace
+            return SimpleNamespace(content="".join(content_parts), tool_calls=None)
+
         if live is not None:
             self._live_rendered = True   # already shown — don't re-render
         return self._assemble_streamed(content_parts, frags)
@@ -846,22 +915,72 @@ class Agent:
         name = tc.function.name
         raw  = tc.function.arguments or "{}"
         args, parse_err, preview = self._parse_call_args(tc)
+        diff = None
         if parse_err is not None:
             result, ok, elapsed = (
                 f"[agent] Could not parse arguments for {name}: {parse_err}",
                 False, 0.0,
             )
         else:
+            # For a terminal file edit, snapshot the file before/after so the
+            # user sees a diff of what changed (display-only — the model still
+            # gets the tool's normal result string). File reads are thread-safe.
+            edit = self._file_edit_target(name, args)
+            before = self._read_text_safe(edit) if edit else None
             start = time.monotonic()
             result = self._execute_tool(name, args)
             elapsed = time.monotonic() - start
             ok = not _looks_like_error(result)
+            if edit and ok:
+                after = "" if args.get("action") == "delete" \
+                    else self._read_text_safe(edit)
+                diff = self._make_diff(before or "", after or "")
         self.ws.log_session(
             self.session_log, f"tool:{name}",
             f"**Input:** `{raw}`\n\n**Output:**\n```\n{result}\n```",
         )
-        return {"idx": idx, "name": name, "preview": preview,
-                "ok": ok, "elapsed": elapsed, "result": result}
+        return {"idx": idx, "name": name, "preview": preview, "ok": ok,
+                "elapsed": elapsed, "result": result, "diff": diff}
+
+    def _file_edit_target(self, name: str, args: dict):
+        """Return the local path a file_access call is about to mutate (terminal
+        sessions only), or None when there's nothing to diff."""
+        if not self._is_terminal or name != "file_access":
+            return None
+        if args.get("action") not in ("write", "append", "patch", "delete"):
+            return None
+        raw = args.get("path") or ""
+        try:
+            return os.path.expanduser(raw) if raw else None
+        except Exception:
+            return None
+
+    @staticmethod
+    def _read_text_safe(path, cap: int = 200_000):
+        """Read a file as text for diffing, or None if missing/binary/unreadable."""
+        try:
+            with open(path, "rb") as f:
+                data = f.read(cap)
+        except OSError:
+            return None
+        if b"\x00" in data:
+            return None
+        return data.decode("utf-8", "replace")
+
+    @staticmethod
+    def _make_diff(old: str, new: str, max_lines: int = 40):
+        """Unified diff (header stripped) as (lines, total) or None if unchanged."""
+        import difflib
+        if old == new:
+            return None
+        body = [
+            ln for ln in difflib.unified_diff(
+                old.splitlines(), new.splitlines(), lineterm="", n=2)
+            if not ln.startswith(("---", "+++"))
+        ]
+        if not body:
+            return None
+        return body[:max_lines], len(body)
 
     def _run_one_call(self, tc, idx: int) -> str:
         """Sequential path: execute one call behind a live REPL spinner, render
@@ -876,7 +995,8 @@ class Agent:
         else:
             rec = self._execute_call(tc, idx)
         self._render_tool(rec["idx"], rec["name"], rec["preview"],
-                          rec["ok"], rec["elapsed"], "" if rec["ok"] else rec["result"])
+                          rec["ok"], rec["elapsed"], "" if rec["ok"] else rec["result"],
+                          diff=rec.get("diff"))
         return rec["result"]
 
     def _run_calls_concurrent(self, indexed) -> list[str]:
@@ -900,7 +1020,8 @@ class Agent:
                 records = list(ex.map(_work, indexed))
         for rec in records:
             self._render_tool(rec["idx"], rec["name"], rec["preview"],
-                              rec["ok"], rec["elapsed"], "" if rec["ok"] else rec["result"])
+                              rec["ok"], rec["elapsed"], "" if rec["ok"] else rec["result"],
+                              diff=rec.get("diff"))
         return [rec["result"] for rec in records]
 
     @staticmethod
@@ -928,8 +1049,9 @@ class Agent:
         return self._con
 
     def _render_tool(self, idx: int, name: str, preview: str,
-                     ok: bool, elapsed: float, err: str) -> None:
-        """Print one permanent tool-call line: `⚙ [n] name · preview  ✓ 0.4s`."""
+                     ok: bool, elapsed: float, err: str, diff=None) -> None:
+        """Print one permanent tool-call line: `⚙ [n] name · preview  ✓ 0.4s`,
+        followed by a coloured diff when a file edit changed something."""
         if not self._is_terminal:
             return
         icon = "[green]✓[/green]" if ok else "[red]✗[/red]"
@@ -943,6 +1065,28 @@ class Agent:
             first = err.strip().splitlines()[0][:80] if err.strip() else "failed"
             line += f"  [red]{first}[/red]"
         self._console().print(line)
+        if diff:
+            self._render_diff(diff)
+
+    def _render_diff(self, diff) -> None:
+        """Render a unified diff with +/- lines coloured, indented under the tool
+        line. `diff` is the (lines, total) tuple from _make_diff."""
+        from rich.text import Text
+        lines, total = diff
+        body = Text()
+        for ln in lines:
+            if ln.startswith("+"):
+                style = "green"
+            elif ln.startswith("-"):
+                style = "red"
+            elif ln.startswith("@@"):
+                style = "cyan"
+            else:
+                style = "dim"
+            body.append("    " + ln + "\n", style=style)
+        if total > len(lines):
+            body.append(f"    … {total - len(lines)} more diff lines\n", style="dim")
+        self._console().print(body, end="")
 
     def _render_answer(self, text: str) -> None:
         """Render the agent's answer under its name header, markdown if enabled.
