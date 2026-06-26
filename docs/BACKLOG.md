@@ -40,6 +40,38 @@ Not yet done — pick any:
 
 ---
 
+## Great-CLI-assistant roadmap
+
+A four-part push to take Aria from a solid assistant to a great CLI/coding one.
+Items 1–4 are **in progress** (see commits on `development`). The "lighter"
+items below are intentionally deferred and tracked here.
+
+### In progress (1–4)
+1. **Plan + self-verification loop** — a `plan`/todo tool with a visible REPL
+   checklist, plus a system-prompt habit to verify work after editing (run tests,
+   re-read). Make multi-step tasks reliable.
+2. **Code editing & navigation** — ripgrep-backed `code_search`, a `git` tool
+   (status/diff/log/commit/branch), and `file_access` upgrades: multi-edit,
+   line-range edits, and per-edit undo/backup. Reduces tool-thrashing.
+3. **Project-scoped context** — load a per-repo conventions file (`AGENTS.md` /
+   `.aria.md`) and keep per-project memory separate from global facts.
+4. **Trust to run autonomously** — a learnable `[y/N/always]` approval flow that
+   persists per command-pattern, and optional real sandboxing (firejail/container).
+
+### Deferred — lighter, high value (pick up after 1–4)
+- **Image input** — value: high, effort: med. Accept pasted/attached images
+  (screenshots, diagrams) as multimodal content. Needs a vision-capable model and
+  content-part message shaping; terminal-only attach via `@image.png`.
+- **Auto-compact at a token threshold** — value: med, effort: low. We have manual
+  `/compact` (`agent.compact`); trigger it automatically when the session crosses
+  a configurable token budget so long sessions never degrade.
+- **Cheap-model routing** — value: med, effort: med. Route trivial steps
+  (classification, "did this succeed?") to a small profile, reasoning to the big
+  one. Reuses the existing profile machinery; token-frugal.
+- **MCP support / hooks** — value: med, effort: high. Speak Model Context Protocol
+  so external MCP servers appear as tools without writing Python; optional
+  pre/post-tool hooks.
+
 ## Other tools / areas (add as they come up)
 
 - _(none yet — append here)_
