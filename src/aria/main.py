@@ -49,8 +49,9 @@ console = Console(theme=_THEME, highlight=False)
 # ── Input: prompt_toolkit session ─────────────────────────────────────────────
 
 _COMMANDS = [
-    "/help", "/memory", "/tools", "/clear", "/save ", "/markdown ",
-    "/version", "/cost", "/models", "/model ", "/discard", "/quit", "/exit",
+    "/help", "/memory", "/tools", "/clear", "/compact", "/retry", "/copy",
+    "/save ", "/markdown ", "/version", "/cost", "/models", "/model ",
+    "/discard", "/quit", "/exit",
 ]
 
 
@@ -182,13 +183,16 @@ _HELP_TEXT = """
 [cmd]/memory[/]      Print current memory
 [cmd]/tools[/]       List available tools
 [cmd]/clear[/]       Clear conversation history
+[cmd]/compact[/]     Summarize the conversation to reclaim context tokens
+[cmd]/retry[/]       Re-run your last message
+[cmd]/copy[/]        Copy the last answer to the clipboard
 [cmd]/save[/] [meta]<note>[/]  Append a note to memory
 [cmd]/markdown[/] [meta][on|off][/]  Toggle Markdown rendering
 [cmd]/cost[/]        Show session token usage
 [cmd]/version[/]     Show version
 [cmd]/quit[/]        Exit  [meta](or Ctrl+D)[/]
 
-[meta]Tips: [cmd]@path/to/file[/] attaches a file · [cmd]Esc[/]/[cmd]Ctrl+C[/] interrupts a reply (keeps context) · [cmd]Alt+Enter[/] newline[/]
+[meta]Tips: [cmd]!cmd[/] runs a shell command · [cmd]@path/to/file[/] attaches a file · [cmd]Esc[/]/[cmd]Ctrl+C[/] interrupts a reply (keeps context) · [cmd]Alt+Enter[/] newline[/]
 """
 
 
@@ -230,6 +234,42 @@ def _expand_mentions(text: str) -> str:
     if not attachments:
         return text
     return text + "\n\n--- Attached files ---\n" + "\n\n".join(attachments)
+
+
+def _run_shell_escape(cmd: str) -> None:
+    """Run a `!command` straight in the user's shell — no LLM, output passes
+    through live so interactive tools work. Ctrl+C kills the command, not the REPL."""
+    if not cmd:
+        return
+    import subprocess
+    try:
+        subprocess.run(cmd, shell=True, cwd=os.getcwd())
+    except KeyboardInterrupt:
+        console.print("\n  [meta](command interrupted)[/]")
+    except Exception as exc:
+        console.print(f"  [error]{exc}[/]")
+
+
+def _copy_to_clipboard(text: str) -> bool:
+    """Copy text to the system clipboard via the first available tool. Returns
+    False if none is present (Wayland/X11/macOS/Windows all covered)."""
+    import shutil
+    import subprocess
+    candidates = [
+        (["wl-copy"], None),
+        (["xclip", "-selection", "clipboard"], None),
+        (["xsel", "--clipboard", "--input"], None),
+        (["pbcopy"], None),
+        (["clip"], None),
+    ]
+    for argv, _ in candidates:
+        if shutil.which(argv[0]):
+            try:
+                subprocess.run(argv, input=text.encode("utf-8"), check=True)
+                return True
+            except Exception:
+                continue
+    return False
 
 
 def _print_banner(agent: Agent) -> None:
@@ -287,6 +327,11 @@ def repl(agent: Agent) -> None:
         if not user:
             continue
 
+        # `!cmd` → run a shell command directly, no LLM, no tokens.
+        if user.startswith("!"):
+            _run_shell_escape(user[1:].strip())
+            continue
+
         parts = user.split(maxsplit=1)
         cmd   = parts[0].lower()
         rest  = parts[1] if len(parts) > 1 else ""
@@ -294,6 +339,35 @@ def repl(agent: Agent) -> None:
         if cmd in ("/quit", "/exit"):
             console.print("  [meta]Bye.[/]")
             break
+
+        elif cmd == "/retry":
+            txt = agent.retry_last()
+            if not txt:
+                console.print("  [meta]Nothing to retry yet.[/]")
+            else:
+                console.print(f"  [meta]↻ retrying:[/] {txt.splitlines()[0][:80]}")
+                try:
+                    agent.chat(txt)          # already-expanded text; don't re-expand
+                except KeyboardInterrupt:
+                    console.print("\n  [meta](interrupted)[/]")
+
+        elif cmd == "/copy":
+            last = (agent._last_response or "").strip()
+            if not last:
+                console.print("  [meta]Nothing to copy yet.[/]")
+            elif _copy_to_clipboard(last):
+                console.print(f"  [success]Copied last answer[/] [meta]({len(last)} chars).[/]")
+            else:
+                console.print("  [error]No clipboard tool found[/] "
+                              "[meta](install wl-clipboard / xclip / xsel).[/]")
+
+        elif cmd == "/compact":
+            result = agent.compact()
+            if result.startswith("[compact"):
+                console.print(f"  [meta]{result}[/]")
+            else:
+                console.print("  [success]Context compacted.[/] [meta]Summary:[/]")
+                console.print(Panel(result, border_style="dim blue", padding=(0, 1)))
 
         elif cmd == "/discard":
             console.print("  [meta]Bye. (session not saved)[/]")

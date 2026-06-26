@@ -79,6 +79,65 @@ def test_call_signature_normalizes_argument_order():
     assert Agent._call_signature([a]) != Agent._call_signature([c])
 
 
+# ── REPL conveniences: spinner verbs, /retry, /compact, !shell, /copy ─────────
+
+def test_spinner_label_is_action_aware(minimal_env):
+    from aria.agent import Agent
+    a = Agent()
+    assert a._spinner_label("shell_run", {"command": "pytest"}, "pytest").startswith("[dim]⚙ Running")
+    assert "Fetching" in a._spinner_label("web_fetch", {}, "example.com")
+    assert "Reading" in a._spinner_label("file_access", {"action": "read"}, "x.py")
+    assert "Editing" in a._spinner_label("file_access", {"action": "patch"}, "x.py")
+
+
+def test_retry_last_rewinds_to_last_user(minimal_env):
+    from aria.agent import Agent
+    a = Agent()
+    a.history = [
+        {"role": "user", "content": "first"},
+        {"role": "assistant", "content": "ans1"},
+        {"role": "user", "content": "second"},
+        {"role": "assistant", "content": "ans2"},
+    ]
+    txt = a.retry_last()
+    assert txt == "second"
+    assert a.history == [
+        {"role": "user", "content": "first"},
+        {"role": "assistant", "content": "ans1"},
+    ]
+    # empty history → nothing to retry
+    a.history = []
+    assert a.retry_last() is None
+
+
+def test_compact_replaces_history_with_summary(minimal_env, native_client):
+    from aria.agent import Agent
+    a = Agent()
+    a.client = native_client("- discussed X\n- decided Y")
+    a.history = [
+        {"role": "user", "content": "let's talk about X"},
+        {"role": "assistant", "content": "sure, X is ..."},
+    ]
+    summary = a.compact()
+    assert "decided Y" in summary
+    assert len(a.history) == 2                       # collapsed to summary scaffold
+    assert a.history[0]["role"] == "user"
+    assert "Summary of earlier conversation" in a.history[0]["content"]
+
+
+def test_compact_noop_on_short_history(minimal_env):
+    from aria.agent import Agent
+    a = Agent()
+    a.history = [{"role": "user", "content": "hi"}]
+    assert a.compact().startswith("[compact]")
+
+
+def test_copy_to_clipboard_returns_false_without_tool(monkeypatch):
+    from aria import main as M
+    monkeypatch.setattr("shutil.which", lambda _: None)
+    assert M._copy_to_clipboard("hello") is False
+
+
 def test_parallel_safe_flag_surfaced(minimal_env):
     from aria import tools
     schemas = {t["function"]["name"]: t for t in tools.load_all()}

@@ -463,6 +463,60 @@ class Agent:
             # non-streamed model call). Keep the session usable for redirection.
             self._finalize_interrupt()
 
+    def retry_last(self) -> str | None:
+        """Rewind the last exchange (drop the last user turn and everything after
+        it from both history and the conversation window) and return that user
+        text so the caller can re-send it. None if there's nothing to retry."""
+        last_user = None
+        for i, m in enumerate(self.history):
+            if m.get("role") == "user":
+                last_user = i
+        if last_user is None:
+            return None
+        user_text = self.history[last_user].get("content") or ""
+        self.history = self.history[:last_user]
+        self.ws.rewind_window_to_before_last_user()
+        return user_text or None
+
+    def compact(self) -> str:
+        """Summarize the running conversation into a compact note and replace the
+        history (and window) with it, reclaiming context tokens. Returns the
+        summary, or a `[compact …]` status string on a no-op / failure."""
+        real = [m for m in self.history
+                if m.get("role") in ("user", "assistant")
+                and (m.get("content") or "").strip()]
+        if len(real) < 2:
+            return "[compact] Nothing to compact yet."
+        convo = "\n\n".join(
+            f"{'User' if m['role'] == 'user' else self.name}: {m['content']}"
+            for m in real)
+        prompt = ("Summarize this conversation into a compact context note that "
+                  "preserves key facts, decisions, open tasks, file paths, and "
+                  "any state needed to continue it seamlessly. Terse bullet "
+                  "points, no preamble.\n\n" + convo)
+        try:
+            if self._is_terminal:
+                with self._console().status("[dim]Compacting…[/dim]", spinner="dots"):
+                    resp = self.client.chat.completions.create(
+                        model=self.model,
+                        messages=[{"role": "user", "content": prompt}], stream=False)
+            else:
+                resp = self.client.chat.completions.create(
+                    model=self.model,
+                    messages=[{"role": "user", "content": prompt}], stream=False)
+            self._record_usage(getattr(resp, "usage", None))
+            summary = (resp.choices[0].message.content or "").strip()
+        except Exception as exc:
+            return f"[compact failed] {exc}"
+        if not summary:
+            return "[compact failed] empty summary."
+        self.history = [
+            {"role": "user", "content": "[Summary of earlier conversation]\n" + summary},
+            {"role": "assistant", "content": "Understood — I have the prior context."},
+        ]
+        self.ws.reset_conversation_window(summary, self.name)
+        return summary
+
     def _finalize_interrupt(self) -> None:
         """Make history well-formed after a mid-turn interrupt. A trailing
         assistant message that carries tool_calls but never received its tool
@@ -1037,14 +1091,36 @@ class Agent:
             return None
         return body[:max_lines], len(body)
 
+    # Natural-language verb shown in the live spinner per tool, so a running call
+    # reads as "Running pytest -q…" / "Fetching example.com…" not "Thinking…".
+    _TOOL_VERBS = {
+        "shell_run": "Running", "web_fetch": "Fetching", "web_search": "Searching",
+        "browser": "Browsing", "jira": "Jira", "gmail": "Gmail", "imap": "Email",
+        "calendar": "Calendar", "drive": "Drive", "notify": "Notifying",
+        "schedule": "Scheduling", "remember": "Remembering", "learn": "Learning",
+        "reflect": "Reflecting",
+    }
+    _FILE_VERBS = {
+        "read": "Reading", "list": "Listing", "write": "Writing",
+        "append": "Writing", "patch": "Editing", "delete": "Deleting",
+        "authorize": "Authorizing",
+    }
+
+    def _spinner_label(self, name: str, args: dict, preview: str) -> str:
+        """Action-aware live-spinner label for a tool call."""
+        if name == "file_access":
+            verb = self._FILE_VERBS.get(args.get("action", ""), "Accessing")
+        else:
+            verb = self._TOOL_VERBS.get(name, f"Running {name}:")
+        body = f" {preview}" if preview else ""
+        return f"[dim]⚙ {verb}{body}…[/dim]"
+
     def _run_one_call(self, tc, idx: int) -> str:
         """Sequential path: execute one call behind a live REPL spinner, render
         its activity line, and return the result string."""
         if self._is_terminal:
-            _, _, preview = self._parse_call_args(tc)
-            label = f"[dim]⚙ [{idx}] {tc.function.name}[/dim]"
-            if preview:
-                label += f" [dim]· {preview}[/dim]"
+            args, _, preview = self._parse_call_args(tc)
+            label = self._spinner_label(tc.function.name, args, preview)
             with self._console().status(label, spinner="dots"):
                 rec = self._execute_call(tc, idx)
         else:

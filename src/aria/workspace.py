@@ -285,6 +285,27 @@ class Workspace:
                 msgs.append({"role": role, "content": content})
         return msgs
 
+    def rewind_window_to_before_last_user(self) -> None:
+        """Drop trailing entries back through (and including) the last User entry.
+        Used by /retry so re-asking doesn't leave the old question+answer behind."""
+        path = self._window_path()
+        if not path.exists():
+            return
+        entries = _parse_window(path.read_text(encoding="utf-8"))
+        last_user = None
+        for i, e in enumerate(entries):
+            if e.startswith("**User:**"):
+                last_user = i
+        if last_user is None:
+            return
+        _secure_write(path, _ENTRY_SEP.join(entries[:last_user]))
+
+    def reset_conversation_window(self, summary: str, agent_name: str) -> None:
+        """Replace the window with a single summary entry (used by /compact)."""
+        path  = self._window_path()
+        entry = _format_entry("assistant", _redact(summary), agent_name)
+        _secure_write(path, entry)
+
     # ── Notify feed ──────────────────────────────────────────────────────────
 
     def append_notify_feed(self, message: str) -> None:
