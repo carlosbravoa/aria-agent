@@ -75,7 +75,7 @@ def test_chat_yield_empty_turn_returns_fallback(minimal_env, native_client, monk
 
 class _FakeAgent:
     count = 0
-    def __init__(self, window_key=None):
+    def __init__(self, window_key=None, terminal=None):
         _FakeAgent.count += 1
         self.window_key = window_key
     def chat_yield(self, text):

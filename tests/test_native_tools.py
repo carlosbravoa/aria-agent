@@ -138,6 +138,21 @@ def test_copy_to_clipboard_returns_false_without_tool(monkeypatch):
     assert M._copy_to_clipboard("hello") is False
 
 
+def test_non_terminal_agent_omits_cwd_and_project_blocks(minimal_env):
+    """Channels/supervisor (terminal=False) must NOT get the cwd/project-context
+    blocks — they have no meaningful cwd and it only wastes tokens (regression:
+    they leaked into Telegram because _is_terminal was True at construction)."""
+    from aria.agent import Agent
+    channel = Agent(window_key="telegram:1", terminal=False)
+    assert channel._is_terminal is False
+    assert "## Working Directory" not in channel.system_prompt
+    assert "## Project Context" not in channel.system_prompt
+    # a genuine terminal session still gets the working-directory block
+    repl = Agent()
+    assert repl._is_terminal is True
+    assert "## Working Directory" in repl.system_prompt
+
+
 def test_parallel_safe_flag_surfaced(minimal_env):
     from aria import tools
     schemas = {t["function"]["name"]: t for t in tools.load_all()}

@@ -33,7 +33,9 @@ class _Session:
 
     def __init__(self, channel: str, user_id: str) -> None:
         self.key       = (channel, user_id)
-        self.agent     = Agent(window_key=f"{channel}:{user_id}")
+        # terminal=False: channels render nothing and have no meaningful cwd, so
+        # the cwd/project-context system-prompt blocks must not be injected.
+        self.agent     = Agent(window_key=f"{channel}:{user_id}", terminal=False)
         self.channel   = channel
         self.user_id   = user_id
         self._timer: threading.Timer | None = None

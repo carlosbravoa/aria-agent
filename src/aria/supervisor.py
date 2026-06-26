@@ -166,7 +166,7 @@ def _execute(task) -> str:
         "your response will be delivered automatically when you are done.)"
     )
 
-    agent  = Agent(window_key="supervisor")
+    agent  = Agent(window_key="supervisor", terminal=False)
     result = agent.chat_collect(wrapped)
     agent.close()
 

@@ -134,11 +134,18 @@ _MAX_HISTORY       = int(os.environ.get("ARIA_MAX_HISTORY",       "60"))
 
 
 class Agent:
-    def __init__(self, output_callback=None, window_key: str | None = None) -> None:
+    def __init__(self, output_callback=None, window_key: str | None = None,
+                 terminal: bool | None = None) -> None:
         # Default output: plain print for streaming tokens.
         # Rich is used for status lines (tool calls, memory saves) via console.print.
         self._output = output_callback or (lambda t: print(t, end="", flush=True))
-        self._is_terminal = output_callback is None
+        # `terminal` marks a genuine interactive REPL/CLI session. It gates the
+        # activity layer AND the cwd/project-context blocks in the system prompt
+        # (built once in __init__). Channels/supervisor/notify MUST pass
+        # terminal=False — otherwise those blocks leak into their system prompt
+        # and waste tokens (e.g. a project CLAUDE.md injected into every Telegram
+        # message). Defaults to "no output_callback" for plain REPL/CLI callers.
+        self._is_terminal = terminal if terminal is not None else (output_callback is None)
         # Track the active connection so background jobs (reflection) reuse the
         # SAME endpoint/model the user is actually on — not the default profile,
         # which may be down (that's often why the user switched profiles).

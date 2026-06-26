@@ -522,7 +522,7 @@ def main() -> None:
             parser.error("--notify requires a query")
 
         from aria.telegram_notify import send
-        agent = Agent(window_key="notify")
+        agent = Agent(window_key="notify", terminal=False)
         try:
             result = agent.chat_collect(query)
             agent.close()
