@@ -50,7 +50,7 @@ console = Console(theme=_THEME, highlight=False)
 
 _COMMANDS = [
     "/help", "/memory", "/tools", "/clear", "/compact", "/retry", "/copy",
-    "/save ", "/markdown ", "/version", "/cost", "/models", "/model ",
+    "/save ", "/markdown ", "/version", "/cost", "/trust", "/models", "/model ",
     "/discard", "/quit", "/exit",
 ]
 
@@ -189,6 +189,7 @@ _HELP_TEXT = """
 [cmd]/save[/] [meta]<note>[/]  Append a note to memory
 [cmd]/markdown[/] [meta][on|off][/]  Toggle Markdown rendering
 [cmd]/cost[/]        Show session token usage
+[cmd]/trust[/] [meta][clear][/]  Show/clear auto-approved shell commands
 [cmd]/version[/]     Show version
 [cmd]/quit[/]        Exit  [meta](or Ctrl+D)[/]
 
@@ -378,6 +379,27 @@ def repl(agent: Agent) -> None:
 
         elif cmd == "/version":
             console.print(f"  [agent]{agent.name}[/] [meta]v{__version__}[/]")
+
+        elif cmd == "/trust":
+            from aria.tools import shell_run as _sr
+            arg = rest.strip().lower()
+            if arg == "clear":
+                try:
+                    _sr._ALLOWLIST_FILE.unlink(missing_ok=True)
+                except OSError:
+                    pass
+                console.print("  [success]Cleared the shell approval list.[/]")
+            else:
+                allow = _sr._load_allowlist()
+                if not allow:
+                    console.print("  [meta]No shell commands auto-approved yet. "
+                                  "Approve one with 'always' when prompted.[/]")
+                else:
+                    console.rule("[meta]Auto-approved shell prefixes[/]")
+                    for p in allow:
+                        console.print(f"  [cmd]{p}[/]")
+                    console.print("  [meta]Clear with[/] [cmd]/trust clear[/]")
+                    console.rule()
 
         elif cmd == "/cost":
             tok = agent._session_tokens

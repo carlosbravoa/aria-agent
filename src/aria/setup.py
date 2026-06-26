@@ -96,6 +96,11 @@ AGENT_NAME=Aria
 #   off            = no shell outside the interactive REPL
 #   full           = legacy (destructive still blocked, secret-path allowed)
 # ARIA_SHELL_UNATTENDED=safe
+# Optional real isolation: a command prefix that every shell_run invocation is
+# wrapped in (needs the binary installed). Empty = no sandbox.
+#   ARIA_SHELL_SANDBOX=firejail --quiet --private-tmp
+# In the REPL, approving a risky command with "always" remembers its prefix in
+# ~/.aria/shell_allowlist.json (manage with /trust); it then runs without asking.
 # Minutes of inactivity before a Telegram/WhatsApp session is trimmed + dropped
 # ARIA_CHANNEL_IDLE_MINUTES=60
 

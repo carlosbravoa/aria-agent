@@ -20,6 +20,7 @@ Special fields:
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import subprocess
@@ -27,6 +28,12 @@ import tempfile
 from pathlib import Path
 
 from aria.tools._env import build_env, is_tty_command
+
+# Learnable approval store: command prefixes the user approved with "always" at
+# the interactive prompt. A risky command matching a stored prefix skips the
+# confirmation. User-driven only (written on an explicit "always"); the agent
+# never writes here. Interactive REPL only — channels stay policy-gated.
+_ALLOWLIST_FILE = Path.home() / ".aria" / "shell_allowlist.json"
 
 DEFINITION = {
     "name": "shell_run",
@@ -162,12 +169,56 @@ def _is_interactive() -> bool:
     return os.isatty(0)
 
 
+def _command_prefix(command: str) -> str:
+    """The learnable unit: first two tokens of the command (e.g. 'git push',
+    'npm install', 'rm -rf'). Matching is on a token boundary, so approving
+    'git push' covers 'git push origin main' but not 'gitfoo'."""
+    toks = command.strip().split()
+    return " ".join(toks[:2]) if toks else ""
+
+
+def _load_allowlist() -> list[str]:
+    try:
+        data = json.loads(_ALLOWLIST_FILE.read_text(encoding="utf-8"))
+        return data if isinstance(data, list) else []
+    except Exception:
+        return []
+
+
+def _persist_allow(prefix: str) -> None:
+    if not prefix:
+        return
+    allow = _load_allowlist()
+    if prefix in allow:
+        return
+    allow.append(prefix)
+    try:
+        _ALLOWLIST_FILE.parent.mkdir(parents=True, exist_ok=True)
+        _ALLOWLIST_FILE.write_text(json.dumps(allow), encoding="utf-8")
+        _ALLOWLIST_FILE.chmod(0o600)
+    except OSError:
+        pass
+
+
+def _is_allowlisted(command: str) -> bool:
+    cmd = command.strip()
+    for prefix in _load_allowlist():
+        if cmd == prefix or cmd.startswith(prefix + " "):
+            return True
+    return False
+
+
 def _confirm(command: str, reason: str = "") -> bool:
     if not _is_interactive():
         return False
     why = f"  ⚠️  {reason}\n" if reason else ""
+    prefix = _command_prefix(command)
     print(f"\n⚠️  Shell command requested:\n{why}  $ {command}")
-    answer = input("  Run? [y/N] ").strip().lower()
+    answer = input(f"  Run? [y]es / [N]o / [a]lways ('{prefix}') ").strip().lower()
+    if answer in ("a", "always"):
+        _persist_allow(prefix)
+        print(f"  ✓ Will not ask again for commands starting with '{prefix}'.")
+        return True
     return answer in ("y", "yes")
 
 
@@ -201,6 +252,10 @@ def _gate(payload: str) -> str | None:
         return None  # ordinary command — always allowed
 
     if interactive:
+        # A command the user previously approved with "always" runs without a
+        # repeat prompt (learnable trust). Everything else still confirms.
+        if _is_allowlisted(payload):
+            return None
         return None if _confirm(payload, "; ".join(reasons)) else "[shell_run] Cancelled by user."
 
     # Non-interactive + risky: destructive is always refused; secret-path is
@@ -295,7 +350,9 @@ def _run_script(
     cwd: str | None,
     timeout: int,
 ) -> str:
-    """Run a script via an explicit argv list — shell=False, no injection risk."""
+    """Run a script via an explicit argv list — shell=False, no injection risk.
+    Prefixed with the sandbox wrapper when one is configured."""
+    argv = [*_sandbox_prefix(), *argv]
     try:
         result = subprocess.run(
             argv,
@@ -324,24 +381,53 @@ def _run_script(
         return f"[shell_run error] {exc}"
 
 
+def _sandbox_prefix() -> list[str]:
+    """Optional real isolation. ARIA_SHELL_SANDBOX is a command prefix the shell
+    invocation is wrapped in (e.g. 'firejail --quiet --private-tmp' or a bwrap
+    line). Empty/unset → no wrapping. Honoured only if the wrapper binary exists,
+    so a misconfigured value can't silently break every command."""
+    import shlex
+    raw = os.environ.get("ARIA_SHELL_SANDBOX", "").strip()
+    if not raw:
+        return []
+    parts = shlex.split(raw)
+    if parts and Path(parts[0]).name and _which(parts[0]):
+        return parts
+    return []
+
+
+def _which(binary: str) -> bool:
+    import shutil
+    return shutil.which(binary) is not None
+
+
 def _run_shell(
     command: str,
     stdin_text: str | None,
     cwd: str | None,
     timeout: int,
 ) -> str:
-    """Run a shell command string — shell=True intentional for pipes, &&, redirects."""
+    """Run a shell command string — shell=True intentional for pipes, &&, redirects.
+    Under a configured sandbox, run it as `<sandbox> bash -c <command>` instead."""
+    sandbox = _sandbox_prefix()
     try:
-        result = subprocess.run(
-            command,
-            shell=True,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            cwd=cwd,
-            env=build_env(),
-            input=stdin_text,
-        )
+        if sandbox:
+            result = subprocess.run(
+                [*sandbox, "bash", "-c", command],
+                shell=False, capture_output=True, text=True,
+                timeout=timeout, cwd=cwd, env=build_env(), input=stdin_text,
+            )
+        else:
+            result = subprocess.run(
+                command,
+                shell=True,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                cwd=cwd,
+                env=build_env(),
+                input=stdin_text,
+            )
         out = result.stdout.strip()
         err = result.stderr.strip()
         parts = []
