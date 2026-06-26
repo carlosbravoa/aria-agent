@@ -436,6 +436,15 @@ class Agent:
             "## Rules\n"
             "- Call tools through the function-calling API — you already have their "
             "schemas. Never narrate a tool call as plain text.\n"
+            "- For a multi-step task, outline a short plan with the plan tool first "
+            "and keep it updated (mark each step in_progress, then done) as you go. "
+            "Skip the plan for simple one-step requests.\n"
+            "- Verify your work before claiming it's done: after editing code or "
+            "config, run the relevant tests/command (shell_run) or re-read the file "
+            "and check the output. Don't report success on an unverified change.\n"
+            "- Locate code with code_search before reading whole files; for several "
+            "edits to one file use file_access action=edit (atomic), and undo with "
+            "action=undo if a change was wrong.\n"
             "- Use remember(...) for user facts and learn(...) for operational "
             "knowledge worth keeping for future sessions.\n"
             "- You already know your available tools — never call a tool just to "
@@ -1212,13 +1221,33 @@ class Agent:
         if not ok:
             first = r.splitlines()[0][:80] if r else "failed"
             line += f"  [red]{first}[/red]"
+        elif name == "plan":
+            pass  # the checklist is rendered in full below, not as a tail
         elif r and len(r) <= 200 and r.count("\n") <= 2:
             # Show concise confirmations (Created PROJ-123, Sent, Written: …);
             # skip big data dumps (file reads, search results) to avoid noise.
             line += f"  [dim]→ {r.splitlines()[0][:80]}[/dim]"
         self._console().print(line)
+        if name == "plan" and ok and r:
+            self._render_plan(r)
         if diff:
             self._render_diff(diff)
+
+    def _render_plan(self, text: str) -> None:
+        """Render a plan checklist under the tool line: done items dim/struck,
+        in-progress highlighted, pending plain."""
+        from rich.text import Text
+        body = Text()
+        for ln in text.splitlines():
+            if ln.startswith("☑"):
+                body.append("    " + ln + "\n", style="dim green")
+            elif ln.startswith("◐"):
+                body.append("    " + ln + "\n", style="bold yellow")
+            elif ln.startswith("☐"):
+                body.append("    " + ln + "\n", style="default")
+            else:
+                body.append("    " + ln + "\n", style="dim")   # the header line
+        self._console().print(body, end="")
 
     def _render_diff(self, diff) -> None:
         """Render a unified diff with +/- lines coloured, indented under the tool
