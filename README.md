@@ -384,13 +384,22 @@ Responses are rendered as Markdown — headings, bold, code blocks, lists — bu
 | `/memory`        | Print current memory                             |
 | `/tools`         | List all loaded tools                            |
 | `/clear`         | Clear conversation history                       |
+| `/compact`       | Summarize the conversation to reclaim context tokens |
+| `/retry`         | Re-run your last message                         |
+| `/copy`          | Copy the last answer to the clipboard            |
 | `/save <note>`   | Append a note directly to memory                 |
 | `/models`        | List available model profiles                    |
 | `/model <name>`  | Switch model profile (persists across sessions)  |
 | `/markdown`      | Toggle Markdown rendering on/off                 |
+| `/cost`          | Show session token usage                         |
+| `/trust [clear]` | Show/clear auto-approved shell commands          |
 | `/version`       | Show version                                     |
 | `/help`          | Show command list                                |
 | `/quit`          | Exit (saves conversation window)                 |
+
+At the prompt: `!cmd` runs a shell command directly, `@path/to/file` attaches a
+file's contents, `Esc`/`Ctrl+C` interrupts a reply while keeping context, and
+`Alt+Enter` inserts a newline.
 
 On exit, the rolling conversation window is trimmed and saved to
 `memory/conversation_window.md`, loaded into the next session for lightweight
@@ -622,8 +631,11 @@ at startup — no registration needed.
 
 | Tool          | Description                                                               |
 |---------------|---------------------------------------------------------------------------|
-| `file_access` | Read, write, append, patch, list, delete files. Supports `base64` encoding and paginated reads (`offset`/`limit`). Read/write restricted to configured directories. |
-| `shell_run`   | Run shell commands or scripts. Use `script` field for commands with quotes (AWS CLI, jq, SQL) — no JSON escaping needed. Interpreter whitelist enforced. |
+| `file_access` | Read, write, append, patch, **edit (multi)**, **replace_lines**, list, delete, **undo** files. `base64` encoding + paginated reads (`offset`/`limit`). Read/write restricted to configured directories. |
+| `code_search` | Fast content/filename search across a tree (ripgrep → git grep → Python fallback; respects `.gitignore`). Locate code/symbols/TODOs before reading whole files. |
+| `git`         | Common git ops: status, diff, log, show, branch, checkout, add, commit, push, pull. No shell string assembly. |
+| `plan`        | Track a multi-step task as a todo checklist (rendered live in the REPL); update statuses as you go. |
+| `shell_run`   | Run shell commands or scripts. Use `script` field for commands with quotes (AWS CLI, jq, SQL) — no JSON escaping needed. Interpreter whitelist enforced. Interactive `[y/N/always]` approval for risky ops; optional `ARIA_SHELL_SANDBOX` isolation. |
 | `web_fetch`   | Fetch readable text from a web page using trafilatura for clean content extraction. |
 | `gmail`       | Search, read, send, mark-read via `gog` CLI.                              |
 | `calendar`    | List, create, update, delete, RSVP Google Calendar events via `gog`.      |
