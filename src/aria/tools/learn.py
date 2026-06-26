@@ -15,7 +15,10 @@ DEFINITION = {
         "which accounts/tools to use for a task, Jira project keys, calendar IDs, "
         "recurring task patterns, shortcuts discovered while using tools. The more "
         "you learn, the less you re-derive each session. If you find a better "
-        "approach than a past note, record the new one."
+        "approach than a past note, record the new one. Set scope='project' for a "
+        "note specific to the current working directory's codebase (test command, "
+        "deploy steps, gotchas) — it's kept separate from global notes and only "
+        "surfaces when working in that project."
     ),
     "parameters": {
         "type": "object",
@@ -23,6 +26,12 @@ DEFINITION = {
             "procedure": {
                 "type": "string",
                 "description": "The procedure or shortcut to remember, as a short note.",
+            },
+            "scope": {
+                "type": "string",
+                "enum": ["global", "project"],
+                "description": "'global' (default) or 'project' for the current "
+                               "directory's codebase.",
             },
         },
         "required": ["procedure"],
@@ -36,8 +45,14 @@ def execute(args: dict) -> str:
         return "[learn] No procedure provided."
     try:
         from aria import config
-        from aria.workspace import Workspace
 
+        if args.get("scope") == "project":
+            from aria import project
+            root = project.find_project_root()
+            project.append_note(procedure, config.workspace_dir())
+            return f"[learn] Saved a project note for {root.name}: {procedure}"
+
+        from aria.workspace import Workspace
         ws = Workspace(config.workspace_dir())
         ws.append_operational_memory(f"- {procedure}")
         return f"[learn] Saved to operational memory: {procedure}"

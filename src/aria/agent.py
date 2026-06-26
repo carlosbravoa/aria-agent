@@ -350,6 +350,30 @@ class Agent:
 
     # ── System prompt ────────────────────────────────────────────────────────
 
+    def _project_context_block(self) -> str:
+        """Per-project context for the cwd's repo: a conventions file the repo
+        ships (.aria.md / AGENTS.md / CLAUDE.md) and notes learned about this
+        project. Empty when neither exists."""
+        try:
+            from aria import project
+        except Exception:
+            return ""
+        root = project.find_project_root()
+        block = ""
+        conv = project.load_conventions(root)
+        if conv:
+            name, text = conv
+            block += (f"## Project Context (from {name})\n"
+                      "Conventions for the project you're working in — follow "
+                      f"them.\n\n{text}\n\n")
+        notes = project.load_notes(root, self.ws.root)
+        if notes:
+            block += (f"## Project Notes ({root.name})\n"
+                      "Things learned about THIS project in past sessions. Use "
+                      "them; record new ones with learn(scope='project').\n\n"
+                      f"{notes}\n\n")
+        return block
+
     def _build_system_prompt(self) -> str:
         soul         = self.ws.load_soul()
         memory       = self.ws.load_memory()
@@ -389,6 +413,7 @@ class Agent:
                     "directory and use your file/shell tools there. Don't ask for "
                     "the full path again — you already have it.\n\n"
                 )
+                cwd_block += self._project_context_block()
             except OSError:
                 pass
         ops_mem      = self.ws.load_operational_memory()

@@ -60,6 +60,8 @@ def test_main_module_imports(minimal_env):
     ("aria.agent", "_MAX_HISTORY"),
     ("aria.agent", "Agent"),
     ("aria.workspace", "Workspace"),
+    ("aria.project", "find_project_root"),
+    ("aria.project", "append_note"),
     ("aria.reflect", "main"),
     ("aria.supervisor", "main"),
     # Native tool engine + memory tools (the 2.0 rewrite surface):
@@ -79,7 +81,7 @@ def test_required_symbol_exists(minimal_env, module, symbol):
     "_record_usage", "_finalize_interrupt",
     "_make_diff", "_render_diff", "_file_edit_target", "_read_text_safe",
     "_call_signature", "retry_last", "compact", "_spinner_label",
-    "_render_plan",
+    "_render_plan", "_project_context_block",
 ])
 def test_native_agent_methods_exist(minimal_env, method):
     """Guards the native loop's method surface — a deleted/renamed helper here
