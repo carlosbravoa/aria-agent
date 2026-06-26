@@ -316,7 +316,10 @@ def _run_script(
             parts.append(f"[stderr] {err}")
         return "\n".join(parts) or "(no output)"
     except subprocess.TimeoutExpired:
-        return f"[shell_run error] Script timed out after {timeout}s."
+        return (f"[shell_run error] Script timed out after {timeout}s and was "
+                "killed. It did NOT complete. Do not just re-run it — raise the "
+                "`timeout` argument if it legitimately needs longer, or run it in "
+                "the background and poll.")
     except Exception as exc:
         return f"[shell_run error] {exc}"
 
@@ -348,6 +351,9 @@ def _run_shell(
             parts.append(f"[stderr] {err}")
         return "\n".join(parts) or "(no output)"
     except subprocess.TimeoutExpired:
-        return f"[shell_run error] Command timed out after {timeout}s."
+        return (f"[shell_run error] Command timed out after {timeout}s and was "
+                "killed. It did NOT complete. Do not just re-run the same command "
+                "— raise the `timeout` argument if it legitimately needs longer, "
+                "or run it in the background (append ` &` / use nohup) and poll.")
     except Exception as exc:
         return f"[shell_run error] {exc}"

@@ -78,6 +78,7 @@ def test_required_symbol_exists(minimal_env, module, symbol):
     "_accumulate_tool_frags", "_assemble_streamed",
     "_record_usage", "_finalize_interrupt",
     "_make_diff", "_render_diff", "_file_edit_target", "_read_text_safe",
+    "_call_signature",
 ])
 def test_native_agent_methods_exist(minimal_env, method):
     """Guards the native loop's method surface — a deleted/renamed helper here

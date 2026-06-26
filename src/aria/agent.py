@@ -201,6 +201,9 @@ class Agent:
         self._live_rendered = False
         # Token usage accumulated this process (shown in the REPL status line).
         self._session_tokens = {"in": 0, "out": 0}
+        # Maps a normalized tool-call signature → its last result, so a repeated
+        # call can be answered from cache instead of re-executed (see _run_loop).
+        self._last_result_for: dict[str, str] = {}
 
         # Restore last used profile (persisted across sessions)
         if _PROFILE_STATE.exists():
@@ -676,16 +679,46 @@ class Agent:
                     self.ws.append_conversation_window("assistant", content, self.name)
                     self._render_answer(content)
 
-            # Guard against the model looping on an identical call set.
-            call_sig = "|".join(
-                f"{tc.function.name}:{tc.function.arguments}" for tc in tool_calls
-            )
-            if call_sig in seen_calls:
-                note = "(identical tool call repeated — stopping)"
+            # Guard against the model re-issuing a call it already made. The
+            # signature is normalized (sorted JSON args) so a re-serialized call
+            # with reordered keys / different whitespace is still recognised as a
+            # repeat — otherwise it would slip through and execute twice (e.g. a
+            # second Jira ticket). On the FIRST repeat we don't kill the turn:
+            # we feed the model a corrective tool result (with the prior output)
+            # so it can adapt — report the success, change arguments, or try
+            # another tool. Only a SECOND repeat (model ignored the nudge and is
+            # genuinely stuck) hard-stops.
+            call_sig = self._call_signature(tool_calls)
+            repeats  = seen_calls.count(call_sig)
+            if repeats >= 1:
+                seen_calls.append(call_sig)
+                prior = self._last_result_for.get(call_sig, "")
+                if repeats >= 2:
+                    note = "(identical tool call repeated 3× — stopping)"
+                    if self._is_terminal:
+                        self._console().print(f"  [yellow]⚠ {note}[/yellow]")
+                    self.ws.log_session(self.session_log, self.name, note)
+                    nudge = ("[agent] You have now issued this exact call three "
+                             "times. Stop repeating it and reply to the user with "
+                             "what you have, or explain what is blocking you.")
+                    for tc in tool_calls:
+                        self.history.append({"role": "tool", "tool_call_id": tc.id,
+                                             "content": _wrap_untrusted(nudge)})
+                    return
                 if self._is_terminal:
-                    self._console().print(f"  [yellow]⚠ {note}[/yellow]")
-                self.ws.log_session(self.session_log, self.name, note)
-                return
+                    self._console().print(
+                        "  [yellow]⚠ model repeated an identical call — feeding "
+                        "back the previous result instead of re-running[/yellow]")
+                nudge = ("[agent] You already issued this exact tool call earlier "
+                         "in this turn; it was NOT run again. Its previous result "
+                         f"was:\n{prior or '(no output captured)'}\n\nDo not repeat "
+                         "it verbatim — if it succeeded, tell the user; otherwise "
+                         "change the arguments (e.g. a longer `timeout`) or try a "
+                         "different approach.")
+                for tc in tool_calls:
+                    self.history.append({"role": "tool", "tool_call_id": tc.id,
+                                         "content": _wrap_untrusted(nudge)})
+                continue
             seen_calls.append(call_sig)
 
             # Execute each call and append one tool message per call — EVERY
@@ -706,6 +739,10 @@ class Agent:
                     "tool_call_id": tc.id,
                     "content": _wrap_untrusted(result),
                 })
+            # Remember this batch's output so a later identical call can be
+            # answered from it (the nudge above) instead of being re-run.
+            self._last_result_for[call_sig] = "\n".join(
+                str(r)[:500] for r in results)
 
         if self._is_terminal:
             self._console().print(f"\n  [yellow]⚠ Hit loop limit ({loop_limit}).[/yellow]")
@@ -896,6 +933,24 @@ class Agent:
             ]
         return msg
 
+    @staticmethod
+    def _call_signature(tool_calls) -> str:
+        """A normalized signature for a batch of tool calls — JSON arguments are
+        parsed and re-serialized with sorted keys so two calls that are identical
+        except for key order / whitespace produce the SAME signature (and are
+        caught by the repeat guard). Falls back to the raw string if args aren't
+        valid JSON."""
+        parts = []
+        for tc in tool_calls:
+            raw = tc.function.arguments or "{}"
+            try:
+                norm = json.dumps(json.loads(raw), sort_keys=True,
+                                  separators=(",", ":"))
+            except Exception:
+                norm = raw.strip()
+            parts.append(f"{tc.function.name}:{norm}")
+        return "|".join(parts)
+
     def _parse_call_args(self, tc):
         """Parse one tool call's JSON arguments. Returns (args, parse_err,
         preview). args is always a dict; parse_err is None on success."""
@@ -995,7 +1050,7 @@ class Agent:
         else:
             rec = self._execute_call(tc, idx)
         self._render_tool(rec["idx"], rec["name"], rec["preview"],
-                          rec["ok"], rec["elapsed"], "" if rec["ok"] else rec["result"],
+                          rec["ok"], rec["elapsed"], rec["result"],
                           diff=rec.get("diff"))
         return rec["result"]
 
@@ -1020,23 +1075,35 @@ class Agent:
                 records = list(ex.map(_work, indexed))
         for rec in records:
             self._render_tool(rec["idx"], rec["name"], rec["preview"],
-                              rec["ok"], rec["elapsed"], "" if rec["ok"] else rec["result"],
+                              rec["ok"], rec["elapsed"], rec["result"],
                               diff=rec.get("diff"))
         return [rec["result"] for rec in records]
 
-    @staticmethod
-    def _arg_preview(args: dict) -> str:
+    # The arg most worth showing in the activity header, per tool shape. First
+    # match wins; falls back to a flattened key=value preview.
+    _PREVIEW_KEYS = ("command", "script", "url", "jql", "query", "summary",
+                     "expression", "code", "path", "issue_key", "action")
+
+    @classmethod
+    def _arg_preview(cls, args: dict, limit: int = 100) -> str:
         """A compact, single-line preview of a call's arguments for the activity
-        log. Truncated hard so a code/script value never floods the REPL."""
+        header. Prefers the most informative field (the command being run, the
+        URL fetched, …) so you can see WHAT is being attempted; truncated hard so
+        a multi-line script never floods the REPL."""
         if not args:
             return ""
+        for key in cls._PREVIEW_KEYS:
+            val = args.get(key)
+            if val not in (None, "", [], {}):
+                line = str(val).strip().splitlines()[0]
+                return line[:limit] + "…" if len(line) > limit else line
         single = len(args) == 1
         parts = []
         for k, v in args.items():
             s = str(v).replace("\n", " ").strip()
             parts.append(s if single else f"{k}={s}")
         preview = " ".join(parts)
-        return preview[:50] + "…" if len(preview) > 50 else preview
+        return preview[:limit] + "…" if len(preview) > limit else preview
 
     # ── REPL activity rendering (terminal only) ───────────────────────────────
 
@@ -1049,9 +1116,12 @@ class Agent:
         return self._con
 
     def _render_tool(self, idx: int, name: str, preview: str,
-                     ok: bool, elapsed: float, err: str, diff=None) -> None:
-        """Print one permanent tool-call line: `⚙ [n] name · preview  ✓ 0.4s`,
-        followed by a coloured diff when a file edit changed something."""
+                     ok: bool, elapsed: float, result: str, diff=None) -> None:
+        """Print one permanent tool-call line:
+        `⚙ [n] name · what-it-ran  ✓ 0.4s → what-came-back`, followed by a
+        coloured diff when a file edit changed something. The result tail lets
+        you see the outcome (e.g. `Created PROJ-123`) — key for spotting when the
+        model re-runs something that already succeeded."""
         if not self._is_terminal:
             return
         icon = "[green]✓[/green]" if ok else "[red]✗[/red]"
@@ -1061,9 +1131,14 @@ class Agent:
         line += f"  {icon}"
         if ok and elapsed >= 0.05:
             line += f"  [dim]{elapsed:.1f}s[/dim]"
-        if not ok and err:
-            first = err.strip().splitlines()[0][:80] if err.strip() else "failed"
+        r = (result or "").strip()
+        if not ok:
+            first = r.splitlines()[0][:80] if r else "failed"
             line += f"  [red]{first}[/red]"
+        elif r and len(r) <= 200 and r.count("\n") <= 2:
+            # Show concise confirmations (Created PROJ-123, Sent, Written: …);
+            # skip big data dumps (file reads, search results) to avoid noise.
+            line += f"  [dim]→ {r.splitlines()[0][:80]}[/dim]"
         self._console().print(line)
         if diff:
             self._render_diff(diff)

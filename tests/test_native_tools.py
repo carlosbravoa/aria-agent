@@ -51,9 +51,32 @@ def test_arg_preview_truncates_and_flattens():
     from aria.agent import Agent
     long = {"script": "for i in 1 2 3; do echo a-very-long-line-of-code $i; done\nmore"}
     p = Agent._arg_preview(long)
-    assert "\n" not in p
-    assert len(p) <= 51            # 50 chars + ellipsis
+    assert "\n" not in p            # only the first line, flattened
+    assert len(p) <= 101            # 100 chars + ellipsis
     assert Agent._arg_preview({}) == ""
+
+
+def test_arg_preview_prefers_salient_field():
+    """The header should show WHAT is being run, not generic key=value noise."""
+    from aria.agent import Agent
+    assert Agent._arg_preview({"action": "run", "command": "pytest -q"}) == "pytest -q"
+    assert Agent._arg_preview({"url": "https://x.com", "raw": False}) == "https://x.com"
+    # falls back to flattened preview when no salient key is present
+    assert "foo=bar" in Agent._arg_preview({"foo": "bar", "baz": "qux"})
+
+
+def test_call_signature_normalizes_argument_order():
+    """The repeat guard must catch a re-serialized call with reordered keys —
+    otherwise a 'duplicate' Jira create slips through and runs twice."""
+    from aria.agent import Agent
+    from types import SimpleNamespace
+    def tc(name, args):
+        return SimpleNamespace(function=SimpleNamespace(name=name, arguments=args))
+    a = tc("jira", '{"action":"create","summary":"X"}')
+    b = tc("jira", '{"summary": "X", "action": "create"}')   # reordered + spaces
+    assert Agent._call_signature([a]) == Agent._call_signature([b])
+    c = tc("jira", '{"action":"create","summary":"Y"}')       # genuinely different
+    assert Agent._call_signature([a]) != Agent._call_signature([c])
 
 
 def test_parallel_safe_flag_surfaced(minimal_env):
