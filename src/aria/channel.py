@@ -43,10 +43,11 @@ class _Session:
         self._lock     = threading.Lock()
         self._reset_timer()
 
-    def handle(self, text: str) -> list[str]:
+    def handle(self, text: str, response_cb=None, activity_cb=None) -> list[str]:
         with self._lock:
             self._reset_timer()
-            return self.agent.chat_yield(text)
+            return self.agent.chat_yield(text, response_cb=response_cb,
+                                         activity_cb=activity_cb)
 
     def _reset_timer(self) -> None:
         """Restart the inactivity countdown. Called under self._lock."""
@@ -103,13 +104,18 @@ def get_session(channel: str, user_id: str) -> Agent:
     return _get_or_create(channel, user_id).agent
 
 
-def handle(channel: str, user_id: str, text: str) -> list[str]:
+def handle(channel: str, user_id: str, text: str,
+           response_cb=None, activity_cb=None) -> list[str]:
     """
     Process one user message and return a list of response strings.
     Each string should be sent as a separate message for natural timing.
     The slow chat runs outside the registry lock — only get-or-create is guarded.
+
+    Optional `response_cb`/`activity_cb` let a channel stream responses and tool
+    progress mid-turn (used by Telegram); omitting them keeps the batched return
+    (used by WhatsApp and the rest).
     """
-    return _get_or_create(channel, user_id).handle(text)
+    return _get_or_create(channel, user_id).handle(text, response_cb, activity_cb)
 
 
 def shutdown() -> None:

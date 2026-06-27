@@ -211,6 +211,12 @@ class Agent:
         # Maps a normalized tool-call signature → its last result, so a repeated
         # call can be answered from cache instead of re-executed (see _run_loop).
         self._last_result_for: dict[str, str] = {}
+        # Optional channel hooks (set per-turn by chat_yield). _response_cb streams
+        # each user-facing response the moment it's produced (instead of batching
+        # them all to the end); _activity_cb reports per-tool progress for a live
+        # trail. Both are no-ops for the REPL/CLI, which use the rich renderer.
+        self._response_cb = None
+        self._activity_cb = None
 
         # Restore last used profile (persisted across sessions)
         if _PROFILE_STATE.exists():
@@ -558,6 +564,23 @@ class Agent:
         self.ws.reset_conversation_window(summary, self.name)
         return summary
 
+    def _stream(self, text: str) -> None:
+        """Push a user-facing response to the channel as soon as it's produced,
+        so messages arrive mid-turn instead of all batched at the end."""
+        if self._response_cb and text:
+            try:
+                self._response_cb(text)
+            except Exception:
+                pass
+
+    def _emit_activity(self, detail: str) -> None:
+        """Report a per-tool progress step to the channel (live trail / typing)."""
+        if self._activity_cb and detail:
+            try:
+                self._activity_cb(detail)
+            except Exception:
+                pass
+
     def _finalize_interrupt(self) -> None:
         """Make history well-formed after a mid-turn interrupt. A trailing
         assistant message that carries tool_calls but never received its tool
@@ -605,18 +628,26 @@ class Agent:
             return "\n\n".join(self._responses)
         return self._last_response or f"[{self.name}] No response generated."
 
-    def chat_yield(self, user_input: str) -> list[str]:
+    def chat_yield(self, user_input: str, response_cb=None,
+                   activity_cb=None) -> list[str]:
         """
         Run a chat turn and return all clean text responses in order.
         Each entry should be sent as a separate message — no joining.
         Used by Telegram/WhatsApp so each response arrives immediately
         as the agent produces it, with natural timing between messages.
+
+        `response_cb(text)` — if given, each user-facing response is delivered
+        through it the MOMENT it's produced (true mid-turn streaming); the full
+        list is still returned. `activity_cb(detail)` — per-tool progress for a
+        live trail / typing keep-alive.
         """
         buf: list[str] = []
         orig = self._output
         self._output = buf.append
         orig_is_terminal  = self._is_terminal
         self._is_terminal = False
+        self._response_cb = response_cb
+        self._activity_cb = activity_cb
         self._last_response = ""
         self._responses     = []
         try:
@@ -626,10 +657,14 @@ class Agent:
             logging.getLogger(__name__).error(
                 "chat_yield exception: %s", exc, exc_info=True
             )
-            return [f"[{self.name}] Error: {exc}"]
+            err = f"[{self.name}] Error: {exc}"
+            self._stream(err)
+            return [err]
         finally:
             self._output      = orig
             self._is_terminal = orig_is_terminal
+            self._response_cb = None
+            self._activity_cb = None
 
         # `[self._last_response]` is always truthy (a non-empty list), so the
         # final fallback used to be unreachable — an empty turn sent a blank
@@ -763,6 +798,7 @@ class Agent:
                 self._last_response = display
                 self.ws.append_conversation_window("assistant", display, self.name)
                 self._render_answer(display)
+                self._stream(display)
                 return
 
             # Content accompanying tool calls.
@@ -773,6 +809,7 @@ class Agent:
                     self._last_response = content
                     self.ws.append_conversation_window("assistant", content, self.name)
                     self._render_answer(content)
+                    self._stream(content)
 
             # Guard against the model re-issuing a call it already made. The
             # signature is normalized (sorted JSON args) so a re-serialized call
@@ -799,6 +836,14 @@ class Agent:
                     for tc in tool_calls:
                         self.history.append({"role": "tool", "tool_call_id": tc.id,
                                              "content": _wrap_untrusted(nudge)})
+                    # Don't leave channel users with "(no response)": if nothing
+                    # was delivered this turn, explain why it stopped.
+                    if not self._responses:
+                        stop = ("I kept hitting the same step and stopped to avoid "
+                                "looping. Could you rephrase or give me more detail?")
+                        self._responses.append(stop)
+                        self._last_response = stop
+                        self._stream(stop)
                     return
                 if self._is_terminal:
                     self._console().print(
@@ -839,10 +884,17 @@ class Agent:
             self._last_result_for[call_sig] = "\n".join(
                 str(r)[:500] for r in results)
 
+        # Loop limit reached without a final answer. Always inform the user —
+        # previously the non-terminal path wrote to a discarded buffer, so channel
+        # users got a silent "(no response)" exactly when a task ran long.
+        limit_note = (f"I stopped after {loop_limit} steps without finishing — the "
+                      "task may be too large or I got stuck. Tell me how to narrow "
+                      "it down.")
+        self._responses.append(limit_note)
+        self._last_response = limit_note
+        self._stream(limit_note)
         if self._is_terminal:
             self._console().print(f"\n  [yellow]⚠ Hit loop limit ({loop_limit}).[/yellow]")
-        else:
-            self._output(f"[{self.name}] Hit loop limit ({loop_limit}).\n")
 
     # ── Native model call + tool execution ────────────────────────────────────
 
@@ -1170,7 +1222,17 @@ class Agent:
         self._render_tool(rec["idx"], rec["name"], rec["preview"],
                           rec["ok"], rec["elapsed"], rec["result"],
                           diff=rec.get("diff"))
+        self._emit_activity(self._activity_detail(rec))
         return rec["result"]
+
+    @staticmethod
+    def _activity_detail(rec) -> str:
+        """A compact per-tool progress line for the channel trail: `web_fetch ✓`."""
+        icon = "✓" if rec.get("ok") else "✗"
+        name = rec.get("name", "tool")
+        preview = (rec.get("preview") or "").strip()
+        head = f"{name} {icon}"
+        return f"{head} · {preview[:40]}" if preview else head
 
     def _run_calls_concurrent(self, indexed) -> list[str]:
         """Concurrent path for an all-PARALLEL_SAFE batch. `indexed` is a list of
@@ -1195,6 +1257,7 @@ class Agent:
             self._render_tool(rec["idx"], rec["name"], rec["preview"],
                               rec["ok"], rec["elapsed"], rec["result"],
                               diff=rec.get("diff"))
+            self._emit_activity(self._activity_detail(rec))
         return [rec["result"] for rec in records]
 
     # The arg most worth showing in the activity header, per tool shape. First

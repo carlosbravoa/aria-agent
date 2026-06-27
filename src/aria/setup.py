@@ -103,6 +103,8 @@ AGENT_NAME=Aria
 # ~/.aria/shell_allowlist.json (manage with /trust); it then runs without asking.
 # Minutes of inactivity before a Telegram/WhatsApp session is trimmed + dropped
 # ARIA_CHANNEL_IDLE_MINUTES=60
+# Telegram: show a live tool-progress trail message while a turn runs (on/off)
+# ARIA_TELEGRAM_PROGRESS=on
 
 # ── Memory reflection ────────────────────────────────────────────────
 # Sessions to analyse per reflection batch

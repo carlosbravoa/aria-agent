@@ -102,6 +102,45 @@ def test_multiple_tool_calls_each_get_a_reply(minimal_env, native_client, monkey
     assert ids == replied            # no orphaned call, no orphaned reply
 
 
+def test_chat_yield_streams_responses_via_callback(minimal_env, native_client, monkeypatch):
+    """response_cb fires for each user-facing response as produced, not batched."""
+    a = _agent()
+    a.client = native_client("Here is your answer.")
+    streamed = []
+    out = a.chat_yield("go", response_cb=streamed.append)
+    assert streamed == ["Here is your answer."]      # streamed mid-turn
+    assert out == ["Here is your answer."]            # and still returned
+
+
+def test_chat_yield_emits_tool_activity(minimal_env, native_client, monkeypatch):
+    """activity_cb gets a compact per-tool progress line (name + ✓/✗)."""
+    a = _agent()
+    a.client = native_client(
+        {"tool_calls": [("shell_run", {"action": "run", "command": "ls"})]},
+        "done",
+    )
+    monkeypatch.setattr(a, "_execute_tool", lambda n, ar: "file1\nfile2")
+    activity = []
+    a.chat_yield("list files", activity_cb=activity.append)
+    assert any(d.startswith("shell_run ✓") for d in activity)
+
+
+def test_loop_limit_delivers_message_to_channels(minimal_env, native_client, monkeypatch):
+    """Hitting the loop limit must surface a message (it used to go to a
+    discarded buffer, leaving channel users with a silent '(no response)')."""
+    import aria.agent as agent_mod
+    monkeypatch.setattr(agent_mod, "_MAX_LOOPS", 2)
+    a = _agent()
+    # Each turn returns a DISTINCT tool call so the dedup guard never trips and
+    # the loop runs until the limit.
+    seq = [{"tool_calls": [("shell_run", {"action": "run", "i": i})]} for i in range(5)]
+    a.client = native_client(*seq)
+    monkeypatch.setattr(a, "_execute_tool", lambda n, ar: "out")
+    out = a.chat_yield("go")
+    assert len(out) == 1
+    assert "stopped after" in out[0].lower()
+
+
 def test_repeated_identical_call_is_deduped(minimal_env, native_client, monkeypatch):
     a = _agent()
     # native_client repeats the last turn forever → identical tool call again

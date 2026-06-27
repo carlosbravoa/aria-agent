@@ -61,14 +61,15 @@ def test_imap_move_is_soft_without_uidplus():
 def test_chat_yield_empty_turn_returns_fallback(minimal_env, native_client, monkeypatch):
     from aria.agent import Agent
     a = Agent()
-    # repeated identical tool call → dedup guard returns without a response,
-    # so _responses is empty and _last_response is "".
+    # repeated identical tool call → repeat-guard hard-stop. Previously this left
+    # channel users with a blank/"No response generated"; now it delivers an
+    # explanatory message instead (roadmap: silent give-up fix).
     a.client = native_client({"tool_calls": [("shell_run", {"action": "run"})]})
     monkeypatch.setattr(a, "_execute_tool", lambda n, ar: "out")
     out = a.chat_yield("go")
     assert isinstance(out, list) and len(out) == 1
-    assert out[0] != ""                                 # not a blank message
-    assert "No response generated" in out[0]
+    assert out[0].strip()                               # not a blank message
+    assert "stopped" in out[0].lower()                 # explains why it gave up
 
 
 # ── D: channel session-registry concurrency ──────────────────────────────────
@@ -78,7 +79,9 @@ class _FakeAgent:
     def __init__(self, window_key=None, terminal=None):
         _FakeAgent.count += 1
         self.window_key = window_key
-    def chat_yield(self, text):
+    def chat_yield(self, text, response_cb=None, activity_cb=None):
+        if response_cb:
+            response_cb(f"reply:{text}")
         return [f"reply:{text}"]
     def close(self):
         pass

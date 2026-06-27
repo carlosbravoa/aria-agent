@@ -150,6 +150,99 @@ async def cmd_save(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await _reply(update, f"Saved: {note}")
 
 
+# ── Live progress bridge (sync agent loop ↔ async bot) ────────────────────────
+
+class _Progress:
+    """Bridges the synchronous agent loop (run in a worker thread) to the bot's
+    asyncio loop: keeps the typing indicator alive, maintains ONE live tool-trail
+    message it edits as steps complete, and streams each response the moment it's
+    produced. The agent calls `activity`/`response` from the worker thread; both
+    hop onto the loop via run_coroutine_threadsafe and block for ordering."""
+
+    def __init__(self, bot, chat_id: str, loop) -> None:
+        self.bot       = bot
+        self.chat_id   = int(chat_id)
+        self.loop      = loop
+        self.status_id = None          # message_id of the live trail (lazy)
+        self.steps: list[str] = []
+        self.sent      = 0             # responses streamed (0 → send a fallback)
+        self._alive    = True
+        self._task     = None
+        self._show_trail = os.environ.get(
+            "ARIA_TELEGRAM_PROGRESS", "on").strip().lower() not in (
+            "off", "0", "false", "no")
+
+    # ---- async side (runs on the event loop) --------------------------------
+    async def _typing_loop(self) -> None:
+        while self._alive:
+            try:
+                await self.bot.send_chat_action(self.chat_id, ChatAction.TYPING)
+            except Exception:
+                pass
+            try:
+                await asyncio.sleep(4)
+            except asyncio.CancelledError:
+                break
+
+    async def _update_trail(self, detail: str) -> None:
+        self.steps.append(detail)
+        text = "🛠 " + "  ·  ".join(self.steps[-6:])
+        try:
+            if self.status_id is None:
+                msg = await self.bot.send_message(self.chat_id, text)
+                self.status_id = msg.message_id
+            else:
+                await self.bot.edit_message_text(
+                    text, chat_id=self.chat_id, message_id=self.status_id)
+        except Exception:
+            pass
+
+    async def _send_response(self, text: str) -> None:
+        from aria.telegram_notify import _md_to_html
+        for chunk in _split(text):
+            if not chunk.strip():
+                continue
+            try:
+                await self.bot.send_message(
+                    self.chat_id, _md_to_html(chunk), parse_mode="HTML")
+            except Exception:
+                try:
+                    await self.bot.send_message(self.chat_id, chunk)
+                except Exception as exc:
+                    log.error("stream send failed: %s", exc)
+
+    # ---- worker-thread side (agent callbacks) -------------------------------
+    def activity(self, detail: str) -> None:
+        if not self._show_trail:
+            return
+        try:
+            asyncio.run_coroutine_threadsafe(
+                self._update_trail(detail), self.loop).result(timeout=10)
+        except Exception:
+            pass
+
+    def response(self, text: str) -> None:
+        self.sent += 1
+        try:
+            asyncio.run_coroutine_threadsafe(
+                self._send_response(text), self.loop).result(timeout=120)
+        except Exception:
+            pass
+
+    # ---- lifecycle ----------------------------------------------------------
+    def start(self) -> None:
+        self._task = asyncio.create_task(self._typing_loop())
+
+    async def stop(self) -> None:
+        self._alive = False
+        if self._task is not None:
+            self._task.cancel()
+            try:
+                await self._task
+            except Exception:
+                pass
+
+
 # ── Message handler ───────────────────────────────────────────────────────────
 
 async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -167,23 +260,31 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         original  = replied_to.text.strip()[:500]
         user_text = f"[Replying to: {original}]\n\n{user_text}"
 
-    await context.bot.send_chat_action(
-        chat_id=int(chat_id), action=ChatAction.TYPING
-    )
-
-    loop = asyncio.get_event_loop()
+    loop     = asyncio.get_running_loop()
+    progress = _Progress(context.bot, chat_id, loop)
+    progress.start()
     try:
-        responses = await loop.run_in_executor(None, handle, CHANNEL, chat_id, user_text)
+        responses = await loop.run_in_executor(
+            None,
+            lambda: handle(CHANNEL, chat_id, user_text,
+                           response_cb=progress.response,
+                           activity_cb=progress.activity),
+        )
     except Exception as exc:
         log.error("handle() raised exception for chat %s: %s", chat_id, exc, exc_info=True)
         responses = [f"Sorry, something went wrong: {exc}"]
+    finally:
+        await progress.stop()
 
-    if not responses:
-        log.warning("Empty responses for chat %s input: %r", chat_id, user_text[:80])
-        responses = ["(no response)"]
-
-    for response in responses:
-        await _reply(update, response)
+    # Responses were already streamed via progress.response as they were produced.
+    # Only fall back to a direct send if nothing was streamed (e.g. a hard error
+    # before any response, or an unexpected empty turn).
+    if progress.sent == 0:
+        if not responses:
+            log.warning("Empty responses for chat %s input: %r", chat_id, user_text[:80])
+            responses = ["(no response)"]
+        for response in responses:
+            await _reply(update, response)
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
