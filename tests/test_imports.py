@@ -76,8 +76,7 @@ def test_required_symbol_exists(minimal_env, module, symbol):
 @pytest.mark.parametrize("method", [
     "_call_model", "_run_one_call", "_execute_call", "_assistant_msg",
     "_wire_schemas", "_render_answer", "_render_tool", "_console",
-    "_trim_history", "_run_calls_concurrent", "_stream_call",
-    "_accumulate_tool_frags", "_assemble_streamed",
+    "_trim_history", "_run_calls_concurrent",
     "_record_usage", "_finalize_interrupt",
     "_make_diff", "_render_diff", "_file_edit_target", "_read_text_safe",
     "_call_signature", "retry_last", "compact", "_spinner_label",

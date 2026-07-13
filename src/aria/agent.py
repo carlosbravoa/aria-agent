@@ -175,6 +175,13 @@ class Agent:
         self._parallel_safe = {
             t["function"]["name"] for t in self.tool_schemas if t.get("parallel_safe")
         }
+        # Tools that may block on an interactive terminal prompt (opt-in
+        # INTERACTIVE). The REPL runs these without its live spinner — a rich
+        # spinner redraws over the prompt line and mangles it (e.g. eats the
+        # bracket tokens in `[y]es / [N]o`).
+        self._interactive = {
+            t["function"]["name"] for t in self.tool_schemas if t.get("interactive")
+        }
 
         self.system_prompt = self._build_system_prompt()
         # History holds only genuine conversation — no seeded examples. (Native
@@ -199,13 +206,6 @@ class Agent:
         self._active_profile  = "default"
         self._responses:    list[str] = []  # all clean text responses this turn
         self._con = None  # cached rich Console (lazily built for terminal output)
-        # REPL final-answer token streaming (terminal only; kill-switch for the
-        # rich.Live path). When the answer is streamed live, _live_rendered tells
-        # _render_answer not to print it again.
-        self._repl_stream = os.environ.get(
-            "ARIA_REPL_STREAM", "on"
-        ).strip().lower() not in ("off", "0", "false", "no")
-        self._live_rendered = False
         # Token usage accumulated this process (shown in the REPL status line).
         self._session_tokens = {"in": 0, "out": 0}
         # Maps a normalized tool-call signature → its last result, so a repeated
@@ -506,8 +506,9 @@ class Agent:
         try:
             self._run_loop()
         except KeyboardInterrupt:
-            # Interrupt landed outside the streaming path (a tool call, or a
-            # non-streamed model call). Keep the session usable for redirection.
+            # Ctrl+C during a model call or tool execution. Strip any dangling
+            # tool_calls so the next request stays well-formed and the session
+            # remains usable for redirection.
             self._finalize_interrupt()
 
     def retry_last(self) -> str | None:
@@ -906,29 +907,21 @@ class Agent:
                 for t in self.tool_schemas]
 
     def _call_model(self):
-        """One model call. Returns the assistant `message` (real object, or a
-        SimpleNamespace from the streamed path), or an `[error] …` string
-        sentinel on failure (never raises). The REPL streams the final answer
-        live; channels and `chat_collect`/`chat_yield` use non-streaming."""
-        self._live_rendered = False
+        """One model call (always non-streaming). Returns the assistant `message`,
+        or an `[error] …` string sentinel on failure (never raises). The final
+        answer is rendered once by `_render_answer` after the loop settles."""
         now      = datetime.now(timezone.utc).astimezone()
         time_ctx = f"Current date and time: {now.strftime('%A, %Y-%m-%d %H:%M %Z')}"
         from aria import __version__
         sys_prompt = self.system_prompt + f"\n\n## Context\n{time_ctx}\nVersion: {__version__}\n"
         messages = [{"role": "system", "content": sys_prompt}] + self.history
 
-        use_stream = self._is_terminal and self._repl_stream
-        kwargs: dict[str, Any] = dict(model=self.model, messages=messages, stream=use_stream)
-        if use_stream:
-            # Ask for a final usage chunk so the status line can show token cost.
-            kwargs["stream_options"] = {"include_usage": True}
+        kwargs: dict[str, Any] = dict(model=self.model, messages=messages, stream=False)
         if self.tool_schemas:
             kwargs["tools"]       = self._wire_schemas()
             kwargs["tool_choice"] = "auto"
 
         try:
-            if use_stream:
-                return self._stream_call(kwargs)
             if self._is_terminal:
                 with self._console().status("[dim]Thinking…[/dim]", spinner="dots"):
                     resp = self.client.chat.completions.create(**kwargs)
@@ -940,8 +933,8 @@ class Agent:
             return self._friendly_error(exc)
 
     def _record_usage(self, usage) -> None:
-        """Accumulate prompt/completion tokens from a response or final stream
-        chunk. Best-effort — endpoints that omit usage just leave the count flat."""
+        """Accumulate prompt/completion tokens from a model response. Best-effort —
+        endpoints that omit usage just leave the count flat."""
         if not usage:
             return
         try:
@@ -949,118 +942,6 @@ class Agent:
             self._session_tokens["out"] += getattr(usage, "completion_tokens", 0) or 0
         except Exception:
             pass
-
-    def _stream_render(self, content_parts):
-        from rich.text import Text
-        body = "".join(content_parts)
-        if not body:
-            return Text("")
-        if self.markdown_enabled and _has_markdown(body):
-            return _chat_markdown(body)
-        return Text(body)
-
-    def _stream_call(self, kwargs):
-        """Terminal streaming path. Shows a Thinking… spinner until the first
-        delta, then renders streamed content live via rich.Live, accumulating any
-        `delta.tool_calls` fragments. Returns an assembled message-like object."""
-        from rich.live import Live
-        try:
-            stream = self.client.chat.completions.create(**kwargs)
-        except Exception:
-            # Some endpoints reject stream_options=include_usage — retry without
-            # it (we just lose the token count for this call, not the stream).
-            if kwargs.pop("stream_options", None) is None:
-                raise
-            stream = self.client.chat.completions.create(**kwargs)
-        content_parts: list[str] = []
-        frags: dict = {}
-        con = self._console()
-        status = con.status("[dim]Thinking…[/dim]", spinner="dots")
-        status.start()
-        live = None
-        interrupted = False
-        try:
-            for chunk in stream:
-                # The include_usage final chunk carries usage and empty choices.
-                self._record_usage(getattr(chunk, "usage", None))
-                if not chunk.choices:
-                    continue
-                delta = chunk.choices[0].delta
-                token = getattr(delta, "content", None)
-                if token:
-                    if live is None:
-                        status.stop()
-                        con.print(f"\n  [bold green]{self.name}[/bold green]")
-                        live = Live(console=con, refresh_per_second=12,
-                                    vertical_overflow="visible")
-                        live.start()
-                    content_parts.append(token)
-                    live.update(self._stream_render(content_parts))
-                if getattr(delta, "tool_calls", None):
-                    self._accumulate_tool_frags(frags, delta.tool_calls)
-        except KeyboardInterrupt:
-            # Soft interrupt: stop generation but KEEP what was produced so the
-            # user can redirect with full context, instead of discarding the turn.
-            interrupted = True
-        finally:
-            if live is not None:
-                live.update(self._stream_render(content_parts))
-                live.stop()
-            else:
-                status.stop()
-
-        if interrupted:
-            try:
-                stream.close()
-            except Exception:
-                pass
-            con.print("  [yellow](interrupted — type a redirection or new "
-                      "message)[/yellow]")
-            content_parts.append("\n\n_[interrupted by user]_")
-            self._live_rendered = bool(live)
-            # Force a final-answer shape (drop any half-streamed tool call) so the
-            # loop ends cleanly and history stays well-formed.
-            from types import SimpleNamespace
-            return SimpleNamespace(content="".join(content_parts), tool_calls=None)
-
-        if live is not None:
-            self._live_rendered = True   # already shown — don't re-render
-        return self._assemble_streamed(content_parts, frags)
-
-    @staticmethod
-    def _accumulate_tool_frags(frags: dict, delta_tool_calls) -> dict:
-        """Merge a streamed `delta.tool_calls` fragment list into `frags`, keyed
-        by the call's `index` (id/name arrive once, arguments arrive in pieces)."""
-        for tcd in delta_tool_calls:
-            idx = getattr(tcd, "index", 0) or 0
-            f = frags.setdefault(idx, {"id": None, "name": "", "args": ""})
-            if getattr(tcd, "id", None):
-                f["id"] = tcd.id
-            fn = getattr(tcd, "function", None)
-            if fn is not None:
-                if getattr(fn, "name", None):
-                    f["name"] = fn.name
-                if getattr(fn, "arguments", None):
-                    f["args"] += fn.arguments
-        return frags
-
-    @staticmethod
-    def _assemble_streamed(content_parts, frags: dict):
-        """Build a message-like object (matching the non-streaming SDK shape:
-        `.content`, `.tool_calls[].{id, function.name, function.arguments}`) from
-        accumulated streamed fragments."""
-        from types import SimpleNamespace
-        content = "".join(content_parts)
-        tool_calls = [
-            SimpleNamespace(
-                id=f.get("id") or f"call_{i}",
-                type="function",
-                function=SimpleNamespace(name=f.get("name") or "",
-                                         arguments=f.get("args") or ""),
-            )
-            for i, f in sorted(frags.items())
-        ]
-        return SimpleNamespace(content=content, tool_calls=tool_calls or None)
 
     @staticmethod
     def _assistant_msg(message, tool_calls) -> dict:
@@ -1212,12 +1093,14 @@ class Agent:
     def _run_one_call(self, tc, idx: int) -> str:
         """Sequential path: execute one call behind a live REPL spinner, render
         its activity line, and return the result string."""
-        if self._is_terminal:
+        if self._is_terminal and tc.function.name not in self._interactive:
             args, _, preview = self._parse_call_args(tc)
             label = self._spinner_label(tc.function.name, args, preview)
             with self._console().status(label, spinner="dots"):
                 rec = self._execute_call(tc, idx)
         else:
+            # No live spinner: either a channel/supervisor session, or an
+            # interactive tool whose own prompt must own the terminal.
             rec = self._execute_call(tc, idx)
         self._render_tool(rec["idx"], rec["name"], rec["preview"],
                           rec["ok"], rec["elapsed"], rec["result"],
@@ -1365,9 +1248,8 @@ class Agent:
         self._console().print(body, end="")
 
     def _render_answer(self, text: str) -> None:
-        """Render the agent's answer under its name header, markdown if enabled.
-        No-op when the content was already streamed live this turn."""
-        if not self._is_terminal or self._live_rendered:
+        """Render the agent's answer under its name header, markdown if enabled."""
+        if not self._is_terminal:
             return
         from rich.text import Text
         con = self._console()

@@ -27,7 +27,14 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+import sys
+
 from aria.tools._env import build_env, is_tty_command
+
+# This tool may block on an interactive confirmation prompt (see _confirm). The
+# REPL reads this flag and runs shell_run without its live spinner — a redrawing
+# rich spinner would otherwise clobber the prompt line and mangle it.
+INTERACTIVE = True
 
 # Learnable approval store: command prefixes the user approved with "always" at
 # the interactive prompt. A risky command matching a stored prefix skips the
@@ -208,16 +215,39 @@ def _is_allowlisted(command: str) -> bool:
     return False
 
 
+def _tty_write(text: str) -> None:
+    """Write straight to the real terminal, bypassing any stdout redirection the
+    caller may have installed (e.g. a rich live spinner replaces sys.stdout with
+    a markup-parsing proxy that eats the '[y]'/'[a]' bracket tokens out of the
+    prompt). Falls back to builtin print if the original stream is unavailable."""
+    stream = sys.__stdout__ or sys.stdout
+    try:
+        stream.write(text)
+        stream.flush()
+    except Exception:
+        print(text, end="", flush=True)
+
+
+def _ask(prompt: str) -> str:
+    """Show `prompt` on the real terminal (unmangled) and read one line. The read
+    goes through builtin input(), so line-editing works and tests can patch it."""
+    _tty_write(prompt)
+    try:
+        return input("").strip().lower()
+    except EOFError:
+        return ""
+
+
 def _confirm(command: str, reason: str = "") -> bool:
     if not _is_interactive():
         return False
     why = f"  ⚠️  {reason}\n" if reason else ""
     prefix = _command_prefix(command)
-    print(f"\n⚠️  Shell command requested:\n{why}  $ {command}")
-    answer = input(f"  Run? [y]es / [N]o / [a]lways ('{prefix}') ").strip().lower()
+    _tty_write(f"\n⚠️  Shell command requested:\n{why}  $ {command}\n")
+    answer = _ask(f"  Run? [y]es / [N]o / [a]lways ('{prefix}') ")
     if answer in ("a", "always"):
         _persist_allow(prefix)
-        print(f"  ✓ Will not ask again for commands starting with '{prefix}'.")
+        _tty_write(f"  ✓ Will not ask again for commands starting with '{prefix}'.\n")
         return True
     return answer in ("y", "yes")
 

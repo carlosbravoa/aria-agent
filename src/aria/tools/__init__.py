@@ -35,6 +35,10 @@ def load_all(extra_dir: Path | None = None) -> list[dict[str, Any]]:
                 # Opt-in concurrency: a batch of calls is run in parallel only
                 # when every tool in it is marked safe. Default False.
                 "parallel_safe": bool(getattr(mod, "PARALLEL_SAFE", False)),
+                # Opt-in: tool may block on an interactive terminal prompt (e.g.
+                # shell_run's confirm). The REPL suppresses its live spinner for
+                # these, since a redrawing spinner clobbers the prompt line.
+                "interactive": bool(getattr(mod, "INTERACTIVE", False)),
             }
 
     # 2. User tools (loose .py files in extra_dir)
@@ -56,6 +60,7 @@ def load_all(extra_dir: Path | None = None) -> list[dict[str, Any]]:
                             "function": mod.DEFINITION,
                             "_module": mod,
                             "parallel_safe": bool(getattr(mod, "PARALLEL_SAFE", False)),
+                            "interactive": bool(getattr(mod, "INTERACTIVE", False)),
                         }
             except Exception as exc:
                 import logging

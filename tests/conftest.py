@@ -55,48 +55,6 @@ def tmp_workspace(minimal_env):
 
 
 @pytest.fixture
-def mock_client():
-    """Factory: mock_client(resp1, resp2, ...) returns a stand-in OpenAI client
-    whose streaming `chat.completions.create` yields each response in turn (as
-    chunked deltas). Assign it to `agent.client`. After the list is exhausted the
-    last response repeats (so loop-guard tests terminate)."""
-    import re
-
-    class _Delta:
-        def __init__(self, c): self.content = c
-
-    class _Choice:
-        def __init__(self, c): self.delta = _Delta(c)
-
-    class _Chunk:
-        def __init__(self, c): self.choices = [_Choice(c)]
-
-    class _Completions:
-        def __init__(self, resps): self._resps = list(resps); self._i = 0
-
-        def create(self, **kwargs):
-            if self._i < len(self._resps):
-                text = self._resps[self._i]
-            else:
-                text = self._resps[-1] if self._resps else ""
-            self._i += 1
-            # chunk per line (newline kept) to exercise the line-buffered parser
-            parts = re.findall(r"[^\n]*\n|[^\n]+", text) or [""]
-            return iter([_Chunk(p) for p in parts])
-
-    class _Chat:
-        def __init__(self, resps): self.completions = _Completions(resps)
-
-    class _Client:
-        def __init__(self, resps): self.chat = _Chat(resps)
-
-    def _make(*responses):
-        return _Client(responses)
-
-    return _make
-
-
-@pytest.fixture
 def native_client():
     """Factory for a NON-streaming mock OpenAI client matching the native
     tool-calling engine. Each argument is one model turn:
