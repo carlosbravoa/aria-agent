@@ -15,10 +15,51 @@ File format (task_<id>.task):
 from __future__ import annotations
 
 import json
+import logging
+import os
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo
+
+
+# ── Timezone handling ─────────────────────────────────────────────────────────
+# All new timestamps are stored as timezone-aware ISO strings so DST can't
+# shift recurring tasks. The zone is ARIA_TZ (IANA name, e.g. Europe/Madrid),
+# falling back to the system local timezone. Legacy naive timestamps in
+# existing task files are interpreted as local time on parse — never a crash.
+
+def _tz():
+    """Active timezone: ARIA_TZ if set and valid, else the system local zone."""
+    name = os.environ.get("ARIA_TZ", "").strip()
+    if name:
+        try:
+            return ZoneInfo(name)
+        except Exception:
+            logging.getLogger(__name__).warning(
+                "Invalid ARIA_TZ %r — falling back to system local timezone", name
+            )
+    return datetime.now().astimezone().tzinfo
+
+
+def _now_dt() -> datetime:
+    """Timezone-aware 'now' in the active timezone."""
+    return datetime.now(_tz())
+
+
+def _parse_dt(value: str) -> datetime:
+    """Parse an ISO timestamp; naive (legacy) values are treated as local time."""
+    dt = datetime.fromisoformat(value)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=_tz())
+    return dt
+
+
+def task_timeout() -> int:
+    """Per-task wall-clock ceiling AND running/ lease, in seconds
+    (ARIA_TASK_TIMEOUT, default 900). <=0 disables both."""
+    return int(os.environ.get("ARIA_TASK_TIMEOUT", "900"))
 
 
 # ── Task dataclass ────────────────────────────────────────────────────────────
@@ -35,6 +76,7 @@ class Task:
     source:      str        = "user"        # cron | agent | user | script
     task_id:     str        = field(default_factory=lambda: uuid.uuid4().hex[:8])
     recur:       str        = ""            # "", "daily", "weekly", "weekdays", or "<N>m" (every N minutes)
+    started_at:  str        = ""            # ISO datetime stamped by claim() (running/ lease start)
 
     # ── Serialisation ─────────────────────────────────────────────────────────
 
@@ -50,6 +92,7 @@ class Task:
             "source":      self.source,
             "id":          self.task_id,
             "recur":       self.recur,
+            "started_at":  self.started_at,
         }, indent=2, ensure_ascii=False)
 
     @staticmethod
@@ -69,6 +112,7 @@ class Task:
                 source      = d.get("source", "user"),
                 task_id     = d.get("id", uuid.uuid4().hex[:8]),
                 recur       = d.get("recur", ""),
+                started_at  = d.get("started_at", ""),
             )
         else:
             # Legacy key: value format
@@ -88,6 +132,7 @@ class Task:
                 source      = kv.get("source", "user"),
                 task_id     = kv.get("id", uuid.uuid4().hex[:8]),
                 recur       = kv.get("recur", ""),
+                started_at  = kv.get("started_at", ""),
             )
 
     def next_run_after(self) -> str:
@@ -104,11 +149,24 @@ class Task:
         if not self.recur:
             return ""
 
-        from datetime import timedelta
-        base = datetime.fromisoformat(self.run_after) if self.run_after else datetime.now()
-        # Strip timezone for consistent naive arithmetic
-        if hasattr(base, "tzinfo") and base.tzinfo is not None:
-            base = base.replace(tzinfo=None)
+        # Arithmetic is always done timezone-aware: adding a timedelta to an
+        # aware ZoneInfo datetime is wall-clock arithmetic (the UTC offset is
+        # re-derived), so "daily at 08:00" stays 08:00 across a DST change.
+        # Legacy naive bases are localized for the maths but keep a naive
+        # output so old task files stay format-stable.
+        naive_base = False
+        base = None
+        if self.run_after:
+            try:
+                base = datetime.fromisoformat(self.run_after)
+            except ValueError:
+                base = None
+            else:
+                if base.tzinfo is None:
+                    naive_base = True
+                    base = base.replace(tzinfo=_tz())
+        if base is None:
+            base = _now_dt()
 
         recur = self.recur.strip().lower()
 
@@ -128,7 +186,7 @@ class Task:
         # next time that is ALSO in the past, re-firing repeatedly to "catch up"
         # — a burst of runs + duplicate notifications. The task still runs once
         # on resume (it was due); this only schedules the NEXT occurrence ahead.
-        now = datetime.now()
+        now = _now_dt()
         nxt = base + step
         while nxt <= now:
             nxt += step
@@ -136,20 +194,18 @@ class Task:
             while nxt.weekday() >= 5:  # land on a weekday (skip Sat=5, Sun=6)
                 nxt += timedelta(days=1)
 
-        return nxt.strftime("%Y-%m-%dT%H:%M:%S")
+        if naive_base:
+            return nxt.replace(tzinfo=None).isoformat(timespec="seconds")
+        return nxt.isoformat(timespec="seconds")
 
     def is_due(self) -> bool:
         """Return True if the task is ready to run right now."""
         if not self.run_after:
             return True
         try:
-            run_at = datetime.fromisoformat(self.run_after)
-            # If run_after has timezone info, compare against aware now.
-            # If naive, compare against naive now. Never mix the two.
-            if run_at.tzinfo is not None:
-                from datetime import timezone
-                return datetime.now(timezone.utc) >= run_at
-            return datetime.now() >= run_at
+            # Aware vs aware, always: legacy naive values are localized by
+            # _parse_dt, so the comparison never mixes naive and aware.
+            return _now_dt() >= _parse_dt(self.run_after)
         except ValueError:
             return True  # malformed date → run immediately
 
@@ -201,9 +257,59 @@ def claim(path: Path, task: Task) -> Path | None:
     dest = _queue_dir("running") / path.name
     try:
         path.rename(dest)
-        return dest
     except FileNotFoundError:
         return None  # already claimed by another process
+    # Stamp the lease start so the reaper can detect an orphaned task after a
+    # crash. Best-effort: if the rewrite fails, the file mtime (set by the
+    # rename) still serves as the reaper's fallback.
+    task.started_at = _now()
+    try:
+        dest.write_text(task.to_text(), encoding="utf-8")
+    except OSError:
+        pass
+    return dest
+
+
+def reap_running() -> list[str]:
+    """
+    Crash recovery: scan running/ for tasks whose lease has expired — a crash
+    mid-execution orphans the file there forever otherwise. Any task older than
+    ARIA_TASK_TIMEOUT is handed to fail(): retries left → requeued to pending/
+    with backoff; exhausted → moved to failed/ with a note. The lease start is
+    the started_at stamp written by claim(); files without one (pre-2.5) fall
+    back to the file mtime. Returns human-readable notes for logging.
+    """
+    timeout = task_timeout()
+    if timeout <= 0:
+        return []
+    notes: list[str] = []
+    now = _now_dt()
+    for p in sorted(_queue_dir("running").glob("*.task")):
+        try:
+            task = Task.from_text(p.read_text(encoding="utf-8"))
+        except Exception as exc:
+            logging.getLogger(__name__).warning(
+                "Reaper: skipping malformed running task %s: %s", p.name, exc
+            )
+            continue
+        started = None
+        if task.started_at:
+            try:
+                started = _parse_dt(task.started_at)
+            except ValueError:
+                pass
+        if started is None:
+            try:
+                started = datetime.fromtimestamp(p.stat().st_mtime, tz=_tz())
+            except OSError:
+                continue  # vanished mid-scan — finished by its owner
+        age = int((now - started).total_seconds())
+        if age < timeout:
+            continue
+        fail(p, task, f"reaped: stale in running/ for {age}s (lease {timeout}s)")
+        outcome = "requeued" if task.retries <= task.max_retries else "moved to failed/"
+        notes.append(f"task {task.task_id} stale in running/ for {age}s → {outcome}")
+    return notes
 
 
 def complete(path: Path, task: Task, result: str) -> None:
@@ -235,9 +341,21 @@ def complete(path: Path, task: Task, result: str) -> None:
 
 
 def fail(path: Path, task: Task, error: str) -> None:
-    """Either requeue with incremented retry count, or move to failed/."""
+    """
+    Either requeue with incremented retry count, or move to failed/.
+
+    Requeues get exponential backoff: run_after = now + base * 2^(attempt-1)
+    seconds (base ARIA_TASK_RETRY_BASE, default 60; capped at
+    ARIA_TASK_RETRY_MAX, default 3600). Without it a deterministic failure
+    burns every retry back-to-back within one supervisor tick.
+    """
     task.retries += 1
+    task.started_at = ""                    # lease is over either way
     if task.retries <= task.max_retries:
+        base = int(os.environ.get("ARIA_TASK_RETRY_BASE", "60"))
+        cap  = int(os.environ.get("ARIA_TASK_RETRY_MAX",  "3600"))
+        delay = min(base * (2 ** (task.retries - 1)), cap)
+        task.run_after = (_now_dt() + timedelta(seconds=delay)).isoformat(timespec="seconds")
         path.unlink(missing_ok=True)
         enqueue(task)
     else:
@@ -252,4 +370,4 @@ def fail(path: Path, task: Task, error: str) -> None:
 
 
 def _now() -> str:
-    return datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+    return _now_dt().isoformat(timespec="seconds")

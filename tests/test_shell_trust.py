@@ -70,3 +70,39 @@ def test_sandbox_wraps_command(monkeypatch):
     assert sr._sandbox_prefix() == ["env"]
     out = sr._run_shell("echo sandboxed-ok", None, None, 10)
     assert "sandboxed-ok" in out
+
+
+# ── interactivity is gated on channel context, not just a TTY ────────────────
+
+def test_interactive_requires_tty_and_no_channel(monkeypatch):
+    from aria import context
+    monkeypatch.setattr(sr.os, "isatty", lambda fd: True)
+    assert sr._is_interactive() is True          # TTY + no channel → interactive
+    token = context.set_active("telegram", "123456789")
+    try:
+        # a remote channel turn must NOT be interactive even with a TTY —
+        # otherwise a bot launched from a terminal blocks on input() for
+        # a remote user
+        assert sr._is_interactive() is False
+    finally:
+        context.reset(token)
+    assert sr._is_interactive() is True          # context cleared → back to REPL
+
+
+def test_not_interactive_without_tty(monkeypatch):
+    monkeypatch.setattr(sr.os, "isatty", lambda fd: False)
+    assert sr._is_interactive() is False
+
+
+def test_channel_turn_takes_unattended_policy_despite_tty(minimal_env, monkeypatch):
+    from aria import context
+    monkeypatch.setattr(sr.os, "isatty", lambda fd: True)
+    monkeypatch.setenv("ARIA_SHELL_UNATTENDED", "safe")
+    monkeypatch.setattr("builtins.input", lambda *a: (_ for _ in ()).throw(
+        AssertionError("channel turn must never prompt on the terminal")))
+    token = context.set_active("telegram", "123456789")
+    try:
+        out = sr.execute({"command": "rm -rf /tmp/x"})
+    finally:
+        context.reset(token)
+    assert "Refused" in out and "destructive" in out

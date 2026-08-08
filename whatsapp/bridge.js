@@ -4,6 +4,14 @@
  * Connects to WhatsApp via whatsapp-web.js and forwards messages to the
  * Aria Python bridge (aria-whatsapp), then sends the reply back.
  *
+ * It ALSO runs a small local push listener so Python can PUSH a message to
+ * WhatsApp out-of-band (the `notify` tool on a WhatsApp turn, scheduled tasks):
+ *   POST http://127.0.0.1:ARIA_WA_PUSH_PORT/send
+ *     header X-Aria-Secret: <ARIA_WA_SECRET>
+ *     body   {"to": "1234567890", "text": "..."}
+ *   → {"ok": true}  |  {"error": "..."}
+ * The listener binds to 127.0.0.1 only and fails closed when no secret is set.
+ *
  * Setup:
  *   mkdir -p ~/.aria/whatsapp && cd ~/.aria/whatsapp
  *   npm init -y
@@ -11,7 +19,8 @@
  *   node bridge.js
  *
  * Config (read from ~/.aria/.env via process.env or direct assignment):
- *   ARIA_WA_PORT=7532
+ *   ARIA_WA_PORT=7532          (Python bridge this client POSTs inbound to)
+ *   ARIA_WA_PUSH_PORT=7533     (local push listener Python POSTs outbound to)
  *   ARIA_WA_SECRET=<same secret as in ~/.aria/.env>
  *   WHATSAPP_ALLOWED=1234567890,0987654321   (international format, no +)
  */
@@ -42,7 +51,8 @@ function loadEnv() {
 
 loadEnv();
 
-const PORT    = parseInt(process.env.ARIA_WA_PORT   || "7532");
+const PORT      = parseInt(process.env.ARIA_WA_PORT      || "7532");
+const PUSH_PORT = parseInt(process.env.ARIA_WA_PUSH_PORT || "7533");
 const SECRET  = process.env.ARIA_WA_SECRET           || "";
 const ALLOWED = (process.env.WHATSAPP_ALLOWED || "")
   .split(",")
@@ -66,8 +76,9 @@ client.on("qr", (qr) => {
   qrcode.generate(qr, { small: true });
 });
 
+let clientReady = false;
 client.on("authenticated", () => console.log("WhatsApp authenticated."));
-client.on("ready",         () => console.log("WhatsApp client ready."));
+client.on("ready",         () => { clientReady = true; console.log("WhatsApp client ready."); });
 
 client.on("disconnected", (reason) => {
   console.error("WhatsApp disconnected:", reason);
@@ -145,7 +156,77 @@ function callBridge(from, text) {
   });
 }
 
+// ── Push listener (Python → WhatsApp) ───────────────────────────────────────────
+//
+// A tiny stdlib HTTP server so the Python side can push a message out-of-band.
+// Bound to 127.0.0.1 only; fails closed when ARIA_WA_SECRET is unset.
+
+function startPushServer() {
+  const server = http.createServer((req, res) => {
+    const reply = (code, obj) => {
+      const out = JSON.stringify(obj);
+      res.writeHead(code, {
+        "Content-Type": "application/json",
+        "Content-Length": Buffer.byteLength(out),
+      });
+      res.end(out);
+    };
+
+    if (req.method !== "POST" || req.url !== "/send") {
+      reply(404, { error: "not found" });
+      return;
+    }
+
+    // Auth via shared secret — FAIL CLOSED, mirroring the Python side.
+    if (!SECRET) {
+      reply(403, { error: "bridge not configured: set ARIA_WA_SECRET" });
+      return;
+    }
+    if (req.headers["x-aria-secret"] !== SECRET) {
+      reply(403, { error: "forbidden" });
+      return;
+    }
+
+    let data = "";
+    req.on("data", (chunk) => (data += chunk));
+    req.on("end", async () => {
+      let payload;
+      try {
+        payload = JSON.parse(data);
+      } catch {
+        reply(400, { error: "invalid JSON" });
+        return;
+      }
+
+      const to   = (payload.to   || "").toString().trim();
+      const text = (payload.text || "").toString();
+      if (!to || !text.trim()) {
+        reply(400, { error: "missing 'to' or 'text'" });
+        return;
+      }
+
+      if (!clientReady) {
+        reply(503, { error: "WhatsApp client not ready" });
+        return;
+      }
+
+      try {
+        await client.sendMessage(`${to}@c.us`, text);
+        reply(200, { ok: true });
+      } catch (err) {
+        console.error("Push send error:", err.message);
+        reply(500, { error: err.message });
+      }
+    });
+  });
+
+  server.listen(PUSH_PORT, "127.0.0.1", () => {
+    console.log(`Push listener on http://127.0.0.1:${PUSH_PORT}/send`);
+  });
+}
+
 // ── Start ─────────────────────────────────────────────────────────────────────
 
 console.log(`Connecting to Aria bridge at http://127.0.0.1:${PORT}`);
+startPushServer();
 client.initialize();

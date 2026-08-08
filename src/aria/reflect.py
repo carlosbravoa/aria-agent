@@ -30,12 +30,19 @@ _BATCH_SIZE        = int(os.environ.get("ARIA_REFLECT_BATCH",         "10"))
 _SESSION_CHARS     = int(os.environ.get("ARIA_REFLECT_SESSION_CHARS",  "3000"))
 _MAX_PATTERN_LINES = int(os.environ.get("ARIA_REFLECT_MAX_LINES",      "40"))
 _MAX_OPS_LINES     = int(os.environ.get("ARIA_OPSMEM_MAX_LINES",       "40"))
+_MAX_CORE_LINES    = int(os.environ.get("ARIA_CORE_MAX_LINES",         "80"))
 
 
 def _read_session(path: Path) -> str:
     text = path.read_text(encoding="utf-8", errors="replace")
     if len(text) > _SESSION_CHARS:
-        text = text[:_SESSION_CHARS] + "\n… [truncated]"
+        # Keep BOTH ends: the opening (what the session was about) and the close
+        # (where corrections, outcomes, and "that was wrong, do X" live). Keeping
+        # only the head — the old behaviour — meant reflection never saw the
+        # conclusions of any long session.
+        head = _SESSION_CHARS * 2 // 3
+        tail = _SESSION_CHARS - head
+        text = text[:head] + "\n… [middle truncated] …\n" + text[-tail:]
     return text
 
 
@@ -125,6 +132,33 @@ def _ops_consolidation_prompt(current_ops: str, new_observations: str) -> str:
     )
 
 
+def _core_consolidation_prompt(current_core: str) -> str:
+    """
+    Prompt for Phase 4: consolidate core.md (permanent user facts). core.md has
+    no line cap by design (facts are permanent, so we can't blind-drop the
+    oldest) — but repeated/near-duplicate remember() calls make it the biggest
+    long-run context-cost growth. This is CONSERVATIVE: dedup and fix
+    contradictions only; never prune a genuine, still-true fact.
+    """
+    return (
+        "You are cleaning up an AI assistant's core memory — a list of PERMANENT "
+        "facts about one user (name, role, timezone, language, preferences, "
+        "recurring contacts).\n\n"
+        "## Current core memory\n"
+        f"{current_core}\n\n"
+        "## Task\n"
+        "Return a cleaned fact list following these rules:\n"
+        "1. Merge exact and near-duplicate facts into one.\n"
+        "2. If two facts about the same attribute contradict (e.g. two different "
+        "timezones), keep only the most recent/most specific one.\n"
+        "3. Do NOT invent, infer, or drop any genuine distinct fact — this is a "
+        "conservative dedup, not a summary. When unsure, keep the fact.\n"
+        f"4. Soft cap: aim for at most {_MAX_CORE_LINES} bullet points.\n\n"
+        "Output only the bullet list — one fact per line, starting with '- '. "
+        "No headings, no preamble, no explanation."
+    )
+
+
 def run(notify: bool = False, *, base_url: str | None = None,
         api_key: str | None = None, model: str | None = None) -> str:
     """Run the reflection pass. Returns a status string.
@@ -185,7 +219,7 @@ def _release_reflect_lock(lock) -> None:
 
 def _run_locked(ws, notify: bool, *, base_url: str | None = None,
                 api_key: str | None = None, model: str | None = None) -> str:
-    from openai import OpenAI
+    from aria.agent import _make_client
 
     unanalysed = ws.unanalysed_sessions()
     if not unanalysed:
@@ -195,9 +229,9 @@ def _run_locked(ws, notify: bool, *, base_url: str | None = None,
 
     log.info("Reflection: %d new sessions, batches of %d", len(unanalysed), _BATCH_SIZE)
 
-    client = OpenAI(
-        base_url=base_url or os.environ["LLM_BASE_URL"],
-        api_key=api_key or os.environ.get("LLM_API_KEY", "local"),
+    client = _make_client(
+        base_url or os.environ["LLM_BASE_URL"],
+        api_key or os.environ.get("LLM_API_KEY", "local"),
     )
     model = model or os.environ.get("LLM_MODEL", "llama3.2")
 
@@ -282,9 +316,36 @@ def _run_locked(ws, notify: bool, *, base_url: str | None = None,
     else:
         log.info("No operational memory to consolidate.")
 
+    # ── Phase 4: consolidate core memory (conservative dedup) ─────────────────
+    core_status = ""
+    current_core = ws.load_core_memory()
+    if current_core and not ws.core_is_empty():
+        log.info("Consolidating core memory...")
+        try:
+            resp = client.chat.completions.create(
+                model=model,
+                messages=[{
+                    "role": "user",
+                    "content": _core_consolidation_prompt(current_core),
+                }],
+                stream=False,
+            )
+            consolidated_core = resp.choices[0].message.content.strip()
+            # Guard: only overwrite if we got a non-empty result back, so a
+            # transient error or an empty completion never wipes permanent facts.
+            if consolidated_core:
+                ws.save_core_memory(consolidated_core)
+                core_lines = len([l for l in consolidated_core.splitlines() if l.strip()])
+                core_status = f", core memory consolidated to {core_lines} facts"
+                log.info("Core memory consolidated to %d facts.", core_lines)
+        except Exception as exc:
+            log.warning("Core memory consolidation failed: %s", exc)
+    else:
+        log.info("No core memory to consolidate.")
+
     msg = (
         f"Reflection complete: {total_analysed} sessions analysed, "
-        f"patterns consolidated to {line_count} lines{ops_status}."
+        f"patterns consolidated to {line_count} lines{ops_status}{core_status}."
     )
     log.info(msg)
 

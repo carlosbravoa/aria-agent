@@ -18,6 +18,10 @@ from pathlib import Path
 _WINDOW_MESSAGES  = int(os.environ.get("ARIA_WINDOW_MESSAGES",  "15"))
 _WINDOW_MSG_CHARS = int(os.environ.get("ARIA_WINDOW_MSG_CHARS", "300"))
 
+# Placeholder lines that are structurally present but are NOT real facts, so
+# list/forget/search must skip them (matches core_is_empty's own carve-out).
+_MEMORY_PLACEHOLDERS = {"_nothing stored yet._"}
+
 # ── Secret redaction ──────────────────────────────────────────────────────────
 _SECRET_RE = re.compile(
     r"""(?ix)
@@ -45,8 +49,13 @@ def _redact(text: str) -> str:
 
 
 def _secure_write(path: Path, content: str) -> None:
-    path.write_text(content, encoding="utf-8")
-    path.chmod(0o600)
+    """Atomically write a 0600 file: write a sibling temp, chmod, then os.replace.
+    A crash mid-write can no longer truncate the destination (e.g. leaving an
+    oversized/half-written conversation window that reloads as corrupt context)."""
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(content, encoding="utf-8")
+    tmp.chmod(0o600)
+    os.replace(tmp, path)   # atomic on the same filesystem (sibling temp guarantees it)
 
 
 # ── Conversation window helpers ───────────────────────────────────────────────
@@ -179,10 +188,112 @@ class Workspace:
 
     def append_memory(self, note: str, filename: str = "core.md") -> None:
         path = self.root / "memory" / filename
+        clean = note.strip()
+        # Write-time dedup: core.md has no line cap (facts are permanent, so we
+        # can't blind-drop the oldest), which made repeated identical facts the
+        # single biggest long-run context-cost growth. Skip an exact duplicate;
+        # reflection does the smarter semantic consolidation later.
+        if path.exists():
+            existing = {l.strip() for l in path.read_text(encoding="utf-8").splitlines()}
+            if clean in existing:
+                return
         ts = datetime.now().strftime("%Y-%m-%d %H:%M")
         with path.open("a", encoding="utf-8") as f:
-            f.write(f"\n<!-- {ts} -->\n{note.strip()}\n")
+            f.write(f"\n<!-- {ts} -->\n{clean}\n")
         path.chmod(0o600)
+
+    # ── Memory management (list / forget / search / consolidate) ───────────────
+
+    def _memory_path(self, filename: str) -> Path:
+        return self.root / "memory" / filename
+
+    @staticmethod
+    def _is_fact_line(line: str) -> bool:
+        s = line.strip()
+        if not s or s.startswith("#") or s.startswith("<!--"):
+            return False
+        return s.lower() not in _MEMORY_PLACEHOLDERS
+
+    def list_memory_facts(self, filename: str = "core.md") -> list[str]:
+        """Return the stored fact/entry lines of a memory file (no header, no
+        <!-- timestamp --> comments, no blanks)."""
+        path = self._memory_path(filename)
+        if not path.exists():
+            return []
+        return [l.strip() for l in path.read_text(encoding="utf-8").splitlines()
+                if self._is_fact_line(l)]
+
+    def forget_memory(self, query: str, filename: str = "core.md") -> int:
+        """Remove every entry whose text contains `query` (case-insensitive),
+        along with its preceding <!-- timestamp --> comment. Rewrites the file
+        atomically. Returns the number of entries removed."""
+        q = (query or "").strip().lower()
+        path = self._memory_path(filename)
+        if not q or not path.exists():
+            return 0
+        kept: list[str] = []
+        pending_comment: str | None = None
+        removed = 0
+        for line in path.read_text(encoding="utf-8").splitlines():
+            s = line.strip()
+            if s.startswith("<!--"):
+                pending_comment = line          # hold until we know its fact's fate
+                continue
+            if self._is_fact_line(line) and q in s.lower():
+                removed += 1
+                pending_comment = None          # drop the orphaned comment too
+                continue
+            if pending_comment is not None:
+                kept.append(pending_comment)
+                pending_comment = None
+            kept.append(line)
+        if pending_comment is not None:
+            kept.append(pending_comment)
+        if removed:
+            _secure_write(path, "\n".join(kept).rstrip() + "\n")
+        return removed
+
+    def search_memory(self, query: str, max_results: int = 20) -> list[tuple[str, str]]:
+        """Substring search (case-insensitive) across all memory stores. Returns
+        (source, line) pairs so the agent can recall a fact without the whole
+        memory being injected every turn."""
+        q = (query or "").strip().lower()
+        if not q:
+            return []
+        results: list[tuple[str, str]] = []
+        for fn in ("core.md", "operational_memory.md", "patterns.md", "notify_feed.md"):
+            path = self._memory_path(fn)
+            if not path.exists():
+                continue
+            for line in path.read_text(encoding="utf-8").splitlines():
+                if self._is_fact_line(line) and q in line.lower():
+                    results.append((fn, line.strip()))
+                    if len(results) >= max_results:
+                        return results
+        notes_dir = self.root / "memory" / "project_notes"
+        if notes_dir.exists():
+            for path in sorted(notes_dir.glob("*.md")):
+                for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+                    if self._is_fact_line(line) and q in line.lower():
+                        results.append((f"project_notes/{path.name}", line.strip()))
+                        if len(results) >= max_results:
+                            return results
+        return results
+
+    def save_core_memory(self, text: str) -> None:
+        """Rewrite core.md with a consolidated fact list (used by reflection)."""
+        _secure_write(self._memory_path("core.md"),
+                      "# Core Memory\n\n" + text.strip() + "\n")
+
+    def load_core_memory(self) -> str | None:
+        """Core memory contents with the header stripped, or None if empty."""
+        path = self._memory_path("core.md")
+        if not path.exists():
+            return None
+        lines = [l for l in path.read_text(encoding="utf-8").splitlines()
+                 if not l.strip().startswith("#")]
+        content = "\n".join(lines).strip()
+        return content if content else None
 
     def append_operational_memory(self, note: str) -> None:
         """Append an operational/procedural note to operational_memory.md.

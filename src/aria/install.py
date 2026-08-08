@@ -195,12 +195,28 @@ def configure_env(dry_run: bool = False) -> tuple[dict[str, str], set[str]]:
         info("Needs Node.js and ~/.aria/whatsapp/bridge.js — see README")
         values["ARIA_WA_PORT"]     = _ask("ARIA_WA_PORT",     e("ARIA_WA_PORT")     or "7532",
                                            hint="Port for Python↔Node.js bridge")
+        values["ARIA_WA_PUSH_PORT"] = _ask("ARIA_WA_PUSH_PORT", e("ARIA_WA_PUSH_PORT") or "7533",
+                                           hint="Port the Node bridge listens on for outbound push")
         values["ARIA_WA_SECRET"]   = _ask("ARIA_WA_SECRET",   e("ARIA_WA_SECRET"),  secret=True,
                                            hint="Shared secret between Python and Node.js bridges")
         values["WHATSAPP_ALLOWED"] = _ask("WHATSAPP_ALLOWED", e("WHATSAPP_ALLOWED"),
                                            hint="Your number in international format, no + (e.g. 34612345678)")
+        # Deploy/refresh the Node bridge files (bridge.js + package.json) into
+        # ~/.aria/whatsapp/ so a reinstall always ships the current bridge —
+        # node_modules/ and the WhatsApp login state are left untouched.
+        from aria import whatsapp_deploy
+        res = whatsapp_deploy.deploy()
+        if res["error"]:
+            warn(res["error"])
+        elif res["copied"]:
+            ok(f"Deployed bridge files: {', '.join(res['copied'])} → {res['dest']}")
+        else:
+            ok("WhatsApp bridge files already up to date.")
+        if res["source"] and (res["package_changed"]
+                              or not (res["dest"] / "node_modules").exists()):
+            info(f"Run: cd {res['dest']} && npm install")
     else:
-        for k in ("ARIA_WA_PORT", "ARIA_WA_SECRET", "WHATSAPP_ALLOWED"):
+        for k in ("ARIA_WA_PORT", "ARIA_WA_PUSH_PORT", "ARIA_WA_SECRET", "WHATSAPP_ALLOWED"):
             values[k] = e(k)
 
     # ── Gmail / Calendar ──────────────────────────────────────────────────────
@@ -410,6 +426,13 @@ def install_services(features: set[str] | None = None, dry_run: bool = False) ->
     # WhatsApp Node.js bridge
     if "aria-whatsapp" in services:
         node      = _node_bin()
+        # Ensure the bridge files are present/current before wiring the service
+        # (a services-only rerun may skip the WhatsApp config step above).
+        try:
+            from aria import whatsapp_deploy
+            whatsapp_deploy.deploy()
+        except Exception as exc:
+            warn(f"WhatsApp bridge deploy skipped: {exc}")
         wa_bridge = Path.home() / ".aria" / "whatsapp" / "bridge.js"
         if node and wa_bridge.exists():
             ok(f"node: {node}")

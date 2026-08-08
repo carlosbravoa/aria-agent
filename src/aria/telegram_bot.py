@@ -197,19 +197,26 @@ class _Progress:
         except Exception:
             pass
 
-    async def _send_response(self, text: str) -> None:
+    async def _send_response(self, text: str) -> bool:
+        """Send the response (chunked). Returns True if at least one chunk was
+        delivered, so the caller only counts a response as sent when it really
+        went out."""
         from aria.telegram_notify import _md_to_html
+        delivered = False
         for chunk in _split(text):
             if not chunk.strip():
                 continue
             try:
                 await self.bot.send_message(
                     self.chat_id, _md_to_html(chunk), parse_mode="HTML")
+                delivered = True
             except Exception:
                 try:
                     await self.bot.send_message(self.chat_id, chunk)
+                    delivered = True
                 except Exception as exc:
                     log.error("stream send failed: %s", exc)
+        return delivered
 
     # ---- worker-thread side (agent callbacks) -------------------------------
     def activity(self, detail: str) -> None:
@@ -222,12 +229,17 @@ class _Progress:
             pass
 
     def response(self, text: str) -> None:
-        self.sent += 1
+        # Only count the response as sent if it actually went out. Incrementing
+        # before the attempt meant a failed send both lost the message AND made
+        # `progress.sent > 0` suppress the fallback in _run_turn — a silent total
+        # loss. Now a failed stream leaves sent==0 so the fallback re-sends it.
         try:
-            asyncio.run_coroutine_threadsafe(
+            delivered = asyncio.run_coroutine_threadsafe(
                 self._send_response(text), self.loop).result(timeout=120)
         except Exception:
-            pass
+            delivered = False
+        if delivered:
+            self.sent += 1
 
     # ---- lifecycle ----------------------------------------------------------
     def start(self) -> None:

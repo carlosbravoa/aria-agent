@@ -13,8 +13,13 @@ Architecture:
 Setup:
   1. Add to ~/.aria/.env:
        ARIA_WA_PORT=7532           # port for this bridge (default 7532)
+       ARIA_WA_PUSH_PORT=7533      # Node push listener for outbound (default 7533)
        ARIA_WA_SECRET=<token>      # shared secret for Node↔Python auth
        WHATSAPP_ALLOWED=<phone1,phone2>  # allowed sender numbers (international format)
+
+Outbound push: the Node bridge runs a local push listener on ARIA_WA_PUSH_PORT;
+aria.whatsapp_notify.send POSTs to it so the agent can push messages to
+WhatsApp (the `notify` tool, scheduled tasks).
 
   2. Start the bridge:
        aria-whatsapp
@@ -49,6 +54,15 @@ def _allowed() -> set[str]:
 
 def _secret() -> str:
     return os.environ.get("ARIA_WA_SECRET", "")
+
+
+def _strip_agent_prefix(reply: str) -> str:
+    """Strip a leading agent-name prefix ("Aria: ") only — never a colon that
+    legitimately appears in the reply (e.g. "Status: done")."""
+    prefix = f"{os.environ.get('AGENT_NAME', 'Aria')}: "
+    if reply.startswith(prefix):
+        return reply[len(prefix):].strip()
+    return reply
 
 
 class _Handler(http.server.BaseHTTPRequestHandler):
@@ -136,10 +150,9 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         responses = handle(CHANNEL, sender, text)
         reply = "\n\n".join(r for r in responses if r.strip())
 
-        # Strip "Aria: " prefix
-        if ":" in reply:
-            _, _, after = reply.partition(":")
-            reply = after.strip()
+        # Strip a leading agent-name prefix ("Aria: ") only — never a colon
+        # that legitimately appears in the reply (e.g. "Status: done").
+        reply = _strip_agent_prefix(reply)
 
         self._respond({"reply": reply})
 

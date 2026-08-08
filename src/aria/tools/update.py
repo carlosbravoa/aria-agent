@@ -232,6 +232,25 @@ def execute(args: dict) -> str:
         ])
     lines.append("  ✅ Imports clean.")
 
+    # ── 5b. Refresh the Node WhatsApp bridge if it's deployed ────────────────
+    # The bridge (bridge.js) lives outside the pip package, so pip install won't
+    # update it. If WhatsApp is set up, copy the just-reset version across so the
+    # Node side tracks the Python side; the aria-whatsapp-node restart below then
+    # picks it up. node_modules/ and the login state are never touched.
+    try:
+        from aria import whatsapp_deploy
+        if (whatsapp_deploy.dest_dir() / "bridge.js").exists():
+            res = whatsapp_deploy.deploy()
+            if res.get("copied"):
+                lines.append(f"📲 Refreshed WhatsApp bridge: {', '.join(res['copied'])}")
+                if res.get("package_changed"):
+                    lines.append("   ⚠ package.json changed — run `npm install` in "
+                                 "~/.aria/whatsapp (deps may be out of date).")
+            elif res.get("error"):
+                lines.append(f"📲 WhatsApp bridge NOT refreshed: {res['error']}")
+    except Exception as exc:
+        lines.append(f"📲 WhatsApp bridge refresh skipped: {exc}")
+
     # ── 6. Restart only on green ─────────────────────────────────────────────
     if restart:
         active = _active_services()

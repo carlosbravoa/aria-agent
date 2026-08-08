@@ -134,6 +134,40 @@ AGENT_NAME=Aria
 # ARIA_REFLECT_EVERY=86400
 # Send Telegram notification after each reflection run
 # ARIA_REFLECT_NOTIFY=true
+# Wall-clock ceiling per task; also the running/ reaper lease (0 = disabled)
+# ARIA_TASK_TIMEOUT=900
+# Retry backoff for failed tasks: delay = base * 2^(attempt-1), capped at max
+# ARIA_TASK_RETRY_BASE=60
+# ARIA_TASK_RETRY_MAX=3600
+# Timezone for scheduling/recurrence (IANA name; default = system local)
+# ARIA_TZ=Europe/Madrid
+
+# ── LLM resilience & context (new in 2.5) ────────────────────────────
+# Automatic retry with backoff + request timeout on every model call
+# ARIA_LLM_RETRIES=4
+# ARIA_LLM_TIMEOUT=120           # overall seconds
+# ARIA_LLM_CONNECT_TIMEOUT=10    # connect seconds
+# Token-aware context management (heuristic ~4 chars/token):
+#   hard cap — trim oldest turns to fit; 0 disables
+# ARIA_CONTEXT_TOKENS=32000
+#   soft trigger — auto-summarize older turns above this; 0 disables
+# ARIA_COMPACT_AT=24000
+# ARIA_COMPACT_CHUNK_CHARS=12000
+# Does your LLM endpoint accept the `system` role? (yes = default). Set to no for
+# the few endpoints without a system role — the prompt is then sent as a leading
+# user turn. When yes, the per-turn timestamp rides in a trailing system message
+# so the prompt + history stay a cacheable prefix.
+# LLM_SYSTEM_MESSAGES=yes
+# Persist per-call token usage to ~/.aria/usage.jsonl (see `aria --usage`)
+# ARIA_USAGE_LOG=on
+# Soft cap on core-memory facts kept after reflection consolidation
+# ARIA_CORE_MAX_LINES=80
+# Extra leading commands allowed for shell_run in non-interactive 'safe' mode
+# ARIA_SHELL_SAFE_EXTRA=make,pytest
+
+# ── WhatsApp outbound push (new in 2.5) ──────────────────────────────
+# Port the Node bridge listens on for Python→WhatsApp pushes (notify tool)
+# ARIA_WA_PUSH_PORT=7533
 """
 
 _BANNER = """

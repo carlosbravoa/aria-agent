@@ -475,24 +475,34 @@ usual "may I access this?" approval flow first.
 
 Requires Node.js 18+.
 
-```bash
-# 1. Copy the Node.js bridge
-mkdir -p ~/.aria/whatsapp
-cp whatsapp/bridge.js whatsapp/package.json ~/.aria/whatsapp/
-cd ~/.aria/whatsapp && npm install
+`aria-install` (answer yes to WhatsApp) now **copies `bridge.js` + `package.json`
+into `~/.aria/whatsapp/` for you** and refreshes them on every reinstall; the
+self-update tool refreshes them too, so the Node side always tracks the Python
+side. It only touches those two files — your `node_modules/` and login state
+(`.wwebjs_auth/`) are left alone. You still run `npm install` once (and again
+if `package.json` changed — the installer/updater tells you when).
 
-# 2. Run aria-install and answer yes to WhatsApp, or add to ~/.aria/.env:
-# ARIA_WA_PORT=7532
+```bash
+# 1. Configure — run aria-install and answer yes to WhatsApp, or add to ~/.aria/.env:
+# ARIA_WA_PORT=7532          # Python↔Node inbound bridge
+# ARIA_WA_PUSH_PORT=7533     # Node listener for outbound push (notify tool)
 # ARIA_WA_SECRET=your-secret
 # WHATSAPP_ALLOWED=34612345678
+
+# 2. Install Node deps (bridge.js/package.json are already deployed by aria-install)
+cd ~/.aria/whatsapp && npm install
 
 # 3. Start both processes
 nohup aria-whatsapp >> ~/.aria/whatsapp.log 2>&1 &
 nohup node ~/.aria/whatsapp/bridge.js >> ~/.aria/whatsapp-node.log 2>&1 &
 ```
 
+Manual deploy (only if you're not using `aria-install`):
+`mkdir -p ~/.aria/whatsapp && cp whatsapp/bridge.js whatsapp/package.json ~/.aria/whatsapp/`
+
 On first run `bridge.js` shows a QR code — scan with WhatsApp once.
-Auth persists in `~/.aria/whatsapp/.wwebjs_auth/`.
+Auth persists in `~/.aria/whatsapp/.wwebjs_auth/`. Outbound push (the `notify`
+tool replying on WhatsApp) uses `ARIA_WA_PUSH_PORT`.
 
 ---
 
@@ -686,7 +696,10 @@ at startup — no registration needed.
 | `web_fetch`   | Fetch readable text from a web page using trafilatura for clean content extraction. |
 | `gmail`       | Search, read, send, mark-read via `gog` CLI.                              |
 | `calendar`    | List, create, update, delete, RSVP Google Calendar events via `gog`.      |
-| `notify`      | Push a message to the user via Telegram.                                  |
+| `notify`      | Push a message to the user on the channel of the current turn (Telegram or WhatsApp); broadcasts via Telegram outside a channel. |
+| `remember`    | Save / `list` / `forget` permanent user facts in core memory. |
+| `learn`       | Save / `list` / `forget` operational notes (global or project-scoped). |
+| `memory_search` | Search across all memory stores (core, operational, patterns, project notes) for a phrase — on-demand recall without loading all memory into context. |
 | `schedule`    | Create, list, and cancel scheduled tasks for the supervisor.              |
 | `reflect`     | Trigger memory reflection on demand.                                      |
 | `jira`        | Create, search, comment, transition Jira issues via REST API.             |

@@ -50,8 +50,8 @@ console = Console(theme=_THEME, highlight=False)
 
 _COMMANDS = [
     "/help", "/memory", "/tools", "/clear", "/compact", "/retry", "/copy",
-    "/save ", "/markdown ", "/version", "/cost", "/trust", "/models", "/model ",
-    "/discard", "/quit", "/exit",
+    "/save ", "/markdown ", "/version", "/cost", "/usage", "/trust", "/models",
+    "/model ", "/discard", "/quit", "/exit",
 ]
 
 
@@ -189,6 +189,7 @@ _HELP_TEXT = """
 [cmd]/save[/] [meta]<note>[/]  Append a note to memory
 [cmd]/markdown[/] [meta][on|off][/]  Toggle Markdown rendering
 [cmd]/cost[/]        Show session token usage
+[cmd]/usage[/]       Show lifetime token usage (all sessions, by model/channel)
 [cmd]/trust[/] [meta][clear][/]  Show/clear auto-approved shell commands
 [cmd]/version[/]     Show version
 [cmd]/quit[/]        Exit  [meta](or Ctrl+D)[/]
@@ -409,6 +410,12 @@ def repl(agent: Agent) -> None:
                 f"out [cmd]{tok['out']:,}[/]  total [cmd]{total:,}[/]"
             )
 
+        elif cmd == "/usage":
+            from aria import usage as _usage
+            console.rule("[meta]Lifetime usage[/]")
+            console.print(_usage.format_report())
+            console.rule()
+
         elif cmd == "/models":
             console.rule("[meta]Model profiles[/]")
             for p in agent.list_profiles():
@@ -503,6 +510,11 @@ def main() -> None:
         help="Run single-shot and send result to Telegram",
     )
     parser.add_argument(
+        "--usage", "-u",
+        action="store_true",
+        help="Print lifetime token usage (by model/channel) and exit",
+    )
+    parser.add_argument(
         "--chat", "-c",
         type=int,
         default=None,
@@ -516,6 +528,11 @@ def main() -> None:
     )
     args   = parser.parse_args()
     query  = " ".join(args.query).strip()
+
+    if args.usage:
+        from aria import usage as _usage
+        print(_usage.format_report())
+        return
 
     if args.notify:
         if not query:
