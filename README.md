@@ -188,6 +188,9 @@ AGENT_NAME=Aria
 # Get TELEGRAM_TOKEN from @BotFather — get chat ID from @userinfobot
 TELEGRAM_TOKEN=<bot token>
 TELEGRAM_ALLOWED=<your chat ID>
+# ARIA_TELEGRAM_PROGRESS=on         # live tool-trail message while the agent works
+# ARIA_INBOX_KEEP_DAYS=14           # retention for files sent to Aria
+# ARIA_INBOX_MAX_MB=200             # inbox size cap, oldest pruned first
 
 # ── WhatsApp ──────────────────────────────────────────────────────────────────
 # Required for: aria-whatsapp (skip entirely if not using)
@@ -231,12 +234,20 @@ TELEGRAM_ALLOWED=<your chat ID>
 # ARIA_MAX_HISTORY=60              # conversation turns kept in context
 # ARIA_CHANNEL_IDLE_MINUTES=60     # idle minutes before channel session summarised
 # ARIA_OPSMEM_MAX_LINES=40         # operational memory cap (LEARN: entries)
+# ARIA_WINDOW_MESSAGES=15          # exchanges kept in the rolling conversation window
+# ARIA_WINDOW_MSG_CHARS=300        # chars per message before truncation
+
+# ── Shell security ────────────────────────────────────────────────────────────
+# ARIA_SHELL_UNATTENDED=safe       # channels/supervisor: safe | off | full
+# ARIA_SHELL_SANDBOX=              # optional wrapper, e.g. "firejail --quiet --private-tmp"
+# "always" approvals are saved to ~/.aria/shell_allowlist.json — audit with /trust
 
 # ── Browser automation (experimental) ────────────────────────────────────────
 # Needs: pip install websockets, and chromium/chrome started with the debug port
 # CHROME_PROFILE_DIR=~/snap/chromium/current/.config/chromium
 # CHROME_DEBUG_PORT=9222
 # ARIA_BROWSER_MAX_LOOPS=50        # higher loop budget for multi-step browser tasks
+# ARIA_BROWSER_HUMANIZE=on         # human-like mouse paths/typing/scroll (off to disable)
 
 # ── Supervisor ────────────────────────────────────────────────────────────────
 # ARIA_SUPERVISOR_INTERVAL=30      # seconds between task queue polls
@@ -248,7 +259,13 @@ TELEGRAM_ALLOWED=<your chat ID>
 # ARIA_REFLECT_SESSION_CHARS=3000  # max chars read per session log
 # ARIA_REFLECT_MAX_LINES=40        # max bullet points in patterns.md
 
+# ── Self-update ───────────────────────────────────────────────────────────────
+# ARIA_SOURCE_DIR=~/aria-agent     # git checkout the update tool pulls from
+# ARIA_UPDATE_BRANCH=main
+# ARIA_UPDATE_CONFIRM_SEC=600      # rollback watchdog window after a service update
+
 # ── Path overrides ────────────────────────────────────────────────────────────
+# ARIA_ENV=~/.aria/.env
 # ARIA_WORKSPACE=~/.aria/workspace
 # ARIA_TOOLS_DIR=~/.aria/tools
 ```
@@ -420,8 +437,37 @@ continuity — no LLM summarisation step.
 
 Bot commands: `/start` `/memory` `/tools` `/clear` `/save <note>` `/version`
 
+Replies **stream as the agent works**: each response arrives as its own message
+as soon as it's ready, a typing indicator stays alive during long turns, and a
+single live-edited "tool trail" message shows each tool call as it runs
+(`ARIA_TELEGRAM_PROGRESS=on`, the default — set `off` to disable the trail).
+
 Sessions are summarised after `ARIA_CHANNEL_IDLE_MINUTES` of inactivity
 so the agent has context when you return.
+
+### Sending and receiving files
+
+**Send Aria a file** — documents, photos, videos and voice notes are saved to
+`<workspace>/inbox/telegram/<chat id>/` and the agent is told where they are, so
+it can work with them straight away. Send a PDF with "summarise this" and it
+reads it; send a CSV and it can process it. Any caption you add travels with the
+file as your message.
+
+Two honest limits: Telegram's Bot API caps downloads at **20 MB**, and Aria
+**cannot see image content or transcribe audio** — those files are stored and
+acknowledged, not interpreted. The inbox prunes itself (`ARIA_INBOX_KEEP_DAYS`,
+then oldest-first past `ARIA_INBOX_MAX_MB`), so it won't grow without bound.
+
+**Ask Aria for a file** — "send me that report as a file" uses the `send_file`
+tool, which uploads it as a document attachment (Telegram's limit is 50 MB).
+It resolves paths through the *same* read allow-list as `file_access`, so
+anything permanently blocked — `~/.ssh`, `~/.aria/.env`, cloud credentials —
+can never be sent, and a path outside your allowed directories triggers the
+usual "may I access this?" approval flow first.
+
+> **Multi-user note:** replies, notifications and files now go to the chat you
+> are actually talking in, rather than to every ID in `TELEGRAM_ALLOWED`.
+> Identical behaviour for single-user setups.
 
 ---
 
@@ -631,7 +677,8 @@ at startup — no registration needed.
 
 | Tool          | Description                                                               |
 |---------------|---------------------------------------------------------------------------|
-| `file_access` | Read, write, append, patch, **edit (multi)**, **replace_lines**, list, delete, **undo** files. `base64` encoding + paginated reads (`offset`/`limit`). Read/write restricted to configured directories. |
+| `file_access` | Read, write, append, patch, **edit (multi)**, **replace_lines**, list, delete, **undo** files. Reads **PDFs** by extracting their text automatically. `base64` encoding + paginated reads (`offset`/`limit`). Read/write restricted to configured directories. |
+| `send_file`   | Send a file from disk to the user over Telegram as a downloadable attachment. Goes through the same read allow-list as `file_access`, so blocked paths can never be sent. |
 | `code_search` | Fast content/filename search across a tree (ripgrep → git grep → Python fallback; respects `.gitignore`). Locate code/symbols/TODOs before reading whole files. |
 | `git`         | Common git ops: status, diff, log, show, branch, checkout, add, commit, push, pull. No shell string assembly. |
 | `plan`        | Track a multi-step task as a todo checklist (rendered live in the REPL); update statuses as you go. |
@@ -643,9 +690,10 @@ at startup — no registration needed.
 | `schedule`    | Create, list, and cancel scheduled tasks for the supervisor.              |
 | `reflect`     | Trigger memory reflection on demand.                                      |
 | `jira`        | Create, search, comment, transition Jira issues via REST API.             |
-| `browser`     | *(experimental)* Control Chrome/Chromium via CDP — viewport-based snapshots, click, type, read, scroll. Uses your real sessions. |
+| `browser`     | *(experimental)* Control Chrome/Chromium via CDP — viewport-based snapshots, click, type, read, scroll, with human-like input by default. Uses your real sessions. |
 | `imap`        | List, search, read, move, delete emails on any IMAP provider.             |
 | `drive`       | List, search, read, download, upload, organise Google Drive files via gog. |
+| `update`      | Self-update from the git source checkout: fetch, diff, dry-run import check, apply. Service updates arm a rollback watchdog (`aria-rollback`) that auto-reverts a crash-looping update within `ARIA_UPDATE_CONFIRM_SEC`. |
 
 ### Writing scripts without JSON escaping issues
 
@@ -709,6 +757,12 @@ Works identically in REPL, Telegram, and WhatsApp.
 ## Web fetching
 
 `web_fetch` uses [trafilatura](https://trafilatura.readthedocs.io) for content extraction — the same approach as Firefox Reader Mode. It identifies the main article or documentation body and discards navigation, ads, footers, and boilerplate, dramatically improving signal-to-noise ratio compared to plain HTML stripping.
+
+**SSRF protection:** agent-driven fetches (`web_fetch` and `browser` navigation)
+refuse private, loopback, link-local, and reserved addresses — including the
+cloud metadata endpoint `169.254.169.254` — and non-http(s) schemes, and the
+check is re-applied at every redirect hop. A channel user or a prompt-injected
+page can't point Aria at your internal network.
 
 trafilatura is installed automatically with `pip install .` but some of its dependencies have system-level requirements that pip alone cannot satisfy.
 
@@ -899,11 +953,15 @@ For reading content, Aria extracts `innerText` from the main content element (`<
 ```bash
 # 1. Start your browser with the debug port enabled
 # Snap Chromium (Ubuntu default — works out of the box)
-chromium --remote-debugging-port=9222 --remote-allow-origins=*
+chromium --remote-debugging-port=9222 --remote-allow-origins=http://localhost
 
 # Google Chrome
-google-chrome --remote-debugging-port=9222 --remote-allow-origins=*
+google-chrome --remote-debugging-port=9222 --remote-allow-origins=http://localhost
 ```
+
+> The allow-origin is a **fixed value Aria's CDP client sends** — not `*`. A web
+> page can't forge its `Origin` header, so this keeps random pages from talking
+> to your browser's debug port.
 
 ```ini
 # ~/.aria/.env
@@ -911,7 +969,13 @@ CHROME_PROFILE_DIR=~/snap/chromium/current/.config/chromium  # snap Chromium
 # CHROME_PROFILE_DIR=~/.config/google-chrome                 # Google Chrome deb
 CHROME_DEBUG_PORT=9222
 ARIA_BROWSER_MAX_LOOPS=50   # browser tasks need more steps than regular tasks
+ARIA_BROWSER_HUMANIZE=on    # human-like input (default on; off = fast direct dispatch)
 ```
+
+Clicks, typing, and scrolling dispatch through **human-like input** by default:
+curved pointer paths, natural typing cadence, wheel-based scrolling, and a
+cursor position that stays continuous across actions. Set
+`ARIA_BROWSER_HUMANIZE=off` to revert to instant direct dispatch.
 
 During `aria-install`, answer **yes** to "Browser automation?" and it will ask for these values.
 
@@ -1099,11 +1163,14 @@ aria-agent/
 └── src/
     └── aria/
         ├── __init__.py                ← version via importlib.metadata
-        ├── agent.py                   ← ReAct loop, streaming, markdown toggle, memory markers, JSON repair, background reflection
+        ├── agent.py                   ← native tool-calling ReAct loop, markdown toggle, model profiles, background reflection
+        ├── attachments.py             ← inbound file storage: name sanitising, inbox layout, retention
         ├── channel.py                 ← multi-channel registry, idle timer
         ├── config.py                  ← path resolution, .env loading
+        ├── context.py                 ← active channel/user for the current turn (delivery routing)
         ├── install.py                 ← setup wizard (aria-install)
-        ├── main.py                    ← CLI entry point with rich + readline
+        ├── main.py                    ← CLI entry point (prompt_toolkit REPL + rich)
+        ├── project.py                 ← per-project conventions file + project-scoped notes
         ├── reflect.py                 ← three-phase memory reflection (aria-reflect)
         ├── setup.py                   ← first-run wizard, env template
         ├── supervisor.py              ← task supervisor with periodic reflection (aria-supervisor)
@@ -1115,17 +1182,24 @@ aria-agent/
         └── tools/
             ├── __init__.py            ← auto-loader and dispatcher
             ├── _env.py                ← subprocess environment builder
-            ├── browser.py             ← Chrome/Chromium via raw CDP (httpx + websockets)
+            ├── _net.py                ← shared SSRF guard for outbound fetches
+            ├── browser.py             ← Chrome/Chromium via raw CDP (httpx + websockets), humanized input
             ├── calendar.py            ← Google Calendar via gog
-            ├── file_access.py         ← read/write/patch + path security + authorize action
-            ├── gmail.py               ← Gmail via gog
+            ├── code_search.py         ← ripgrep/git-grep/python code + filename search
             ├── drive.py               ← Google Drive via gog
+            ├── file_access.py         ← read/write/patch/edit/undo + PDF extraction + path security
+            ├── git.py                 ← git status/diff/log/commit/push/pull without shell strings
+            ├── gmail.py               ← Gmail via gog
             ├── imap.py                ← IMAP email for any provider
             ├── jira.py                ← Jira REST API via httpx
+            ├── learn.py               ← save an operational/procedural note
             ├── notify.py              ← Telegram push notification
+            ├── plan.py                ← task-plan/todo checklist (rendered live in the REPL)
             ├── reflect.py             ← on-demand memory reflection
+            ├── remember.py            ← save a permanent user fact
             ├── schedule.py            ← create/list/cancel supervisor tasks
-            ├── shell_run.py           ← shell commands, script mode, interpreter whitelist
-            ├── update.py              ← self-update from git source
-            └── web_fetch.py           ← web page fetcher
+            ├── send_file.py           ← send a file to the user over Telegram
+            ├── shell_run.py           ← shell commands, script mode, learnable approval, opt-in sandbox
+            ├── update.py              ← self-update from git source + rollback watchdog
+            └── web_fetch.py           ← web page fetcher (trafilatura)
 ```

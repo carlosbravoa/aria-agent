@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "aria-agent"
-version = "2.3.1"
+version = "2.4.0"
 description = "A lean local-LLM agent with persistent workspace and pluggable tools"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -17,6 +17,7 @@ dependencies = [
     "prompt_toolkit>=3.0.0",
     "trafilatura>=1.6.0",
     "websockets>=12.0",
+    "pypdf>=4.0",
 ]
 
 [project.optional-dependencies]

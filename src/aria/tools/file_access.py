@@ -36,6 +36,8 @@ from __future__ import annotations
 import base64
 import json
 import os
+import shutil
+import subprocess
 from pathlib import Path
 
 # ── Sensitive paths — always blocked, can never be authorized ─────────────────
@@ -266,7 +268,9 @@ DEFINITION = {
         "{old,new} replacements atomically in one call (prefer this for multi-spot "
         "changes — fewer round-trips). action='replace_lines' replaces a line range "
         "[start_line,end_line]. action='undo' reverts the last write/patch/edit/"
-        "delete on a path. Use offset/limit for reading large files in chunks."
+        "delete on a path. Use offset/limit for reading large files in chunks. "
+        "action='read' extracts the text of PDF files automatically — just pass "
+        "the .pdf path, no conversion step needed."
     ),
     "parameters": {
         "type": "object",
@@ -354,6 +358,122 @@ def _decode_content(args: dict):
     return content                               # str
 
 
+# ── PDF text extraction ───────────────────────────────────────────────────────
+# Reading a PDF with read_text() returns binary mojibake, so `read` detects PDFs
+# and extracts their text layer instead. Poppler's `pdftotext -layout` is the
+# preferred backend (much better column/table fidelity); pypdf is the portable
+# fallback so PDFs still read on machines without poppler.
+
+_PDF_MAGIC   = b"%PDF-"
+_PDF_TIMEOUT = 60
+
+
+class _PdfError(Exception):
+    """PDF could not be read (encrypted, corrupt, or no backend available)."""
+
+
+def _is_pdf(path: Path) -> bool:
+    """Detect a PDF by magic bytes rather than extension, so a mislabelled
+    `.dat` still extracts and a text file named `.pdf` is not mangled. The spec
+    allows the header anywhere in the first 1024 bytes."""
+    try:
+        with path.open("rb") as fh:
+            return _PDF_MAGIC in fh.read(1024)
+    except OSError:
+        return False
+
+
+def _extract_pdf_pypdf(path: Path) -> tuple[str, int | None]:
+    try:
+        from pypdf import PdfReader
+    except ImportError:
+        raise _PdfError(
+            "No PDF backend available. Install poppler-utils (for pdftotext) "
+            "or run: pip install pypdf"
+        ) from None
+    try:
+        reader = PdfReader(str(path))
+        if reader.is_encrypted and not reader.decrypt(""):
+            raise _PdfError("PDF is encrypted / password-protected.")
+        pages = [(p.extract_text() or "") for p in reader.pages]
+    except _PdfError:
+        raise
+    except Exception as exc:
+        raise _PdfError(f"Could not parse PDF: {exc}") from exc
+    return "\n".join(pages), len(pages)
+
+
+def _extract_pdf(path: Path) -> tuple[str, int | None]:
+    """Return (text, page_count). Raises _PdfError when the file can't be read."""
+    if shutil.which("pdftotext"):
+        try:
+            proc = subprocess.run(
+                ["pdftotext", "-layout", str(path), "-"],
+                capture_output=True, timeout=_PDF_TIMEOUT,
+            )
+        except subprocess.TimeoutExpired:
+            raise _PdfError(f"PDF extraction timed out after {_PDF_TIMEOUT}s.") from None
+        except OSError as exc:
+            raise _PdfError(f"Could not run pdftotext: {exc}") from exc
+        if proc.returncode == 0:
+            raw = proc.stdout.decode("utf-8", errors="replace")
+            # pdftotext emits a form feed after every page — use it for the count,
+            # then strip it so the text reads cleanly.
+            return raw.replace("\f", ""), raw.count("\f") or None
+        err = proc.stderr.decode("utf-8", errors="replace").lower()
+        if proc.returncode == 3 or "password" in err or "encrypted" in err:
+            raise _PdfError("PDF is encrypted / password-protected.")
+        # Any other poppler failure falls through to pypdf, which parses some
+        # malformed files poppler rejects outright.
+    return _extract_pdf_pypdf(path)
+
+
+def _read_pdf(path: Path) -> tuple[str, str]:
+    """Return (prefix, text) for a PDF read. Raises _PdfError on failure."""
+    text, pages = _extract_pdf(path)
+    if not text.strip():
+        raise _PdfError(
+            f"{path.name}: no extractable text"
+            + (f" ({pages} pages)" if pages else "")
+            + ". This is most likely a scanned PDF — OCR is not supported."
+        )
+    label = f"{pages} page{'s' if pages != 1 else ''}" if pages else "text extracted"
+    return f"[PDF: {label}]\n", text
+
+
+def _auth_message(exc: PermissionError, raw_path: str) -> str:
+    """Format an authorization request from the structured PermissionError."""
+    msg = str(exc)
+    try:
+        parts   = msg.replace(_AUTH_REQUEST, "").strip().split()
+        p_part  = next(p for p in parts if p.startswith("path="))
+        l_part  = next(p for p in parts if p.startswith("level="))
+        req_path  = Path(p_part[5:])
+        req_level = l_part[6:]
+    except Exception:
+        req_path  = Path(raw_path).expanduser().resolve().parent
+        req_level = "read"
+    return _format_auth_request(req_path, req_level)
+
+
+def resolve_readable(raw_path: str) -> tuple[Path | None, str | None]:
+    """Resolve a path for READING under exactly the same allow-list and
+    permanent block-list as action='read'.
+
+    Returns (path, None), or (None, message) where the message is ready to hand
+    back to the agent — either a hard block or an authorization request. Shared
+    with tools that hand file contents to the outside world (send_file), so
+    there is exactly one implementation of "may this be read?" and no second,
+    weaker check to bypass.
+    """
+    try:
+        return _safe_path(raw_path, _read_allow(), "read"), None
+    except ValueError as e:
+        return None, f"[file_access] {e}"
+    except PermissionError as e:
+        return None, _auth_message(e, raw_path)
+
+
 def execute(args: dict) -> str:
     action: str  = args["action"]
     raw_path: str = args.get("path", "")
@@ -377,18 +497,7 @@ def execute(args: dict) -> str:
 
     except PermissionError as e:
         # Authorization request — parse and format for the agent
-        msg = str(e)
-        # Extract path and level from the structured message
-        try:
-            parts   = msg.replace(_AUTH_REQUEST, "").strip().split()
-            p_part  = next(p for p in parts if p.startswith("path="))
-            l_part  = next(p for p in parts if p.startswith("level="))
-            req_path  = Path(p_part[5:])
-            req_level = l_part[6:]
-        except Exception:
-            req_path  = Path(raw_path).expanduser().resolve().parent
-            req_level = "read"
-        return _format_auth_request(req_path, req_level)
+        return _auth_message(e, raw_path)
 
     # ── File operations ───────────────────────────────────────────────────────
     match action:
@@ -396,7 +505,19 @@ def execute(args: dict) -> str:
         case "read":
             if not path.exists():
                 return f"[file_access] Not found: {path}"
-            text  = path.read_text(encoding="utf-8", errors="replace")
+
+            # PDFs get their text layer extracted; everything else is read as
+            # text. The extracted text then flows through the same
+            # line-cap/offset/limit path, so PDFs behave like any other read.
+            prefix = ""
+            if _is_pdf(path):
+                try:
+                    prefix, text = _read_pdf(path)
+                except _PdfError as exc:
+                    return f"[file_access] {exc}"
+            else:
+                text = path.read_text(encoding="utf-8", errors="replace")
+
             lines = text.splitlines(keepends=True)
             total = len(lines)
 
@@ -407,15 +528,17 @@ def execute(args: dict) -> str:
                 start = max(0, (offset or 1) - 1)
                 end   = start + (limit or len(lines))
                 lines = lines[start:end]
-                return f"[lines {start+1}–{min(end, total)} of {total}]\n" + "".join(lines)
+                return (prefix + f"[lines {start+1}–{min(end, total)} of {total}]\n"
+                        + "".join(lines))
 
             if total > _MAX_READ_LINES:
                 return (
-                    f"[file_access] File has {total} lines. "
+                    prefix
+                    + f"[file_access] File has {total} lines. "
                     f"Returning first {_MAX_READ_LINES}. Use offset/limit to read more.\n"
                     + "".join(lines[:_MAX_READ_LINES])
                 )
-            return text
+            return prefix + text
 
         case "write":
             path.parent.mkdir(parents=True, exist_ok=True)

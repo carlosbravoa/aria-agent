@@ -229,7 +229,7 @@ def configure_env(dry_run: bool = False) -> tuple[dict[str, str], set[str]]:
     if "browser" in features:
         section("Browser automation")
         info("Requires: pip install websockets")
-        info("Start browser with: chromium --remote-debugging-port=9222 --remote-allow-origins=*")
+        info("Start browser with: chromium --remote-debugging-port=9222 --remote-allow-origins=http://localhost")
         values["CHROME_PROFILE_DIR"] = _ask(
             "CHROME_PROFILE_DIR", e("CHROME_PROFILE_DIR") or "~/.config/google-chrome",
             hint="Path to your Chrome profile directory"

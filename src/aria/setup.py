@@ -106,6 +106,12 @@ AGENT_NAME=Aria
 # Telegram: show a live tool-progress trail message while a turn runs (on/off)
 # ARIA_TELEGRAM_PROGRESS=on
 
+# ── Inbound attachments ──────────────────────────────────────────────
+# Files sent over a channel are saved under <workspace>/inbox/ and pruned:
+# first anything older than KEEP_DAYS, then oldest-first past MAX_MB.
+# ARIA_INBOX_KEEP_DAYS=14
+# ARIA_INBOX_MAX_MB=200
+
 # ── Memory reflection ────────────────────────────────────────────────
 # Sessions to analyse per reflection batch
 # ARIA_REFLECT_BATCH=10

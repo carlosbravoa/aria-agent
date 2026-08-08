@@ -67,6 +67,24 @@ def test_main_module_imports(minimal_env):
     # Native tool engine + memory tools (the 2.0 rewrite surface):
     ("aria.tools.remember", "execute"),
     ("aria.tools.learn", "execute"),
+    # File exchange over channels (2.4 surface):
+    ("aria.context", "set_active"),
+    ("aria.context", "current"),
+    ("aria.context", "reset"),
+    ("aria.attachments", "safe_name"),
+    ("aria.attachments", "destination"),
+    ("aria.attachments", "finalize"),
+    ("aria.attachments", "prune"),
+    ("aria.attachments", "describe"),
+    ("aria.telegram_notify", "send_document"),
+    ("aria.telegram_notify", "current_chat_id"),
+    ("aria.telegram_bot", "on_media"),
+    ("aria.telegram_bot", "_run_turn"),
+    ("aria.telegram_bot", "_pick_attachment"),
+    ("aria.tools.send_file", "execute"),
+    ("aria.tools.file_access", "resolve_readable"),
+    ("aria.tools.file_access", "_extract_pdf"),
+    ("aria.tools.file_access", "_is_pdf"),
 ])
 def test_required_symbol_exists(minimal_env, module, symbol):
     mod = importlib.import_module(module)

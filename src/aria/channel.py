@@ -21,6 +21,7 @@ import threading
 import time
 from typing import Protocol, runtime_checkable
 
+from aria import context
 from aria.agent import Agent
 
 log = logging.getLogger(__name__)
@@ -46,8 +47,16 @@ class _Session:
     def handle(self, text: str, response_cb=None, activity_cb=None) -> list[str]:
         with self._lock:
             self._reset_timer()
-            return self.agent.chat_yield(text, response_cb=response_cb,
-                                         activity_cb=activity_cb)
+            # Publish the channel/user for the duration of the turn so delivery
+            # tools (notify, send_file) reply here instead of broadcasting.
+            # Reset in finally: worker threads are pooled and would otherwise
+            # carry a stale channel into the next turn.
+            token = context.set_active(self.channel, self.user_id)
+            try:
+                return self.agent.chat_yield(text, response_cb=response_cb,
+                                             activity_cb=activity_cb)
+            finally:
+                context.reset(token)
 
     def _reset_timer(self) -> None:
         """Restart the inactivity countdown. Called under self._lock."""

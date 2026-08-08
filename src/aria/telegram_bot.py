@@ -21,7 +21,7 @@ from telegram.ext import (
     filters,
 )
 
-from aria import config, __version__
+from aria import attachments, config, __version__
 from aria.channel import get_session, handle, shutdown
 
 log     = logging.getLogger(__name__)
@@ -245,21 +245,13 @@ class _Progress:
 
 # ── Message handler ───────────────────────────────────────────────────────────
 
-async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not _is_allowed(update):
-        await update.message.reply_text("Unauthorised.")  # type: ignore[union-attr]
-        return
+async def _run_turn(update: Update, context: ContextTypes.DEFAULT_TYPE,
+                    chat_id: str, user_text: str) -> None:
+    """Run one agent turn with the live progress bridge attached.
 
-    chat_id   = str(update.effective_chat.id)  # type: ignore[union-attr]
-    user_text = update.message.text or ""  # type: ignore[union-attr]
-
-    # If the user replied to a bot message, prepend the original text
-    # so the agent understands what they're responding to.
-    replied_to = update.message.reply_to_message  # type: ignore[union-attr]
-    if replied_to and replied_to.text:
-        original  = replied_to.text.strip()[:500]
-        user_text = f"[Replying to: {original}]\n\n{user_text}"
-
+    Shared by text messages and attachments so both get streaming, the typing
+    heartbeat, and the tool trail.
+    """
     loop     = asyncio.get_running_loop()
     progress = _Progress(context.bot, chat_id, loop)
     progress.start()
@@ -285,6 +277,103 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             responses = ["(no response)"]
         for response in responses:
             await _reply(update, response)
+
+
+async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _is_allowed(update):
+        await update.message.reply_text("Unauthorised.")  # type: ignore[union-attr]
+        return
+
+    chat_id   = str(update.effective_chat.id)  # type: ignore[union-attr]
+    user_text = update.message.text or ""  # type: ignore[union-attr]
+
+    # If the user replied to a bot message, prepend the original text
+    # so the agent understands what they're responding to.
+    replied_to = update.message.reply_to_message  # type: ignore[union-attr]
+    if replied_to and replied_to.text:
+        original  = replied_to.text.strip()[:500]
+        user_text = f"[Replying to: {original}]\n\n{user_text}"
+
+    await _run_turn(update, context, chat_id, user_text)
+
+
+# ── Attachments ───────────────────────────────────────────────────────────────
+
+# Telegram's Bot API refuses getFile for anything larger. Not something we can
+# raise without running a self-hosted Bot API server.
+_MAX_DOWNLOAD = 20 * 1024 * 1024
+
+
+def _pick_attachment(msg) -> tuple[str, str | None, str | None, int | None, str] | None:
+    """Return (file_id, filename, mime, size, kind) for a message's attachment."""
+    if msg.document:
+        d = msg.document
+        return d.file_id, d.file_name, d.mime_type, d.file_size, "document"
+    if msg.photo:
+        p = msg.photo[-1]            # last entry is the largest rendition
+        return p.file_id, f"photo_{p.file_unique_id}.jpg", "image/jpeg", p.file_size, "photo"
+    if msg.voice:
+        v = msg.voice
+        return (v.file_id, f"voice_{v.file_unique_id}.ogg",
+                v.mime_type or "audio/ogg", v.file_size, "voice")
+    if msg.audio:
+        a = msg.audio
+        return (a.file_id, a.file_name or f"audio_{a.file_unique_id}.mp3",
+                a.mime_type, a.file_size, "audio")
+    if msg.video:
+        v = msg.video
+        return (v.file_id, v.file_name or f"video_{v.file_unique_id}.mp4",
+                v.mime_type, v.file_size, "video")
+    if msg.video_note:
+        v = msg.video_note
+        return v.file_id, f"videonote_{v.file_unique_id}.mp4", "video/mp4", v.file_size, "video_note"
+    if msg.animation:
+        a = msg.animation
+        return (a.file_id, a.file_name or f"animation_{a.file_unique_id}.mp4",
+                a.mime_type, a.file_size, "animation")
+    return None
+
+
+async def on_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Download an incoming file into the workspace inbox, then run a turn so
+    the agent can read it with file_access like any other path."""
+    if not _is_allowed(update):
+        await update.message.reply_text("Unauthorised.")  # type: ignore[union-attr]
+        return
+
+    msg     = update.message
+    chat_id = str(update.effective_chat.id)  # type: ignore[union-attr]
+    picked  = _pick_attachment(msg)
+    if picked is None:
+        await _reply(update, "I can't handle that kind of attachment yet.")
+        return
+
+    file_id, filename, mime, size, kind = picked
+    if size and size > _MAX_DOWNLOAD:
+        await _reply(
+            update,
+            f"That file is {attachments.human_size(size)} — Telegram only lets "
+            f"bots download files up to 20 MB, so I can't fetch it. Could you "
+            f"send a smaller version, or put it somewhere I can reach?"
+        )
+        return
+
+    dest = attachments.destination(CHANNEL, chat_id, filename)
+    try:
+        tg_file = await context.bot.get_file(file_id)
+        await tg_file.download_to_drive(custom_path=str(dest))
+    except Exception as exc:
+        log.error("attachment download failed for chat %s: %s", chat_id, exc)
+        await _reply(update, f"I couldn't download that file: {exc}")
+        return
+    attachments.finalize(dest)
+
+    log.info("Saved %s attachment for chat %s to %s", kind, chat_id, dest)
+    user_text = attachments.describe(
+        dest, channel=CHANNEL, kind=kind, original_name=filename,
+        mime=mime, size=size, caption=msg.caption or "",
+    )
+    await _run_turn(update, context, chat_id, user_text)
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
@@ -314,6 +403,13 @@ def main() -> None:
     app.add_handler(CommandHandler("models", cmd_model))   # alias
     app.add_handler(CommandHandler("save",   cmd_save, has_args=True))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_message))
+    # Explicit media filter rather than filters.ATTACHMENT, which also matches
+    # locations, contacts, polls and dice — none of which are files.
+    app.add_handler(MessageHandler(
+        filters.Document.ALL | filters.PHOTO | filters.VIDEO | filters.AUDIO
+        | filters.VOICE | filters.VIDEO_NOTE | filters.ANIMATION,
+        on_media,
+    ))
 
     log.info("Telegram bot starting...")
     try:
