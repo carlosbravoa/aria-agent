@@ -72,8 +72,28 @@ def _load_existing_env(path: Path) -> dict[str, str]:
     return env
 
 
-def _write_env(path: Path, values: dict[str, str]) -> None:
-    """Write values to .env, preserving template structure and comments."""
+def _backup_env(path: Path) -> Path | None:
+    """Back up an existing .env before it's overwritten, preserving its 0600
+    perms. Returns the backup path, or None if there was nothing to back up.
+    Backups are timestamped and never pruned — a botched reconfigure can always
+    be recovered by copying one back."""
+    if not path.exists():
+        return None
+    from datetime import datetime
+    stamp  = datetime.now().strftime("%Y%m%d_%H%M%S")
+    backup = path.with_name(f"{path.name}.bak-{stamp}")
+    # Avoid clobbering a same-second backup on a rapid re-run.
+    n = 1
+    while backup.exists():
+        backup = path.with_name(f"{path.name}.bak-{stamp}.{n}")
+        n += 1
+    shutil.copy2(path, backup)          # copy2 preserves the 0600 mode
+    return backup
+
+
+def _write_env(path: Path, values: dict[str, str]) -> Path | None:
+    """Write values to .env, preserving template structure and comments. Backs
+    up any existing .env first; returns the backup path (or None if none)."""
     from aria.setup import _ENV_TEMPLATE
 
     template_lines = _ENV_TEMPLATE.splitlines()
@@ -95,7 +115,9 @@ def _write_env(path: Path, values: dict[str, str]) -> None:
             output.append(f"{key}={val}")
 
     path.parent.mkdir(parents=True, exist_ok=True)
+    backup = _backup_env(path)
     path.write_text("\n".join(output) + "\n", encoding="utf-8")
+    return backup
 
 
 # ── Feature selection ─────────────────────────────────────────────────────────
@@ -295,7 +317,9 @@ def configure_env(dry_run: bool = False) -> tuple[dict[str, str], set[str]]:
     if dry_run:
         info(f"[dry-run] would write {env_path}")
     else:
-        _write_env(env_path, values)
+        backup = _write_env(env_path, values)
+        if backup:
+            ok(f"Backed up previous config: {backup}")
         ok(f"Config written: {env_path}")
 
     return values, features
