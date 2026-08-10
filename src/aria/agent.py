@@ -557,6 +557,7 @@ class Agent:
 
     def chat(self, user_input: str) -> None:
         """Send a message; output goes to self._output callback."""
+        self._repair_history()
         self.history.append({"role": "user", "content": user_input})
         self.ws.log_session(self.session_log, "user", user_input)
         self.ws.append_conversation_window("user", user_input, self.name)
@@ -568,7 +569,13 @@ class Agent:
             # Ctrl+C during a model call or tool execution. Strip any dangling
             # tool_calls so the next request stays well-formed and the session
             # remains usable for redirection.
-            self._finalize_interrupt()
+            try:
+                self._finalize_interrupt()
+            except KeyboardInterrupt:
+                # A second Ctrl+C (hammered) landed during cleanup. Don't let it
+                # escape with history half-stripped — _repair_history() heals
+                # whatever is left at the start of the next turn.
+                pass
 
     def retry_last(self) -> str | None:
         """Rewind the last exchange (drop the last user turn and everything after
@@ -737,6 +744,46 @@ class Agent:
         if self._is_terminal:
             self._console().print("  [yellow](interrupted — type a redirection "
                                   "or new message)[/yellow]")
+
+    def _repair_history(self) -> None:
+        """Self-heal a malformed history before the next turn. A mid-turn
+        interrupt — especially a second Ctrl+C landing while _finalize_interrupt
+        is still cleaning up — can leave an assistant `tool_calls` with missing
+        tool replies, or an orphaned `tool` reply. Either makes the provider
+        reject EVERY subsequent request with a tool-related 400, bricking the
+        session. Walk the history once: drop orphaned tool messages and
+        backfill a synthetic reply for each unanswered tool_call id."""
+        fixed: list[dict[str, Any]] = []
+        open_ids: list[str] = []      # unanswered ids from the last tool_calls
+        changed = False
+
+        def _backfill() -> None:
+            nonlocal changed
+            for tid in open_ids:
+                fixed.append({"role": "tool", "tool_call_id": tid,
+                              "content": "[interrupted — this tool call "
+                                         "produced no result]"})
+                changed = True
+            open_ids.clear()
+
+        for msg in self.history:
+            role = msg.get("role")
+            if role == "tool":
+                tid = msg.get("tool_call_id")
+                if tid in open_ids:
+                    open_ids.remove(tid)
+                    fixed.append(msg)
+                else:                  # orphaned reply — provider rejects it
+                    changed = True
+                continue
+            _backfill()                # any non-tool message closes the batch
+            if role == "assistant" and msg.get("tool_calls"):
+                open_ids.extend(tc.get("id")
+                                for tc in msg["tool_calls"] if tc.get("id"))
+            fixed.append(msg)
+        _backfill()
+        if changed:
+            self.history = fixed
 
     def chat_collect(self, user_input: str) -> str:
         """
@@ -1469,7 +1516,17 @@ class Agent:
         err_type = type(exc).__name__
         msg = str(exc)
         low = msg.lower()
-        if (("tool" in low or "function" in low)
+        # A 400 about tool_use/tool_result/tool_call pairing is a MALFORMED
+        # HISTORY (e.g. an interrupted turn), not a capability gap — don't tell
+        # the user their endpoint lacks tool support when it doesn't.
+        if (("tool_use" in low or "tool_result" in low or "tool_call" in low)
+                and "not support" not in low and "unsupported" not in low
+                and ("invalid" in low or "400" in msg)):
+            friendly = ("The provider rejected the conversation history "
+                        "(usually a turn interrupted mid-tool-call). Send your "
+                        "message again — history is repaired at the start of "
+                        "each turn — or /compact to reset the context.")
+        elif (("tool" in low or "function" in low)
                 and ("not support" in low or "unsupported" in low
                      or "invalid" in low or "400" in msg)):
             friendly = ("This model/endpoint doesn't support tool calling, which "

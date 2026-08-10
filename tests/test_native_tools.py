@@ -251,6 +251,110 @@ def test_finalize_interrupt_cleans_partial_tool_batch(minimal_env):
     assert a.history[-1]["content"] == "working"
 
 
+def test_repair_history_backfills_unanswered_tool_calls(minimal_env):
+    """A second Ctrl+C during interrupt cleanup can leave an assistant
+    tool_calls with missing replies mid-history; the provider then rejects
+    every later request. Repair must backfill synthetic tool replies."""
+    from aria.agent import Agent
+    a = Agent()
+    a._is_terminal = False
+    a.history = [{"role": "user", "content": "hi"},
+                 {"role": "assistant", "content": "",
+                  "tool_calls": [{"id": "1"}, {"id": "2"}]},
+                 {"role": "tool", "tool_call_id": "1", "content": "x"}]
+    a._repair_history()
+    replies = [m["tool_call_id"] for m in a.history if m["role"] == "tool"]
+    assert replies == ["1", "2"]
+    assert "interrupted" in a.history[-1]["content"]
+
+
+def test_repair_history_drops_orphan_tool_reply(minimal_env):
+    from aria.agent import Agent
+    a = Agent()
+    a._is_terminal = False
+    a.history = [{"role": "user", "content": "hi"},
+                 {"role": "tool", "tool_call_id": "9", "content": "stale"},
+                 {"role": "assistant", "content": "ok"}]
+    a._repair_history()
+    assert all(m["role"] != "tool" for m in a.history)
+
+
+def test_repair_history_noop_on_wellformed(minimal_env):
+    from aria.agent import Agent
+    a = Agent()
+    a._is_terminal = False
+    a.history = [{"role": "user", "content": "hi"},
+                 {"role": "assistant", "content": "",
+                  "tool_calls": [{"id": "1"}]},
+                 {"role": "tool", "tool_call_id": "1", "content": "x"},
+                 {"role": "assistant", "content": "done"}]
+    before = [dict(m) for m in a.history]
+    a._repair_history()
+    assert a.history == before
+
+
+def test_chat_self_heals_after_broken_interrupt(minimal_env, native_client):
+    """End-to-end: a session bricked by a dangling tool_calls (the double-^C
+    state) must recover on the next message instead of erroring forever."""
+    from aria.agent import Agent
+    a = Agent()
+    a._is_terminal = False
+    a.client = native_client("all good")
+    a.history = [{"role": "user", "content": "run it"},
+                 {"role": "assistant", "content": "",
+                  "tool_calls": [{"id": "1", "type": "function",
+                                  "function": {"name": "shell_run",
+                                               "arguments": "{}"}}]}]
+    a.chat("thanks")
+    assert a._last_response == "all good"
+    # the dangling call got a reply, inserted before the new user turn
+    tool_msgs = [m for m in a.history if m.get("role") == "tool"]
+    assert tool_msgs and tool_msgs[0]["tool_call_id"] == "1"
+    assert a.history.index(tool_msgs[0]) \
+        < a.history.index({"role": "user", "content": "thanks"})
+
+
+def test_second_ctrl_c_during_cleanup_does_not_escape(minimal_env,
+                                                      native_client,
+                                                      monkeypatch):
+    """Hammered Ctrl+C: the second interrupt lands during _finalize_interrupt.
+    chat() must swallow it — letting it escape leaves history malformed AND
+    crashes callers that don't expect KeyboardInterrupt from chat()."""
+    from aria.agent import Agent
+    a = Agent()
+    a._is_terminal = False
+    a.client = native_client(
+        {"content": None, "tool_calls": [("shell_run", {"command": "sleep 5"})]})
+
+    def _first_ctrl_c(name, args):
+        raise KeyboardInterrupt
+
+    def _second_ctrl_c():
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(a, "_execute_tool", _first_ctrl_c)
+    monkeypatch.setattr(a, "_finalize_interrupt", _second_ctrl_c)
+    a.chat("go")   # must not raise
+
+
+def test_friendly_error_history_400_not_misreported(minimal_env):
+    """A 400 about tool_use/tool_result pairing is malformed history, not a
+    capability gap — it must NOT claim the endpoint lacks tool calling."""
+    from aria.agent import Agent
+    a = Agent()
+    a._is_terminal = False
+    a._output = lambda *_: None
+    exc = Exception("Error code: 400 - {'type': 'invalid_request_error', "
+                    "'message': 'tool_use ids were found without tool_result "
+                    "blocks immediately after'}")
+    out = a._friendly_error(exc)
+    assert "doesn't support tool calling" not in out
+    assert "history" in out
+    # a genuine capability error still gets the 1.x guidance
+    exc2 = Exception("Error code: 400 - tools are not supported for this model")
+    assert "doesn't support tool calling" in a._friendly_error(exc2)
+
+
 def test_expand_mentions_attaches_and_flags(tmp_path):
     from aria import main as M
     p = tmp_path / "note.txt"
