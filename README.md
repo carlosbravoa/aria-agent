@@ -233,6 +233,7 @@ TELEGRAM_ALLOWED=<your chat ID>
 # ── Agent behaviour ───────────────────────────────────────────────────────────
 # ARIA_MAX_LOOPS=20                # max tool-call loops per turn
 # ARIA_MAX_HISTORY=60              # conversation turns kept in context
+# ARIA_TOOL_NUDGE_EVERY=8          # every Nth same-tool call in a turn → step-back nudge (0 off)
 # ARIA_CHANNEL_IDLE_MINUTES=60     # idle minutes before channel session summarised
 # ARIA_OPSMEM_MAX_LINES=40         # operational memory cap (LEARN: entries)
 # ARIA_WINDOW_MESSAGES=15          # exchanges kept in the rolling conversation window

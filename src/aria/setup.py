@@ -91,6 +91,9 @@ AGENT_NAME=Aria
 # ARIA_MAX_LOOPS=20
 # Max conversation history turns kept in context
 # ARIA_MAX_HISTORY=60
+# Every Nth call to the SAME tool in one turn nudges the model to step back
+# instead of probing with small variations (0 disables)
+# ARIA_TOOL_NUDGE_EVERY=8
 # shell_run policy in non-interactive contexts (Telegram/WhatsApp/supervisor):
 #   safe (default) = block destructive + secret-path commands, allow the rest
 #   off            = no shell outside the interactive REPL

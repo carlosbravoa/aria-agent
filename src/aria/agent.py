@@ -133,6 +133,13 @@ _MAX_LOOPS         = int(os.environ.get("ARIA_MAX_LOOPS",         "20"))
 _BROWSER_MAX_LOOPS = int(os.environ.get("ARIA_BROWSER_MAX_LOOPS", "50"))
 _MAX_HISTORY       = int(os.environ.get("ARIA_MAX_HISTORY",       "60"))
 
+# Thrash guard: every Nth call to the SAME tool within one turn appends a nudge
+# to that call's result telling the model to step back — consolidate, update the
+# plan, finish or report what's blocking. The repeat guard only catches EXACTLY
+# identical calls; a model probing with small argument variations (30+ near-same
+# shell_runs) sails past it and burns the whole loop budget without this.
+_SAME_TOOL_NUDGE_EVERY = int(os.environ.get("ARIA_TOOL_NUDGE_EVERY", "8"))
+
 # Token-aware context management (heuristic — no tokenizer dependency; ~4 chars
 # per token is close enough to bound cost across providers). `_CONTEXT_TOKENS` is
 # the hard cap: _trim_history drops the oldest turns (lossy) to stay under it,
@@ -1003,6 +1010,7 @@ class Agent:
         into self._responses; tool plumbing never appears there.
         """
         seen_calls: list[str] = []
+        calls_per_tool: dict[str, int] = {}   # thrash guard (per turn)
         # Higher loop limit for browser tasks — they need many sequential steps
         # (navigate, snapshot, click, type...).
         browser_task = any(
@@ -1119,10 +1127,27 @@ class Agent:
             else:
                 results = [self._run_one_call(tc, idx) for idx, tc in indexed]
             for (idx, tc), result in zip(indexed, results):
+                name = tc.function.name
+                calls_per_tool[name] = calls_per_tool.get(name, 0) + 1
+                content = _wrap_untrusted(result)
+                # Thrash nudge: the exact-repeat guard misses near-identical
+                # variants, so a stuck model can probe the same tool dozens of
+                # times. Every Nth call gets an agent-voiced note (outside the
+                # untrusted fence — it's ours, not tool output) to step back.
+                count = calls_per_tool[name]
+                if _SAME_TOOL_NUDGE_EVERY > 0 and count % _SAME_TOOL_NUDGE_EVERY == 0:
+                    content += (
+                        f"\n[agent] That was call #{count} to `{name}` this turn "
+                        "and the task is still unfinished. Stop probing with "
+                        "small variations: consolidate what you have learned so "
+                        "far, update your plan (plan tool), and either complete "
+                        "the task with what you have or tell the user exactly "
+                        "what is blocking you."
+                    )
                 self.history.append({
                     "role": "tool",
                     "tool_call_id": tc.id,
-                    "content": _wrap_untrusted(result),
+                    "content": content,
                 })
             # Remember this batch's output so a later identical call can be
             # answered from it (the nudge above) instead of being re-run.
@@ -1171,6 +1196,24 @@ class Agent:
         # conversation every minute). Endpoints without a system role
         # (LLM_SYSTEM_MESSAGES=no) get the prompt + context as a leading user turn.
         ctx_block = f"## Context\n{time_ctx}\nVersion: {__version__}"
+        # Active-plan follow-through: the plan tool persists to disk, so showing
+        # the live plan on EVERY request lets the agent re-orient and continue a
+        # multi-step task even after an error, a compaction, or a restart wiped
+        # its in-memory context. Rides in the trailing context message, which is
+        # already outside the provider's cached prefix (it changes per minute).
+        try:
+            from aria.tools import plan as _plan_tool
+            plan_block = _plan_tool.context_block()
+        except Exception:
+            plan_block = ""
+        if plan_block:
+            ctx_block += (
+                "\n\n## Active Plan (persisted — survives interruptions)\n"
+                f"{plan_block}\n"
+                "If you are working on this task, continue from the first "
+                "unfinished step and update statuses with the plan tool as you "
+                "go. If it is finished or no longer relevant, clear it."
+            )
         if _SUPPORTS_SYSTEM:
             messages = (
                 [{"role": "system", "content": self.system_prompt}]

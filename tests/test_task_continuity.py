@@ -1,6 +1,10 @@
 """Tests for mid-task continuity: the trim anchor guard (a long tool marathon
 must never wipe the live turn and produce a system-only request — the 400
-'At least one non-system message is required' bug)."""
+'At least one non-system message is required' bug), the active-plan context
+injection that lets 'continue' resume after an interruption, and the same-tool
+thrash nudge."""
+
+import json
 
 import pytest
 
@@ -100,3 +104,82 @@ def test_trim_still_drops_old_turns_before_anchor(minimal_env, monkeypatch):
     assert real[0]["role"] == "user"
     assert real[-1]["content"] == "the live task"
     assert not any(m.get("content") == "old question" for m in real)
+
+
+# ── Active-plan context injection ─────────────────────────────────────────────
+
+def test_plan_context_block_lifecycle(minimal_env):
+    from aria.tools import plan
+    assert plan.context_block() == ""                       # no plan yet
+    plan.execute({"todos": [{"task": "grep the journal", "status": "done"},
+                            {"task": "write the report", "status": "in_progress"}]})
+    block = plan.context_block()
+    assert "write the report" in block and "1/2 done" in block
+    plan.execute({"todos": [{"task": "grep the journal", "status": "done"},
+                            {"task": "write the report", "status": "done"}]})
+    assert plan.context_block() == ""                       # all done → silent
+    plan.execute({"action": "clear"})
+    assert plan.context_block() == ""
+
+
+def test_active_plan_reaches_the_wire(minimal_env, native_client):
+    """Every model request carries the unfinished plan in its trailing context
+    message, so the agent can re-orient after an error/compaction/restart."""
+    from aria.agent import Agent
+    from aria.tools import plan
+    plan.execute({"todos": [{"task": "finish the incident report",
+                             "status": "in_progress"}]})
+    a = Agent()
+    inner = native_client("ok")
+    sent = {}
+    real_create = inner.chat.completions.create
+
+    def record(**kwargs):
+        sent["messages"] = kwargs["messages"]
+        return real_create(**kwargs)
+
+    inner.chat.completions.create = record
+    a.client = inner
+    a.history = [{"role": "user", "content": "continue"}]
+    a._call_model()
+    tail = sent["messages"][-1]
+    assert tail["role"] == "system"
+    assert "Active Plan" in tail["content"]
+    assert "finish the incident report" in tail["content"]
+
+
+# ── Same-tool thrash nudge ────────────────────────────────────────────────────
+
+def test_same_tool_nudge_fires_every_nth_call(minimal_env, native_client, monkeypatch):
+    """The nudge must be visible to the MODEL on the request right after the
+    Nth call. (Asserting on final history would miss it: once later iterations
+    land, the trim pass compresses old fat tool messages — including the nudged
+    one — which is fine, the model has already read it.)"""
+    from aria import agent as agent_mod
+    from aria.agent import Agent
+    monkeypatch.setattr(agent_mod, "_SAME_TOOL_NUDGE_EVERY", 2)
+    a = Agent()
+    # Three near-identical (but not exact) calls to the same tool, then done.
+    inner = native_client(
+        {"content": None, "tool_calls": [("plan", {"action": "show"})]},
+        {"content": None, "tool_calls": [("plan", {"action": "clear"})]},
+        {"content": None, "tool_calls": [("plan", {"action": "show", "x": 1})]},
+        "done",
+    )
+    requests = []
+    real_create = inner.chat.completions.create
+
+    def record(**kwargs):
+        requests.append(kwargs["messages"])
+        return real_create(**kwargs)
+
+    inner.chat.completions.create = record
+    a.client = inner
+    a.chat_collect("hammer away")
+
+    def tool_contents(msgs):
+        return [m["content"] for m in msgs if m.get("role") == "tool"]
+
+    # Request 3 (after 2 plan calls) carries the nudge; request 2 does not.
+    assert any("call #2 to `plan`" in c for c in tool_contents(requests[2]))
+    assert not any("call #" in c for c in tool_contents(requests[1]))

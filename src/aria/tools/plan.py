@@ -78,6 +78,27 @@ def _render(todos: list) -> str:
     return header + "\n" + "\n".join(lines)
 
 
+def context_block() -> str:
+    """The rendered current plan when it has unfinished steps, else "". The
+    agent injects this into every model request (the trailing context message)
+    so an in-flight task survives interruptions — errors, compaction, restarts:
+    the plan lives on disk and each request re-reads it, so 'continue' can
+    always pick up from the first unfinished step."""
+    path = _plan_path()
+    if not path.exists():
+        return ""
+    try:
+        todos = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return ""
+    if not isinstance(todos, list) or not todos:
+        return ""
+    live = [t for t in todos if isinstance(t, dict)]
+    if not live or all(t.get("status") == "done" for t in live):
+        return ""
+    return _render(live)
+
+
 def execute(args: dict) -> str:
     ws = Workspace(config.workspace_dir())
     path = _plan_path()
