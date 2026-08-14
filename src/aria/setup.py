@@ -94,6 +94,12 @@ AGENT_NAME=Aria
 # Every Nth call to the SAME tool in one turn nudges the model to step back
 # instead of probing with small variations (0 disables)
 # ARIA_TOOL_NUDGE_EVERY=8
+# After N consecutive failures of the same tool, tell the model to consider
+# the TOOL broken and report it instead of working around it (0 disables)
+# ARIA_TOOL_BROKEN_AFTER=3
+# Flag a high-friction turn to the user (>=N tool calls with >40% errors,
+# repeated calls, or a hard stop) and log it for reflection (0 disables)
+# ARIA_FRICTION_MIN_CALLS=6
 # shell_run policy in non-interactive contexts (Telegram/WhatsApp/supervisor):
 #   safe (default) = block destructive + secret-path commands, allow the rest
 #   off            = no shell outside the interactive REPL
@@ -125,6 +131,9 @@ AGENT_NAME=Aria
 # ARIA_REFLECT_SESSION_CHARS=3000
 # Max bullet points kept in patterns.md after consolidation
 # ARIA_REFLECT_MAX_LINES=40
+# Diagnose accumulated high-friction turns once one tool has N events
+# (suspected systemic issues → ops memory + notify; 0 disables)
+# ARIA_FRICTION_REFLECT_MIN=3
 
 # ── Supervisor ───────────────────────────────────────────────────────
 # Seconds between task queue polls

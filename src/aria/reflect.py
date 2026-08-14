@@ -31,6 +31,10 @@ _SESSION_CHARS     = int(os.environ.get("ARIA_REFLECT_SESSION_CHARS",  "3000"))
 _MAX_PATTERN_LINES = int(os.environ.get("ARIA_REFLECT_MAX_LINES",      "40"))
 _MAX_OPS_LINES     = int(os.environ.get("ARIA_OPSMEM_MAX_LINES",       "40"))
 _MAX_CORE_LINES    = int(os.environ.get("ARIA_CORE_MAX_LINES",         "80"))
+# Friction phase: analyse memory/friction_log.md (high-friction turns flagged
+# by the agent harness) once one tool has this many events, or the log holds
+# twice as many events overall.
+_FRICTION_REFLECT_MIN = int(os.environ.get("ARIA_FRICTION_REFLECT_MIN", "3"))
 
 
 def _read_session(path: Path) -> str:
@@ -60,7 +64,10 @@ def _extraction_prompt(sessions: list[tuple[Path, str]]) -> str:
         "- Communication preferences (length, tone, format)\n"
         "- Workflows and tool usage patterns\n"
         "- Corrections or refinements the user made\n"
-        "- Technical context (languages, tools, systems)\n\n"
+        "- Technical context (languages, tools, systems)\n"
+        "- Systemic friction: repeated similar tool errors, or repeated "
+        "workarounds for the same tool problem (e.g. quoting issues) — tasks "
+        "that took far more steps than they should suggest something is broken\n\n"
         "Output as concise bullet points. Omit categories with no evidence.\n\n"
         "## Sessions\n\n"
         f"{session_block}"
@@ -159,6 +166,88 @@ def _core_consolidation_prompt(current_core: str) -> str:
     )
 
 
+def _friction_counts(text: str) -> dict[str, int]:
+    """Per-tool event counts from friction_log.md lines (the `worst=tool(n/m)`
+    field written by agent._flag_friction)."""
+    import re
+    counts: dict[str, int] = {}
+    for m in re.finditer(r"worst=([\w.-]+)\(", text or ""):
+        counts[m.group(1)] = counts.get(m.group(1), 0) + 1
+    return counts
+
+
+def _friction_is_hot(text: str) -> bool:
+    """Enough accumulated friction to be worth an LLM diagnosis: one tool with
+    >= _FRICTION_REFLECT_MIN events, or twice that many events overall (turns
+    without a dominant failing tool still count toward the total)."""
+    if _FRICTION_REFLECT_MIN <= 0 or not text:
+        return False
+    total = len([l for l in text.splitlines() if l.startswith("- ")])
+    counts = _friction_counts(text)
+    return (any(n >= _FRICTION_REFLECT_MIN for n in counts.values())
+            or total >= 2 * _FRICTION_REFLECT_MIN)
+
+
+def _friction_prompt(friction_log: str, ops: str) -> str:
+    ops_block = (f"## Current operational memory (context)\n{ops}\n\n"
+                 if ops else "")
+    return (
+        "An AI assistant's harness automatically logged these HIGH-FRICTION "
+        "turns — turns with many failing tool calls, repeated calls, or hard "
+        "stops. The assistant itself tends to work around problems without "
+        "reporting them, so your job is to spot the systemic issue it didn't.\n\n"
+        "## Friction log (one line per struggling turn)\n"
+        f"{friction_log}\n\n"
+        f"{ops_block}"
+        "## Task\n"
+        "Identify recurring failure modes or recurring workaround patterns. "
+        "Name the tool and the most likely root cause (e.g. 'shell_run: shell "
+        "quoting breaks on nested quotes'). Be concrete and evidence-based.\n"
+        "- If there IS a recurring issue: output at most 3 terse bullets.\n"
+        "- If the events look unrelated one-offs: output exactly NONE."
+    )
+
+
+def _phase_friction(ws, client, model: str, notify: bool) -> str:
+    """Phase 5: diagnose accumulated high-friction turns. Consumes (clears) the
+    friction log so stale events never re-alert. Returns a status suffix."""
+    friction_raw = ws.load_friction_log() or ""
+    if not _friction_is_hot(friction_raw):
+        return ""
+    log.info("Analysing %d friction events...",
+             len([l for l in friction_raw.splitlines() if l.startswith("- ")]))
+    ops = ws.load_operational_memory() or ""
+    try:
+        resp = client.chat.completions.create(
+            model=model,
+            messages=[{"role": "user",
+                       "content": _friction_prompt(friction_raw, ops)}],
+            stream=False,
+        )
+        diagnosis = (resp.choices[0].message.content or "").strip()
+    except Exception as exc:
+        log.warning("Friction analysis failed: %s", exc)
+        return ""            # keep the log — retry next pass
+    ws.clear_friction_log()  # consumed either way: no stale re-alerts
+    if not diagnosis or diagnosis.upper().startswith("NONE"):
+        return ", friction events reviewed (no systemic issue)"
+    # Make the finding visible in BOTH directions: to the agent (ops memory is
+    # injected into every session's system prompt) and to the user (notify).
+    flat = " ".join(diagnosis.split())[:400]
+    try:
+        ws.append_operational_memory(f"[suspected issue] {flat}")
+    except Exception:
+        pass
+    if notify:
+        try:
+            from aria.telegram_notify import send
+            send(f"⚠ Reflection found a possible systemic issue:\n{diagnosis[:800]}")
+        except Exception as exc:
+            log.warning("Friction notify failed: %s", exc)
+    log.info("Friction diagnosis: %s", flat)
+    return ", friction: possible systemic issue flagged"
+
+
 def run(notify: bool = False, *, base_url: str | None = None,
         api_key: str | None = None, model: str | None = None) -> str:
     """Run the reflection pass. Returns a status string.
@@ -223,6 +312,19 @@ def _run_locked(ws, notify: bool, *, base_url: str | None = None,
 
     unanalysed = ws.unanalysed_sessions()
     if not unanalysed:
+        # No new sessions — but accumulated friction events alone are still
+        # worth a diagnosis pass (the whole point is surfacing issues the
+        # conversations themselves never mention).
+        if _friction_is_hot(ws.load_friction_log() or ""):
+            client = _make_client(
+                base_url or os.environ["LLM_BASE_URL"],
+                api_key or os.environ.get("LLM_API_KEY", "local"),
+            )
+            model = model or os.environ.get("LLM_MODEL", "llama3.2")
+            fr_status = _phase_friction(ws, client, model, notify)
+            msg = f"Reflection: no new sessions{fr_status or ''}."
+            log.info(msg)
+            return msg
         msg = "Reflection: no new sessions to analyse."
         log.info(msg)
         return msg
@@ -343,9 +445,13 @@ def _run_locked(ws, notify: bool, *, base_url: str | None = None,
     else:
         log.info("No core memory to consolidate.")
 
+    # ── Phase 5: friction diagnosis (systemic-issue detection) ────────────────
+    friction_status = _phase_friction(ws, client, model, notify)
+
     msg = (
         f"Reflection complete: {total_analysed} sessions analysed, "
-        f"patterns consolidated to {line_count} lines{ops_status}{core_status}."
+        f"patterns consolidated to {line_count} lines"
+        f"{ops_status}{core_status}{friction_status}."
     )
     log.info(msg)
 

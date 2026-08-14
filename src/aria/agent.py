@@ -140,6 +140,16 @@ _MAX_HISTORY       = int(os.environ.get("ARIA_MAX_HISTORY",       "60"))
 # shell_runs) sails past it and burns the whole loop budget without this.
 _SAME_TOOL_NUDGE_EVERY = int(os.environ.get("ARIA_TOOL_NUDGE_EVERY", "8"))
 
+# Friction detection: the model has no instinct to say "this tool is broken" —
+# it pushes through with workarounds. So the HARNESS measures the struggle:
+# after N consecutive errors from the same tool the model is told to consider
+# tool breakage and report it (in-turn escalation); at turn end, a turn with
+# many calls and a high error share is flagged to the user and logged to
+# memory/friction_log.md, which aria-reflect analyses for systemic issues.
+_TOOL_BROKEN_AFTER   = int(os.environ.get("ARIA_TOOL_BROKEN_AFTER",   "3"))
+_FRICTION_MIN_CALLS  = int(os.environ.get("ARIA_FRICTION_MIN_CALLS",  "6"))
+_FRICTION_ERROR_RATE = 0.4
+
 # Token-aware context management (heuristic — no tokenizer dependency; ~4 chars
 # per token is close enough to bound cost across providers). `_CONTEXT_TOKENS` is
 # the hard cap: _trim_history drops the oldest turns (lossy) to stay under it,
@@ -545,6 +555,11 @@ class Agent:
             "- Verify your work before claiming it's done: after editing code or "
             "config, run the relevant tests/command (shell_run) or re-read the file "
             "and check the output. Don't report success on an unverified change.\n"
+            "- If a tool fails repeatedly with similar errors, or you find yourself "
+            "building workarounds for a tool's behaviour, say so explicitly — "
+            "\"something appears broken with X\" (quote the error) — instead of "
+            "silently compensating. A workaround that works is still worth "
+            "reporting, and worth a learn() note so future sessions know.\n"
             "- Locate code with code_search before reading whole files; for several "
             "edits to one file use file_access action=edit (atomic), and undo with "
             "action=undo if a change was wrong.\n"
@@ -1011,6 +1026,10 @@ class Agent:
         """
         seen_calls: list[str] = []
         calls_per_tool: dict[str, int] = {}   # thrash guard (per turn)
+        # Friction stats for this turn (see _flag_friction). calls_per_tool is
+        # shared by reference so the flag can report per-tool call counts.
+        fr = {"calls": 0, "errors": 0, "err_per_tool": {}, "consec": {},
+              "repeats": 0, "hard_stop": False, "calls_per_tool": calls_per_tool}
         # Higher loop limit for browser tasks — they need many sequential steps
         # (navigate, snapshot, click, type...).
         browser_task = any(
@@ -1033,6 +1052,7 @@ class Agent:
             if isinstance(message, str):
                 self._responses.append(message)
                 self._last_response = message
+                self._flag_friction(fr)
                 return
 
             content    = (message.content or "").strip()
@@ -1052,6 +1072,7 @@ class Agent:
                 self.ws.append_conversation_window("assistant", display, self.name)
                 self._render_answer(display)
                 self._stream(display)
+                self._flag_friction(fr)
                 return
 
             # Content accompanying tool calls.
@@ -1077,6 +1098,7 @@ class Agent:
             repeats  = seen_calls.count(call_sig)
             if repeats >= 1:
                 seen_calls.append(call_sig)
+                fr["repeats"] += 1
                 prior = self._last_result_for.get(call_sig, "")
                 if repeats >= 2:
                     note = "(identical tool call repeated 3× — stopping)"
@@ -1097,6 +1119,8 @@ class Agent:
                         self._responses.append(stop)
                         self._last_response = stop
                         self._stream(stop)
+                    fr["hard_stop"] = True
+                    self._flag_friction(fr)
                     return
                 if self._is_terminal:
                     self._console().print(
@@ -1130,6 +1154,15 @@ class Agent:
                 name = tc.function.name
                 calls_per_tool[name] = calls_per_tool.get(name, 0) + 1
                 content = _wrap_untrusted(result)
+                # Friction accounting (layer 2 input): classify each result with
+                # the same heuristic the ✗ activity icon uses.
+                fr["calls"] += 1
+                if _looks_like_error(str(result)):
+                    fr["errors"] += 1
+                    fr["err_per_tool"][name] = fr["err_per_tool"].get(name, 0) + 1
+                    fr["consec"][name] = fr["consec"].get(name, 0) + 1
+                else:
+                    fr["consec"][name] = 0
                 # Thrash nudge: the exact-repeat guard misses near-identical
                 # variants, so a stuck model can probe the same tool dozens of
                 # times. Every Nth call gets an agent-voiced note (outside the
@@ -1143,6 +1176,22 @@ class Agent:
                         "far, update your plan (plan tool), and either complete "
                         "the task with what you have or tell the user exactly "
                         "what is blocking you."
+                    )
+                # Broken-tool escalation (layer 1): after N consecutive failures
+                # of the same tool, ask the diagnostic question the model never
+                # asks itself — is the TOOL broken, not the arguments? Models
+                # push through with workarounds by default; this makes stopping
+                # and reporting the legitimate move. Fires again at 2N, 3N…
+                consec = fr["consec"][name]
+                if (_TOOL_BROKEN_AFTER > 0 and consec > 0
+                        and consec % _TOOL_BROKEN_AFTER == 0):
+                    content += (
+                        f"\n[agent] That's {consec} failed `{name}` calls in a "
+                        "row. Consider that the TOOL or environment may be "
+                        "broken — not your arguments. If the errors look alike, "
+                        "STOP working around it: tell the user plainly what "
+                        "appears broken (quote the error), and save a learn() "
+                        "note so future sessions know about it."
                     )
                 self.history.append({
                     "role": "tool",
@@ -1172,6 +1221,53 @@ class Agent:
         self._stream(limit_note)
         if self._is_terminal:
             self._console().print(f"\n  [yellow]⚠ Hit loop limit ({loop_limit}).[/yellow]")
+        fr["hard_stop"] = True
+        self._flag_friction(fr)
+
+    def _flag_friction(self, fr: dict) -> None:
+        """Layer-2 friction flag: the harness — not the model — decides whether
+        this turn was a struggle, so the user learns about a possible underlying
+        issue even when the model happily worked around it. Called at every
+        _run_loop exit. High friction = many calls with a high error share, two
+        or more repeat-guard hits, or a hard stop (repeat/loop limit)."""
+        calls, errors = fr["calls"], fr["errors"]
+        if _FRICTION_MIN_CALLS <= 0:
+            return
+        # error_heavy is the only condition that gets its own user-facing
+        # message — hard stops and repeat-guard stops already explain
+        # themselves to the user, so those are logged (for reflection) but not
+        # re-announced.
+        error_heavy = (calls >= _FRICTION_MIN_CALLS
+                       and errors / calls > _FRICTION_ERROR_RATE)
+        high = (error_heavy or fr["repeats"] >= 2
+                or (fr["hard_stop"] and calls > 0))
+        if not high:
+            return
+        worst = max(fr["err_per_tool"], default=None,
+                    key=lambda t: fr["err_per_tool"][t])
+        worst_part = (f" worst={worst}({fr['err_per_tool'][worst]}/"
+                      f"{fr['calls_per_tool'].get(worst, 0)})" if worst else "")
+        detail = (f"calls={calls} errors={errors}{worst_part} "
+                  f"repeats={fr['repeats']} "
+                  f"hard_stop={'yes' if fr['hard_stop'] else 'no'}")
+        try:
+            self.ws.append_friction_log(f"[{self.window_key}] {detail}")
+        except Exception:
+            pass
+        if not error_heavy:
+            return
+        human = f"{calls} tool calls, {errors} errors"
+        if worst:
+            human += (f" ({worst}: {fr['err_per_tool'][worst]}/"
+                      f"{fr['calls_per_tool'].get(worst, 0)})")
+        msg = (f"⚠ High friction this turn: {human}. "
+               "There may be an underlying issue affecting my effectiveness.")
+        if self._is_terminal:
+            self._console().print(f"  [yellow]{msg}[/yellow]")
+        else:
+            self._responses.append(msg)
+            self._last_response = msg
+            self._stream(msg)
 
     # ── Native model call + tool execution ────────────────────────────────────
 

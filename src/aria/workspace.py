@@ -440,6 +440,33 @@ class Workspace:
             return None
         return feed_path.read_text(encoding="utf-8").strip()
 
+    # ── Friction log ─────────────────────────────────────────────────────────
+    # High-friction turns detected by the harness (many tool errors, repeat-
+    # guard hits, hard stops). Written by agent._flag_friction, consumed and
+    # cleared by aria-reflect's friction phase. Capped so it can't grow.
+
+    def append_friction_log(self, line: str) -> None:
+        path = self.root / "memory" / "friction_log.md"
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M")
+        entry = f"- {ts} {line.strip()[:300]}"
+        existing = (path.read_text(encoding="utf-8")
+                    if path.exists() else "# Friction Log\n")
+        lines = [l for l in existing.splitlines() if l.startswith("- ")][-49:]
+        _secure_write(path, "# Friction Log\n" + "\n".join(lines + [entry]) + "\n")
+
+    def load_friction_log(self) -> str | None:
+        path = self.root / "memory" / "friction_log.md"
+        if not path.exists():
+            return None
+        return path.read_text(encoding="utf-8").strip() or None
+
+    def clear_friction_log(self) -> None:
+        path = self.root / "memory" / "friction_log.md"
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
     # ── Session logs ──────────────────────────────────────────────────────────
 
     def new_session_path(self) -> Path:
