@@ -10,6 +10,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import threading
+import time
 
 from telegram import Update
 from telegram.constants import ChatAction
@@ -20,6 +22,7 @@ from telegram.ext import (
     MessageHandler,
     filters,
 )
+from telegram.request import HTTPXRequest
 
 from aria import attachments, config, __version__
 from aria.channel import get_session, handle, shutdown
@@ -388,6 +391,88 @@ async def on_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await _run_turn(update, context, chat_id, user_text)
 
 
+# ── Polling stall watchdog ────────────────────────────────────────────────────
+#
+# PTB's network_retry_loop retries NetworkError forever, but a ReadError can
+# leave the single getUpdates httpx connection (pool size 1) in a broken state
+# where every subsequent poll dies on TimedOut/PoolTimeout — retried instantly
+# and logged only at DEBUG, i.e. the bot wedges silently until someone restarts
+# it. The watchdog stamps every successful getUpdates round-trip; if none
+# succeeds for ARIA_TELEGRAM_STALL_MIN minutes it hard-exits the process so
+# systemd (Restart=on-failure) brings up a fresh one. os._exit is deliberate:
+# the event loop is not trustworthy at that point, and the conversation window
+# self-trims on every append so there is nothing to flush.
+
+_STALL_CHECK_SEC = 30
+
+
+def _stall_seconds() -> float:
+    """ARIA_TELEGRAM_STALL_MIN in seconds; 0 disables (default 10 minutes)."""
+    raw = os.environ.get("ARIA_TELEGRAM_STALL_MIN", "10").strip().lower()
+    if raw in ("off", "no", "false", ""):
+        return 0.0
+    try:
+        minutes = float(raw)
+    except ValueError:
+        return 600.0
+    return max(0.0, minutes * 60)
+
+
+class _StallWatchdog:
+    def __init__(self, stall_seconds: float, *, clock=time.monotonic,
+                 on_stall=None) -> None:
+        self.stall_seconds = stall_seconds
+        self._clock    = clock
+        self._last_ok  = clock()
+        self._on_stall = on_stall or self._exit_for_restart
+
+    def beat(self) -> None:
+        self._last_ok = self._clock()
+
+    def stalled(self) -> bool:
+        return (self._clock() - self._last_ok) > self.stall_seconds
+
+    def check(self) -> bool:
+        """Fire on_stall if stalled. Returns True when it fired."""
+        if not self.stalled():
+            return False
+        self._on_stall()
+        return True
+
+    def _exit_for_restart(self) -> None:
+        log.error(
+            "No successful getUpdates for %.0f min — polling loop is wedged. "
+            "Exiting so systemd can restart the service.",
+            self.stall_seconds / 60,
+        )
+        logging.shutdown()
+        os._exit(75)  # EX_TEMPFAIL; nonzero → Restart=on-failure fires
+
+    def start(self) -> None:
+        def loop() -> None:
+            while True:
+                time.sleep(_STALL_CHECK_SEC)
+                self.check()
+        threading.Thread(target=loop, name="tg-stall-watchdog",
+                         daemon=True).start()
+
+
+class _WatchdogRequest(HTTPXRequest):
+    """getUpdates-only request object (the builder keeps it separate from the
+    message-sending pool) that beats the watchdog on every completed
+    round-trip. Exceptions don't beat — only actual responses from Telegram
+    count as 'polling works'."""
+
+    def __init__(self, watchdog: _StallWatchdog) -> None:
+        super().__init__(connection_pool_size=1)  # PTB's own get_updates default
+        self._watchdog = watchdog
+
+    async def do_request(self, *args, **kwargs):
+        result = await super().do_request(*args, **kwargs)
+        self._watchdog.beat()
+        return result
+
+
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 def main() -> None:
@@ -405,7 +490,13 @@ def main() -> None:
 
     logging.basicConfig(level=logging.INFO)
 
-    app = Application.builder().token(token).build()
+    builder  = Application.builder().token(token)
+    watchdog = None
+    stall    = _stall_seconds()
+    if stall > 0:
+        watchdog = _StallWatchdog(stall)
+        builder  = builder.get_updates_request(_WatchdogRequest(watchdog))
+    app = builder.build()
     app.add_handler(CommandHandler("start",  cmd_start))
     app.add_handler(CommandHandler("memory", cmd_memory))
     app.add_handler(CommandHandler("tools",  cmd_tools))
@@ -424,8 +515,14 @@ def main() -> None:
     ))
 
     log.info("Telegram bot starting...")
+    if watchdog is not None:
+        watchdog.start()
     try:
-        app.run_polling(drop_pending_updates=True)
+        # bootstrap_retries=-1: if we come up while the network is still down
+        # (e.g. right after a watchdog restart), retry the bootstrap phase
+        # forever with backoff instead of exiting immediately — five fast exits
+        # inside 300s would trip StartLimitBurst and leave the service dead.
+        app.run_polling(drop_pending_updates=True, bootstrap_retries=-1)
     finally:
         shutdown()
 

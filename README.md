@@ -189,6 +189,7 @@ AGENT_NAME=Aria
 TELEGRAM_TOKEN=<bot token>
 TELEGRAM_ALLOWED=<your chat ID>
 # ARIA_TELEGRAM_PROGRESS=on         # live tool-trail message while the agent works
+# ARIA_TELEGRAM_STALL_MIN=10        # self-restart if polling is wedged for N min (0 = off)
 # ARIA_INBOX_KEEP_DAYS=14           # retention for files sent to Aria
 # ARIA_INBOX_MAX_MB=200             # inbox size cap, oldest pruned first
 

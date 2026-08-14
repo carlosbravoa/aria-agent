@@ -105,6 +105,9 @@ AGENT_NAME=Aria
 # ARIA_CHANNEL_IDLE_MINUTES=60
 # Telegram: show a live tool-progress trail message while a turn runs (on/off)
 # ARIA_TELEGRAM_PROGRESS=on
+# Telegram: restart the bot if no getUpdates poll succeeds for N minutes
+# (self-heals a wedged polling loop after a network drop; 0 disables)
+# ARIA_TELEGRAM_STALL_MIN=10
 
 # ── Inbound attachments ──────────────────────────────────────────────
 # Files sent over a channel are saved under <workspace>/inbox/ and pruned:
