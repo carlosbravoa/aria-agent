@@ -885,25 +885,74 @@ class Agent:
                     and len(msg.get("content") or "") > 400):
                 real[i] = {**msg, "content": "[tool output truncated — already processed]"}
 
+        # The live turn's user message is the ANCHOR: no trim pass below may
+        # drop it. A long single-turn tool marathon holds exactly one user
+        # message (the task) followed by dozens of assistant+tool pairs —
+        # letting the count/token trims pop it meant the boundary sweep found
+        # no user turn anywhere and drained the ENTIRE history, after which
+        # the next request carried only system messages and the provider
+        # 400-rejected it, losing the whole task context mid-run.
+        anchor = None
+        for i in range(len(real) - 1, -1, -1):
+            if real[i]["role"] == "user":
+                anchor = i
+                break
+
         excess = len(real) - _MAX_HISTORY
         if excess > 0:
-            real = real[excess:]
+            drop = excess if anchor is None else min(excess, anchor)
+            if drop > 0:
+                real = real[drop:]
+                if anchor is not None:
+                    anchor -= drop
 
         # Token-budget trim: message-count alone is context-blind (60 fat tool
         # results still overflow a small model; 60 tiny turns waste a big one).
         # Drop the oldest turns until the estimated context — system prompt +
-        # remaining history — fits the hard cap. Keeps at least the last exchange.
+        # remaining history — fits the hard cap, never crossing the anchor.
         if _CONTEXT_TOKENS > 0:
             base = _estimate_tokens(self.system_prompt)
-            while (len(real) > 2
-                   and base + sum(_message_tokens(m) for m in real) > _CONTEXT_TOKENS):
+
+            def _over() -> bool:
+                return base + sum(_message_tokens(m) for m in real) > _CONTEXT_TOKENS
+
+            while len(real) > 2 and (anchor is None or anchor > 0) and _over():
                 real.pop(0)
+                if anchor is not None:
+                    anchor -= 1
+
+            # Mega-turn backstop: the anchor is already first but the turn's own
+            # assistant+tool groups blew the budget. Drop the OLDEST complete
+            # groups right after the anchor (a group = an assistant message plus
+            # its tool replies — removed whole so no tool_call_id is orphaned),
+            # always keeping the final group, and leave a marker so the model
+            # knows steps were elided rather than never run.
+            if anchor == 0 and _over():
+                dropped = False
+                while _over():
+                    first = next((i for i in range(1, len(real))
+                                  if real[i]["role"] == "assistant"), None)
+                    if first is None:
+                        break
+                    second = next((i for i in range(first + 1, len(real))
+                                   if real[i]["role"] == "assistant"), None)
+                    if second is None:
+                        break   # only one group left — never drop the live one
+                    del real[first:second]
+                    dropped = True
+                if dropped:
+                    real.insert(1, {
+                        "role": "assistant",
+                        "content": "[Earlier tool steps this turn were trimmed "
+                                   "to fit the context window.]",
+                    })
 
         # Advance to a clean boundary: history must begin on a genuine user turn.
         # This drops any leading assistant/tool message — including a `tool`
         # message whose assistant `tool_calls` was trimmed away (which would
         # otherwise orphan it), and a window resumed from a prior session that
-        # begins on an assistant turn.
+        # begins on an assistant turn. With the anchor guard above this can
+        # never drain past the live turn's user message.
         while real and real[0]["role"] != "user":
             real.pop(0)
 
