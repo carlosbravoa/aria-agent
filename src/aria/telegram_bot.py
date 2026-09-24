@@ -27,6 +27,7 @@ from telegram.request import HTTPXRequest
 
 from aria import attachments, config, __version__
 from aria.channel import get_session, handle, shutdown
+from aria.channel_util import parse_allowed
 from aria.telegram_notify import _split  # single shared implementation
 
 log     = logging.getLogger(__name__)
@@ -36,9 +37,8 @@ CHANNEL = "telegram"
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _is_allowed(update: Update) -> bool:
-    allowed_raw = os.environ.get("TELEGRAM_ALLOWED", "")
-    allowed     = {s.strip() for s in allowed_raw.split(",") if s.strip()}
-    chat_id     = str(update.effective_chat.id)  # type: ignore[union-attr]
+    allowed = set(parse_allowed("TELEGRAM_ALLOWED"))
+    chat_id = str(update.effective_chat.id)  # type: ignore[union-attr]
     return chat_id in allowed
 
 

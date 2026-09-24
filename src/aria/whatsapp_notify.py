@@ -25,6 +25,8 @@ import os
 import urllib.error
 import urllib.request
 
+from aria.channel_util import parse_allowed, record_feed as _record_feed
+
 _DEFAULT_PUSH_PORT = 7533
 
 
@@ -43,8 +45,7 @@ def _push_port() -> int:
 
 
 def _allowed() -> list[str]:
-    raw = os.environ.get("WHATSAPP_ALLOWED", "")
-    nums = [x.strip() for x in raw.split(",") if x.strip()]
+    nums = parse_allowed("WHATSAPP_ALLOWED")
     if not nums:
         raise RuntimeError("WHATSAPP_ALLOWED not set. Add numbers to ~/.aria/.env")
     return nums
@@ -117,14 +118,3 @@ def send(text: str, to: str | None = None) -> None:
             ) from e
 
     _record_feed(text)
-
-
-def _record_feed(text: str) -> None:
-    """Record an outbound push so the agent has context when the user replies."""
-    try:
-        from aria import config
-        from aria.workspace import Workspace
-        ws = Workspace(config.workspace_dir())
-        ws.append_notify_feed(text)
-    except Exception:
-        pass  # best-effort — never block on feed write

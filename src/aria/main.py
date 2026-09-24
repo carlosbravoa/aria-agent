@@ -15,21 +15,21 @@ import argparse
 import os
 import re
 import sys
+from typing import TYPE_CHECKING, Any
 
-# ── First-run check (before anything else) ───────────────────────────────────
-from aria.setup import is_first_run, run as _setup_run
-if is_first_run():
-    _setup_run()
-
-# ── Normal startup ────────────────────────────────────────────────────────────
 from aria import config, __version__
-config.load()
-
-from aria.agent import Agent  # noqa: E402
+from aria.setup import is_first_run, run as _setup_run
 from rich.console import Console
 from rich.panel import Panel
 from rich.text import Text
 from rich.theme import Theme
+
+if TYPE_CHECKING:
+    from aria.agent import Agent
+
+# Importing this module has no side effects. The first-run wizard,
+# config.load() and the `aria.agent` import (whose module-level constants read
+# os.environ) all happen in main(), in that order — see _startup().
 
 # ── Theme ─────────────────────────────────────────────────────────────────────
 _THEME = Theme({
@@ -42,9 +42,43 @@ _THEME = Theme({
     "separator": "dim blue",
 })
 
-console = Console(theme=_THEME, highlight=False)
-# Console.print has no `file=` kwarg — errors go through a stderr console.
-err_console = Console(theme=_THEME, highlight=False, stderr=True)
+def _make_consoles() -> tuple[Console, Console]:
+    # Console.print has no `file=` kwarg — errors go through a stderr console.
+    return (Console(theme=_THEME, highlight=False),
+            Console(theme=_THEME, highlight=False, stderr=True))
+
+
+console, err_console = _make_consoles()
+
+
+def _agent_class() -> Any:
+    """`Agent`, imported on first use (after config.load()). A value already
+    bound on this module — e.g. a test's monkeypatch — is returned as-is."""
+    g = globals()
+    if "Agent" not in g:
+        from aria.agent import Agent as _Agent
+        g["Agent"] = _Agent
+    return g["Agent"]
+
+
+def __getattr__(name: str) -> Any:
+    # Keeps `aria.main.Agent` working as a module attribute.
+    if name == "Agent":
+        return _agent_class()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def _startup() -> None:
+    """What importing this module used to do: first-run wizard (exits), load
+    .env, then import Agent — so aria.agent's import-time env reads and the
+    rich consoles (which read NO_COLOR/COLUMNS/TERM... at construction) see
+    the .env values."""
+    global console, err_console
+    if is_first_run():
+        _setup_run()
+    config.load()
+    console, err_console = _make_consoles()
+    _agent_class()
 
 
 # ── Input: prompt_toolkit session ─────────────────────────────────────────────
@@ -500,6 +534,8 @@ def repl(agent: Agent) -> None:
 
 
 def main() -> None:
+    _startup()
+    Agent = _agent_class()
     parser = argparse.ArgumentParser(
         prog="aria",
         description=f"{__version__} — AI agent",

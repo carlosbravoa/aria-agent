@@ -42,32 +42,37 @@ Follow-ups:
   `config.load()`. That has caused real "`.env` ignored" bugs. Replace it with
   one settings object (a dataclass) loaded once, read lazily, and documented in
   one place.
-- **Split `Agent._run_loop`** (~200 lines) — med / med. Move the repeat guard,
-  thrash nudge and friction detection into a small per-turn `TurnGuard` class.
-  The loop then reads as: call model → run tools → check guards.
+- ✅ **Split `Agent._run_loop`** — done. The guards live in `_TurnGuard`, and
+  the loop delegates to `_handle_repeat`, `_run_batch`, `_append_tool_results`
+  and `_deliver`. A golden-trace test (`tests/golden/run_loop.json`) pins the
+  loop's observable behaviour.
 - **Declare side effects explicitly** — med / low.
   - `_classify_side_effect_tools` guesses from keywords in descriptions, and
     "post" matches "postgres". Add a `DELIVERS = True` module flag, like the
     existing `PARALLEL_SAFE`.
   - The browser loop-limit check looks for the word "browser" in the user's
     text. Base it on actual browser tool calls instead.
-- **Shared subprocess / `gog` helper** — med / low.
-  - gmail, calendar and drive each build a shell string with `shlex.quote` and
-    then `shlex.split` it back. Use one argv-list helper.
-  - Five modules repeat the same "run, then join stdout/stderr" code.
+- ✅ **Shared `gog` runner** — done (`tools/_gog.py`, 81 characterization
+  tests). Still open, because they change behaviour: building argv lists
+  directly instead of quote-then-split (error messages echo the quoted string),
+  drive `read`'s separate bytes-mode call, and the "run, then join output"
+  code in shell_run, git, update and code_search.
 - **Consistent tool result format** — med / med. Results currently vary:
   `[x error]`, `[x]`, `[git error]`, plain text.
   - Standardise on one error prefix (or a small result type), so
     `_looks_like_error` and friction detection don't depend on a heuristic.
-- **Deduplicate remaining helpers** — low / low. `_record_feed` (2 copies),
-  profile env scanning (`list_profiles`/`switch_profile`), `/model` handling (3
-  places) and allow-list parsing (4 places).
-- **Remove streaming leftovers** — low / low. The `_output`/`buf` swap in
-  `chat_collect`/`chat_yield` collects text nobody reads.
-  - `_TOOL_VERBS` lists a non-existent `web_search`, and `_FILE_VERBS` lacks
-    edit/undo/replace_lines.
-- **No side effects on import** — low / low. Importing `main.py` runs the
-  first-run wizard.
+- ✅ **Deduplicate helpers** — done. `_record_feed` and allow-list parsing moved to
+  `channel_util.py`, and profile scanning to `_env_profiles()`. `/model` handling
+  stays per channel: each channel's output differs, and unifying them would
+  change what users see.
+- **Spinner verbs** — low / low. `_FILE_VERBS` lacks edit/undo/replace_lines,
+  so those show "Accessing" (a cosmetic change). The earlier review got two
+  things wrong: the `_output` swap in `chat_collect`/`chat_yield` is not dead,
+  because it stops friendly errors printing to stdout in channel services. The
+  `web_search` verb also isn't dead, since it labels a custom tool of that
+  name.
+- ✅ **No side effects on import** — done. `main()` runs the wizard, then
+  `config.load()`, then imports Agent, in the same order as before.
 - **`build_env()`** — low / low. Parse `.env` with `dotenv_values` instead of the
   hand-rolled parser, which has no `export` and no inline comments.
 - **Reflection watermark per channel** — low / med. Only needed for

@@ -42,6 +42,7 @@ import time
 
 from aria import config
 from aria.channel import handle
+from aria.channel_util import parse_allowed
 
 log = logging.getLogger(__name__)
 
@@ -49,8 +50,7 @@ CHANNEL = "whatsapp"
 
 
 def _allowed() -> set[str]:
-    raw = os.environ.get("WHATSAPP_ALLOWED", "")
-    return {x.strip() for x in raw.split(",") if x.strip()}
+    return set(parse_allowed("WHATSAPP_ALLOWED"))
 
 
 def _secret() -> str:

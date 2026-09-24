@@ -28,6 +28,8 @@ import json
 import logging
 from pathlib import Path
 
+from aria.channel_util import parse_allowed, record_feed as _record_feed
+
 log = logging.getLogger(__name__)
 
 # Telegram's own limits.
@@ -43,8 +45,7 @@ def _token() -> str:
 
 
 def _chat_ids() -> list[int]:
-    raw = os.environ.get("TELEGRAM_ALLOWED", "")
-    ids = [int(x.strip()) for x in raw.split(",") if x.strip().isdigit()]
+    ids = [int(x) for x in parse_allowed("TELEGRAM_ALLOWED") if x.isdigit()]
     if not ids:
         raise RuntimeError("TELEGRAM_ALLOWED not set. Add chat IDs to ~/.aria/.env")
     return ids
@@ -214,17 +215,6 @@ def send(text: str, chat_id: int | None = None) -> None:
         _record_feed(text)
     if not delivered:
         raise RuntimeError("; ".join(errors) or "Telegram send failed")
-
-
-def _record_feed(text: str) -> None:
-    """Record an outbound push so the agent has context when the user replies."""
-    try:
-        from aria import config
-        from aria.workspace import Workspace
-        ws = Workspace(config.workspace_dir())
-        ws.append_notify_feed(text)
-    except Exception:
-        pass  # best-effort — never block on feed write
 
 
 def send_document(path: str | Path, caption: str = "",
