@@ -12,13 +12,10 @@ Each item: **value** / **effort** / notes. Ordered by priority within sections.
 
 ## 1. Documentation — ✅ done
 
-CLAUDE.md rewritten from the code (native tool loop, full layout, task
+The local CLAUDE.md (kept outside git) was rewritten from the code (native tool loop, full layout, task
 series/dedupe, per-conversation plans/profiles, security model, update/rollback).
 README gained an "Upgrading" section and fixed stale counts/filenames. The
 native function calling spec is marked implemented.
-
-- **Move CLAUDE.md into the repo** — low / trivial. It currently lives in the
-  parent directory, outside git, so contributors and CI never see it.
 
 ## 2. Tooling & packaging — ✅ done
 
@@ -74,7 +71,7 @@ Follow-ups:
 - **`build_env()`** — low / low. Parse `.env` with `dotenv_values` instead of the
   hand-rolled parser, which has no `export` and no inline comments.
 - **Reflection watermark per channel** — low / med. Only needed for
-  multi-user setups (already in CLAUDE.md "Known issues").
+  multi-user setups.
 - **IMAP header fetch** — low / low. It fetches one UID per round-trip; batch
   it into one `FETCH` of a UID set.
 

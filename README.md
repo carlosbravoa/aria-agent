@@ -1165,9 +1165,8 @@ nohup aria-supervisor  >> ~/.aria/supervisor.log  2>&1 &
 ## Development
 
 Aria is built to be taken forward with a coding agent (e.g. Claude Code) or by
-hand. A `CLAUDE.md` context file documents the
-architecture, conventions, and known pitfalls — which Claude Code reads
-automatically.
+hand. Keep any Claude Code context file (`CLAUDE.md`) local — outside the
+repo or git-ignored; it is not part of the project.
 
 ### Running the tests
 
@@ -1192,7 +1191,13 @@ smoke tests (every module imports, required module-level symbols exist).
   Files starting with `_` are treated as helpers, not tools.
 - **After editing any module**, run an actual import (not just a syntax check) —
   `ast.parse` does not catch a referenced-but-undefined module-level constant.
-  Then run `pytest`. See `CLAUDE.md` for the verification one-liner.
+  Then run `pytest`:
+  ```bash
+  cd src && ARIA_ENV=/dev/null LLM_BASE_URL=x LLM_API_KEY=x LLM_MODEL=x python3 -c "
+  import aria.agent, aria.workspace, aria.channel, aria.supervisor, aria.reflect, aria.task, aria.main
+  from aria import tools; print(len(tools.load_all()), 'tools; all modules import OK')"
+  ```
+  CI runs the same check on every module, plus `ruff check src tests` and `mypy`.
 - **New env vars** go in `setup.py`'s template as commented placeholders, and in
   the README's Configure section.
 
@@ -1211,7 +1216,6 @@ long the most important item — shipped in 2.0; its design notes are kept in
 aria-agent/
 ├── pyproject.toml                     ← deps + [dev] extra + pytest config
 ├── README.md
-├── CLAUDE.md                          ← context for Claude Code
 ├── docs/
 │   ├── ROADMAP.md                     ← open work
 │   ├── BACKLOG.md                     ← parked tool items

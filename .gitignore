@@ -208,3 +208,8 @@ __marimo__/
 
 
 CLAUDE.md
+
+# Claude Code context — kept local, never committed
+CLAUDE.md
+CLAUDE.local.md
+.claude/

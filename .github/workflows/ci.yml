@@ -32,7 +32,7 @@ jobs:
           allow-prereleases: true
           cache: pip
       - run: pip install ".[dev]"
-      # The NameError-at-import class of bug (see CLAUDE.md): import every
+      # The NameError-at-import class of bug (ast.parse misses these): import every
       # module and load every tool, not just parse them.
       - name: Import smoke test
         env:
