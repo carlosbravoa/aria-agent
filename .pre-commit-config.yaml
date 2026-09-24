@@ -1,0 +1,21 @@
+# pip install ".[dev]" && pre-commit install
+repos:
+  - repo: local
+    hooks:
+      - id: ruff
+        name: ruff check
+        entry: ruff check --fix
+        language: system
+        types: [python]
+      - id: mypy
+        name: mypy
+        entry: mypy
+        language: system
+        types: [python]
+        pass_filenames: false
+      - id: import-smoke
+        name: import smoke test
+        entry: env LLM_BASE_URL=x LLM_API_KEY=x LLM_MODEL=x ARIA_ENV=/dev/null python3 -c "import aria.agent, aria.workspace, aria.channel, aria.supervisor, aria.reflect, aria.task; import aria.tools as t; t.load_all()"
+        language: system
+        pass_filenames: false
+        files: ^src/

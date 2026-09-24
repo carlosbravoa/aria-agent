@@ -4,9 +4,7 @@ must never wipe the live turn and produce a system-only request — the 400
 injection that lets 'continue' resume after an interruption, and the same-tool
 thrash nudge."""
 
-import json
 
-import pytest
 
 
 def _pairs(n, fat=1200, start=0):

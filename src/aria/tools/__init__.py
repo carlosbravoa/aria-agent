@@ -53,7 +53,7 @@ def load_all(extra_dir: Path | None = None) -> list[dict[str, Any]]:
                 if spec and spec.loader:
                     mod = importlib.util.module_from_spec(spec)
                     sys.modules[spec.name] = mod
-                    spec.loader.exec_module(mod)  # type: ignore[union-attr]
+                    spec.loader.exec_module(mod)
                     if hasattr(mod, "DEFINITION") and hasattr(mod, "execute"):
                         schemas[mod.DEFINITION["name"]] = {
                             "type": "function",

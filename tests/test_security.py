@@ -134,7 +134,8 @@ def test_does_not_redact_normal_prose():
 # ── WhatsApp fail-closed ──────────────────────────────────────────────────────
 
 def _fake_wa_post(monkeypatch, *, secret_env, allowed_env, sent_secret):
-    import io, json
+    import io
+    import json
     from aria import whatsapp_bridge as wa
     monkeypatch.setenv("ARIA_WA_SECRET", secret_env)
     monkeypatch.setenv("WHATSAPP_ALLOWED", allowed_env)

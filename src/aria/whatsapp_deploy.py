@@ -19,7 +19,9 @@ import os
 import shutil
 from pathlib import Path
 
-_FILES = ("bridge.js", "package.json")
+# package-lock.json pins the exact whatsapp-web.js build (its upstream breaks
+# often); `npm ci` installs exactly that.
+_FILES = ("bridge.js", "package.json", "package-lock.json")
 
 
 def dest_dir() -> Path:
@@ -82,6 +84,6 @@ def deploy(dest: Path | None = None) -> dict:
             continue
         shutil.copy2(s, d)
         result["copied"].append(name)
-        if name == "package.json":
+        if name in ("package.json", "package-lock.json"):
             result["package_changed"] = True
     return result

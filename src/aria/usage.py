@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 
 def usage_path() -> Path:
@@ -39,7 +40,7 @@ def load_usage(path: str | Path | None = None) -> list[dict]:
 
 def summarize(records: list[dict]) -> dict:
     """Aggregate records into totals and per-model / per-channel breakdowns."""
-    out = {"calls": len(records), "in": 0, "out": 0,
+    out: dict[str, Any] = {"calls": len(records), "in": 0, "out": 0,
            "by_model": {}, "by_channel": {}}
     for r in records:
         tin  = int(r.get("in", 0) or 0)

@@ -84,9 +84,9 @@ def validate_public_url(url: str, *, allow_loopback: bool = False,
     try:
         infos = socket.getaddrinfo(host, port, proto=socket.IPPROTO_TCP)
     except socket.gaierror as exc:
-        raise BlockedURL(f"cannot resolve host '{host}': {exc}")
+        raise BlockedURL(f"cannot resolve host '{host}': {exc}") from exc
     for info in infos:
-        ip = info[4][0]
+        ip = str(info[4][0])
         if _ip_is_blocked(ip, allow_loopback=allow_loopback, allow_private=allow_private):
             raise BlockedURL(f"host '{host}' resolves to disallowed address {ip}")
 

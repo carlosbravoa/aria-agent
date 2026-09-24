@@ -137,7 +137,7 @@ def context_block(scope: str | None = None) -> str:
 
 
 def execute(args: dict) -> str:
-    ws = Workspace(config.workspace_dir())
+    Workspace(config.workspace_dir())   # ensures the memory dir exists with secure perms
     path = _plan_path()
     action = args.get("action") or ("set" if args.get("todos") is not None else "show")
 

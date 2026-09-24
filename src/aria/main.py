@@ -30,7 +30,6 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.text import Text
 from rich.theme import Theme
-from rich import print as rprint
 
 # ── Theme ─────────────────────────────────────────────────────────────────────
 _THEME = Theme({
@@ -422,18 +421,18 @@ def repl(agent: Agent) -> None:
 
         elif cmd == "/models":
             console.rule("[meta]Model profiles[/]")
-            for p in agent.list_profiles():
-                active = " ← active" if p["active"] else ""
+            for prof in agent.list_profiles():
+                active = " ← active" if prof["active"] else ""
                 console.print(
-                    f"  [cmd]{p['name']:12}[/] [meta]{p['model']}[/][success]{active}[/]"
+                    f"  [cmd]{prof['name']:12}[/] [meta]{prof['model']}[/][success]{active}[/]"
                 )
             console.rule()
 
         elif cmd == "/model":
             if not rest:
                 # Show current model
-                active = next(p for p in agent.list_profiles() if p["active"])
-                console.print(f"  [agent]{active['name']}[/] [meta]{active['model']}[/]")
+                current = next(p for p in agent.list_profiles() if p["active"])
+                console.print(f"  [agent]{current['name']}[/] [meta]{current['model']}[/]")
             else:
                 result = agent.switch_profile(rest.strip())
                 console.print(f"  [success]{result}[/]")

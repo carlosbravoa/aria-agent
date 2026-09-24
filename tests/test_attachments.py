@@ -346,7 +346,7 @@ def test_pdf_attachment_round_trip(minimal_env, native_client, monkeypatch):
 
 def test_inbox_directories_are_private(minimal_env):
     """User-sent files can be sensitive; every inbox level is 700."""
-    dest = att.destination("telegram", "42", "x.txt")
+    att.destination("telegram", "42", "x.txt")
     root = minimal_env / "inbox"
     for d in (root, root / "telegram", root / "telegram" / "42"):
         assert d.stat().st_mode & 0o777 == 0o700, d

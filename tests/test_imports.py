@@ -125,6 +125,5 @@ def test_every_tool_has_definition_and_execute(minimal_env):
         assert fn.get("name"), f"tool missing name: {t}"
         assert "parameters" in fn, f"{fn.get('name')} missing parameters schema"
         # execute() must be dispatchable
-        import aria.tools as _t
         mod = importlib.import_module(f"aria.tools.{fn['name']}")
         assert callable(getattr(mod, "execute", None)), f"{fn['name']}.execute not callable"

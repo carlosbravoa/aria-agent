@@ -9,7 +9,6 @@ from __future__ import annotations
 import os
 import subprocess
 
-import pytest
 
 
 def _git(cwd, *args):
@@ -78,7 +77,8 @@ def test_validator_passes_on_current_good_install(minimal_env, monkeypatch):
 def test_validator_fails_on_broken_package(minimal_env, monkeypatch):
     # Point the subprocess at a broken 'aria' package on a temp sys.path.
     from aria.tools import update
-    import sys, textwrap, tempfile, os
+    import tempfile
+    import os
     broken = tempfile.mkdtemp()
     pkg = os.path.join(broken, "aria"); os.makedirs(pkg)
     open(os.path.join(pkg, "__init__.py"), "w").close()
@@ -143,7 +143,8 @@ def _stub_rollback_calls(monkeypatch):
 
 
 def test_rollback_reverts_within_window(minimal_env, monkeypatch, tmp_path):
-    import json, time
+    import json
+    import time
     from aria.tools import update
     sp = update._state_path(); sp.parent.mkdir(parents=True, exist_ok=True)
     sp.write_text(json.dumps({"pending": True, "prev_sha": "deadbeef00", "src": str(tmp_path),
@@ -157,7 +158,8 @@ def test_rollback_reverts_within_window(minimal_env, monkeypatch, tmp_path):
 
 
 def test_rollback_skips_after_confirm_window(minimal_env, monkeypatch, tmp_path):
-    import json, time
+    import json
+    import time
     from aria.tools import update
     sp = update._state_path(); sp.parent.mkdir(parents=True, exist_ok=True)
     sp.write_text(json.dumps({"pending": True, "prev_sha": "deadbeef00", "src": str(tmp_path),
@@ -179,7 +181,8 @@ def test_rollback_noop_without_marker(minimal_env, monkeypatch):
 
 
 def test_rollback_is_idempotent_second_call_noops(minimal_env, monkeypatch, tmp_path):
-    import json, time
+    import json
+    import time
     from aria.tools import update
     sp = update._state_path(); sp.parent.mkdir(parents=True, exist_ok=True)
     sp.write_text(json.dumps({"pending": True, "prev_sha": "deadbeef00", "src": str(tmp_path),

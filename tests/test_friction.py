@@ -3,7 +3,6 @@ surfacing: (1) in-turn broken-tool escalation after consecutive failures,
 (2) the turn-end friction flag + friction log, (3) reflection's friction
 diagnosis phase."""
 
-import pytest
 
 
 # ── Workspace friction log ────────────────────────────────────────────────────

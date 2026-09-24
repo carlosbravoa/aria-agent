@@ -6,10 +6,8 @@ secret redaction, and file permissions.
 
 from __future__ import annotations
 
-import os
 import stat
 
-import pytest
 
 
 def test_window_is_per_channel(tmp_workspace):

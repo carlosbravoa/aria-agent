@@ -60,7 +60,7 @@ def test_request_beats_only_on_completed_roundtrip(monkeypatch):
     """do_request beats the watchdog when the HTTP round-trip completes, and
     does NOT beat when it raises — a spinning TimedOut/PoolTimeout loop must
     look stalled."""
-    from aria.telegram_bot import _StallWatchdog, _WatchdogRequest
+    from aria.telegram_bot import _WatchdogRequest
     from telegram.request import HTTPXRequest
 
     wd, clock, fired = _watchdog()

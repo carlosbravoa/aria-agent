@@ -8,22 +8,27 @@ version = "2.5.3"
 description = "A lean local-LLM agent with persistent workspace and pluggable tools"
 readme = "README.md"
 requires-python = ">=3.11"
+# Upper bounds at the next major: a self-updating agent with many users must
+# not pick up a breaking release on `pip install` (CI tests the latest allowed).
 dependencies = [
-    "openai>=1.0.0",
-    "python-dotenv>=1.0.0",
-    "httpx>=0.27.0",
-    "python-telegram-bot>=21",
-    "rich>=13.0.0",
-    "prompt_toolkit>=3.0.0",
-    "trafilatura>=1.6.0",
-    "websockets>=12.0",
-    "pypdf>=4.0",
+    "openai>=1.0.0,<3",
+    "python-dotenv>=1.0.0,<2",
+    "httpx>=0.27.0,<1",
+    "python-telegram-bot>=21,<23",
+    "rich>=13.0.0,<15",
+    "prompt_toolkit>=3.0.0,<4",
+    "trafilatura>=1.6.0,<3",
+    "websockets>=12.0,<17",
+    "pypdf>=4.0,<7",
 ]
 
 [project.optional-dependencies]
 dev = [
     "pytest>=8.0",
     "pytest-mock>=3.12",
+    "ruff>=0.6",
+    "mypy>=1.10",
+    "pre-commit>=3.5",
 ]
 
 [project.scripts]
@@ -40,3 +45,35 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 "aria" = ["py.typed"]
+
+# ── Lint / type-check ─────────────────────────────────────────────────────────
+# Rules chosen for bug-finding value, not style churn: pyflakes (undefined
+# names, unused imports — the NameError-at-import class of bug), bugbear, and
+# pyupgrade. The codebase's own formatting (aligned `=`, `a; b` in tests, long
+# prompt strings) is intentional, so pycodestyle layout rules stay off.
+[tool.ruff]
+target-version = "py311"
+line-length = 120
+extend-exclude = ["build"]
+
+[tool.ruff.lint]
+select = ["F", "E4", "E7", "E9", "W", "B", "UP"]
+ignore = [
+    "E701", "E702",   # one-line `if x: y` / `a; b` — used deliberately in tests
+    "E731",           # lambda assignment
+    "E741",           # `l` as a variable name
+    "B008",           # function calls in defaults
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["B011", "B017", "E402"]   # assert False / pytest.raises(Exception)
+"src/aria/main.py" = ["E402"]   # first-run wizard must run before config-dependent imports
+
+[tool.mypy]
+python_version = "3.11"
+ignore_missing_imports = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+# Checked strictly-ish first; widen this list module by module (see ROADMAP).
+files = ["src/aria"]
+check_untyped_defs = false

@@ -19,7 +19,7 @@ def test_ease_endpoints_and_midpoint():
     assert B._ease(0.5) == pytest.approx(0.5)
     # monotonic increasing
     vals = [B._ease(i / 20) for i in range(21)]
-    assert all(b >= a for a, b in zip(vals, vals[1:]))
+    assert all(b >= a for a, b in zip(vals, vals[1:], strict=False))
 
 
 def test_mouse_path_starts_moves_and_lands_exactly():

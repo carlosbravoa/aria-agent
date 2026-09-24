@@ -170,7 +170,7 @@ class _Progress:
         self.sent      = 0             # responses streamed (0 → send a fallback)
         self.undelivered: list[str] = []   # text that never went out (flushed at end)
         self._alive    = True
-        self._task     = None
+        self._task: asyncio.Task[None] | None = None
         self._show_trail = os.environ.get(
             "ARIA_TELEGRAM_PROGRESS", "on").strip().lower() not in (
             "off", "0", "false", "no")
@@ -379,11 +379,15 @@ def _pick_attachment(msg) -> tuple[str, str | None, str | None, int | None, str]
 async def on_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Download an incoming file into the workspace inbox, then run a turn so
     the agent can read it with file_access like any other path."""
+    msg = update.message
+    if msg is None:
+        # MessageHandler also matches edited messages / channel posts, where
+        # update.message is None (e.g. a caption edit) — nothing to download.
+        return
     if not _is_allowed(update):
-        await update.message.reply_text("Unauthorised.")  # type: ignore[union-attr]
+        await msg.reply_text("Unauthorised.")
         return
 
-    msg     = update.message
     chat_id = str(update.effective_chat.id)  # type: ignore[union-attr]
     picked  = _pick_attachment(msg)
     if picked is None:

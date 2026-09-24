@@ -384,10 +384,15 @@ def _run_locked(ws, notify: bool, *, base_url: str | None = None,
                 messages=[{"role": "user", "content": _extraction_prompt(sessions)}],
                 stream=False,
             )
-            all_observations.append(resp.choices[0].message.content.strip())
+            observation = (resp.choices[0].message.content or "").strip()
         except Exception as exc:
             log.error("Extraction failed for batch %d: %s", i, exc)
             break
+        if not observation:
+            # Empty reply: leave the batch unanalysed so a later run retries it
+            log.error("Extraction returned an empty reply for batch %d", i)
+            break
+        all_observations.append(observation)
 
         analysed.extend(batch)
         total_analysed += len(batch)

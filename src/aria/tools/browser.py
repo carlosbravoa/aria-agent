@@ -28,6 +28,10 @@ import random
 import subprocess
 import time
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from websockets.sync.client import ClientConnection
 
 DEFINITION = {
     "name": "browser",
@@ -169,18 +173,19 @@ class CDPSession:
 
     def __init__(self, ws_url: str):
         self._ws_url = ws_url
-        self._ws     = None
+        self._ws: ClientConnection | None = None
         self._id     = 0
 
     def connect(self) -> None:
         try:
             from websockets.sync.client import connect as ws_connect
+            from websockets.typing import Origin
         except ImportError:
-            raise RuntimeError(
+            raise RuntimeError(  # noqa: B904 — the install hint is the whole message
                 "websockets not installed.\n"
                 "Install with: pip install websockets"
             )
-        self._ws = ws_connect(self._ws_url, origin=_CDP_ORIGIN)
+        self._ws = ws_connect(self._ws_url, origin=Origin(_CDP_ORIGIN))
 
     def close(self) -> None:
         if self._ws:
@@ -191,15 +196,18 @@ class CDPSession:
             self._ws = None
 
     def send(self, method: str, params: dict | None = None, timeout: float = 10.0) -> dict:
+        if self._ws is None:
+            raise RuntimeError("CDP session is not connected")
+        ws = self._ws
         self._id += 1
         msg = json.dumps({"id": self._id, "method": method, "params": params or {}})
-        self._ws.send(msg)
+        ws.send(msg)
         # Drain messages until we get our response
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             try:
-                self._ws.socket.settimeout(deadline - time.monotonic())
-                raw = self._ws.recv()
+                ws.socket.settimeout(deadline - time.monotonic())
+                raw = ws.recv()
                 data = json.loads(raw)
                 if data.get("id") == self._id:
                     if "error" in data:
@@ -226,7 +234,7 @@ def _get_session() -> CDPSession:
         raise RuntimeError(
             "websockets not installed.\n"
             "Install with: pip install websockets"
-        )
+        ) from None
 
     # State 1: CDP already available
     if _cdp_available():
@@ -395,14 +403,13 @@ def _format_visible_elements(elements: list) -> list[str]:
     heading_tags = {"h1", "h2", "h3", "h4"}
 
     lines = []
-    seen_texts: set[str] = set()
+    seen_texts: set[tuple[str, str]] = set()
 
     for el in elements:
         role = el.get("role", "")
         tag  = el.get("tag",  "")
         text = el.get("text", "").strip()
         val  = el.get("val",  "").strip()
-        href = el.get("href", "")
         etype = el.get("type", "")
 
         if not text and not val:
@@ -572,7 +579,7 @@ def _scroll_plan(total: int):
     return chunks
 
 
-def _move_to(session: "CDPSession", x: float, y: float) -> None:
+def _move_to(session: CDPSession, x: float, y: float) -> None:
     """Move the cursor to (x,y) — an eased, jittered path when humanizing, else a
     single hop. Updates the process-level cursor position."""
     global _last_mouse
@@ -587,7 +594,7 @@ def _move_to(session: "CDPSession", x: float, y: float) -> None:
     _last_mouse = [x, y]
 
 
-def _human_click_at(session: "CDPSession", x: float, y: float) -> None:
+def _human_click_at(session: CDPSession, x: float, y: float) -> None:
     """Move to the point, dwell briefly, then press/release with a real gap."""
     _move_to(session, x, y)
     if _HUMANIZE:
@@ -601,11 +608,11 @@ def _human_click_at(session: "CDPSession", x: float, y: float) -> None:
                   "button": "left", "buttons": 0, "clickCount": 1})
 
 
-def _type_text(session: "CDPSession", text: str) -> None:
+def _type_text(session: CDPSession, text: str) -> None:
     """Type via real key events. Humanized cadence for short values; a fast burst
     for long ones (and when humanizing is off) so it never feels sluggish."""
     if _HUMANIZE and len(text) <= _FAST_TYPE_THRESHOLD:
-        for ch, d in zip(text, _type_plan(text)):
+        for ch, d in zip(text, _type_plan(text), strict=False):
             session.send("Input.dispatchKeyEvent", {"type": "keyDown", "key": ch})
             session.send("Input.dispatchKeyEvent", {"type": "char", "text": ch})
             session.send("Input.dispatchKeyEvent", {"type": "keyUp", "key": ch})
@@ -615,14 +622,14 @@ def _type_text(session: "CDPSession", text: str) -> None:
             session.send("Input.dispatchKeyEvent", {"type": "char", "text": ch})
 
 
-def _press_enter(session: "CDPSession") -> None:
+def _press_enter(session: CDPSession) -> None:
     for t in ("keyDown", "keyUp"):
         session.send("Input.dispatchKeyEvent",
                      {"type": t, "key": "Enter", "code": "Enter",
                       "windowsVirtualKeyCode": 13, "text": "\r"})
 
 
-def _wheel_scroll(session: "CDPSession", total_delta: int) -> None:
+def _wheel_scroll(session: CDPSession, total_delta: int) -> None:
     x, y = _last_mouse
     for chunk in _scroll_plan(total_delta):
         session.send("Input.dispatchMouseEvent",
@@ -632,7 +639,7 @@ def _wheel_scroll(session: "CDPSession", total_delta: int) -> None:
             time.sleep(random.uniform(0.04, 0.10))
 
 
-def _ambient_noise(session: "CDPSession") -> None:
+def _ambient_noise(session: CDPSession) -> None:
     """Occasional cheap idle motion (~30%) so interaction isn't robotically
     direct — a small cursor drift or a micro-scroll. No-op when humanizing off."""
     if not _HUMANIZE or random.random() > 0.3:
@@ -648,7 +655,7 @@ def _ambient_noise(session: "CDPSession") -> None:
         time.sleep(0.05)
 
 
-def _wait_ready(session: "CDPSession", timeout: float = 5.0) -> None:
+def _wait_ready(session: CDPSession, timeout: float = 5.0) -> None:
     """Poll document.readyState until 'complete' (capped), then a small settle.
     Replaces fixed sleeps — snappier on fast pages, safer on slow ones."""
     deadline = time.monotonic() + timeout
@@ -785,7 +792,7 @@ def _execute_action(session: CDPSession, action: str, args: dict) -> str:
                 session.close()
                 session._ws_url = ws_url
                 session.connect()
-            except Exception as e:
+            except Exception:
                 # Fallback: navigate in current tab
                 session.send("Page.navigate", {"url": url}, timeout=15)
 

@@ -144,7 +144,6 @@ def _create_task(args: dict) -> str:
 
 def _list_tasks() -> str:
     from aria.task import tasks_dir, Task
-    import json
 
     pending_dir = tasks_dir() / "pending"
     running_dir = tasks_dir() / "running"

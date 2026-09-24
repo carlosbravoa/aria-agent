@@ -7,7 +7,7 @@ env dict that includes:
   - A full PATH covering all common user binary locations
   - HOME, XDG dirs so CLI tools can find their config/tokens
   - All vars defined in ~/.aria/.env (highest priority)
-    This is where you put tool-specific vars like GMAIL_ACCOUNT, API keys, etc.
+    This is where you put tool-specific vars like GOG_ACCOUNT, API keys, etc.
 """
 
 from __future__ import annotations
@@ -86,7 +86,7 @@ def build_env(include_secrets: bool = True) -> dict[str, str]:
     background process.
 
     Priority (highest to lowest):
-      1. Variables in ~/.aria/.env  ← put GMAIL_ACCOUNT etc. here
+      1. Variables in ~/.aria/.env  ← put GOG_ACCOUNT etc. here
       2. Current process environment
       3. Constructed PATH and XDG defaults
 

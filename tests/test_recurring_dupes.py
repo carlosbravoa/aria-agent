@@ -143,7 +143,7 @@ def test_exhausted_retries_keep_the_series_alive(minimal_env):
 
 
 def test_requeue_never_forks_a_series(minimal_env):
-    from aria.task import Task, enqueue, _requeue_series
+    from aria.task import Task, _requeue_series
     t = Task(prompt="p", recur="daily", run_after=_past())
     _requeue_series(t)
     _requeue_series(t)                             # e.g. reaper + owner both finish

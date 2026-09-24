@@ -200,6 +200,8 @@ def _extract_body(msg: email.message.Message, max_chars: int = 2000) -> str:
             if ct == "text/plain" and "attachment" not in cd:
                 try:
                     payload = part.get_payload(decode=True)
+                    if not isinstance(payload, bytes):
+                        continue
                     charset = part.get_content_charset() or "utf-8"
                     text = payload.decode(charset, errors="replace")
                     return text[:max_chars] + ("…" if len(text) > max_chars else "")
@@ -209,6 +211,8 @@ def _extract_body(msg: email.message.Message, max_chars: int = 2000) -> str:
     else:
         try:
             payload = msg.get_payload(decode=True)
+            if not isinstance(payload, bytes):
+                return "(could not decode body)"
             charset = msg.get_content_charset() or "utf-8"
             text = payload.decode(charset, errors="replace")
             return text[:max_chars] + ("…" if len(text) > max_chars else "")
@@ -278,7 +282,7 @@ def _dispatch(conn: imaplib.IMAP4_SSL, action: str, args: dict) -> str:
             _, data = conn.list()
             folders = []
             for item in data:
-                if item:
+                if isinstance(item, bytes):
                     parts = item.decode().split('"/"')
                     name  = parts[-1].strip().strip('"')
                     folders.append(name)
@@ -286,8 +290,8 @@ def _dispatch(conn: imaplib.IMAP4_SSL, action: str, args: dict) -> str:
 
         case "list":
             conn.select(folder, readonly=True)
-            _, data = conn.uid("search", None, "ALL")
-            uids = data[0].split()
+            _, data = conn.uid("search", None, "ALL")  # type: ignore[arg-type]  # charset=None is valid; stub says str
+            uids = _search_uids(data)
             if not uids:
                 return f"[imap] No messages in {folder}."
             # Most recent first
@@ -297,8 +301,8 @@ def _dispatch(conn: imaplib.IMAP4_SSL, action: str, args: dict) -> str:
         case "search":
             conn.select(folder, readonly=True)
             criteria = _translate_query(query)
-            _, data  = conn.uid("search", None, criteria)
-            uids = data[0].split()
+            _, data  = conn.uid("search", None, criteria)  # type: ignore[arg-type]  # charset=None is valid; stub says str
+            uids = _search_uids(data)
             if not uids:
                 return f"[imap] No messages matching '{query}'."
             recent = uids[-max_results:][::-1]
@@ -309,10 +313,10 @@ def _dispatch(conn: imaplib.IMAP4_SSL, action: str, args: dict) -> str:
                 return "[imap] 'uid' is required for read."
             conn.select(folder, readonly=True)
             _, data = conn.uid("fetch", uid, "(RFC822)")
-            if not data or not data[0]:
+            # A missing UID yields no (header, body) tuple — possibly a bare b")"
+            if not data or not isinstance(data[0], tuple):
                 return f"[imap] Message {uid} not found."
-            raw = data[0][1]
-            msg = email.message_from_bytes(raw)
+            msg = email.message_from_bytes(data[0][1])
             return _format_message(uid, msg, full=True)
 
         case "mark_read":
@@ -360,15 +364,20 @@ def _dispatch(conn: imaplib.IMAP4_SSL, action: str, args: dict) -> str:
             return f"[imap] Unknown action: {action}"
 
 
+def _search_uids(data: list) -> list[bytes]:
+    """UIDs from a UID SEARCH response (data[0] is b"1 2 3", or absent)."""
+    first = data[0] if data else None
+    return first.split() if isinstance(first, bytes) else []
+
+
 def _fetch_headers(conn: imaplib.IMAP4_SSL, uids: list[bytes]) -> str:
     """Fetch and format a list of message headers."""
     lines = []
     for uid in uids:
         try:
-            _, data = conn.uid("fetch", uid, "(BODY.PEEK[HEADER.FIELDS (FROM SUBJECT DATE)])")
-            if data and data[0]:
-                raw = data[0][1]
-                msg = email.message_from_bytes(raw)
+            _, data = conn.uid("fetch", uid.decode(), "(BODY.PEEK[HEADER.FIELDS (FROM SUBJECT DATE)])")
+            if data and isinstance(data[0], tuple):
+                msg = email.message_from_bytes(data[0][1])
                 lines.append(_format_message(uid.decode(), msg))
         except Exception:
             lines.append(f"[{uid.decode()}] (error fetching)")

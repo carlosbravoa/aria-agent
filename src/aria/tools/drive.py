@@ -208,8 +208,8 @@ def execute(args: dict) -> str:
             cmd = f"{_CLI} drive download {file_id} --out {shlex.quote(path)}"
             if fmt:
                 cmd += f" --format {shlex.quote(fmt)}"
-            result = _run(cmd)
-            return result or f"[drive] Downloaded to {path}"
+            out = _run(cmd)
+            return out or f"[drive] Downloaded to {path}"
 
         case "upload":
             if not path:

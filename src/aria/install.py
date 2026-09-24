@@ -292,7 +292,8 @@ def configure_env(dry_run: bool = False) -> tuple[dict[str, str], set[str]]:
             ok("WhatsApp bridge files already up to date.")
         if res["source"] and (res["package_changed"]
                               or not (res["dest"] / "node_modules").exists()):
-            info(f"Run: cd {res['dest']} && npm install")
+            npm = "npm ci" if (res["dest"] / "package-lock.json").exists() else "npm install"
+            info(f"Run: cd {res['dest']} && {npm}")
     else:
         for k in ("ARIA_WA_PORT", "ARIA_WA_PUSH_PORT", "ARIA_WA_SECRET", "WHATSAPP_ALLOWED"):
             values[k] = e(k)
@@ -601,8 +602,8 @@ def install_services(features: set[str] | None = None, dry_run: bool = False) ->
     elif dry_run:
         info("[dry-run] loginctl enable-linger")
     else:
-        r = subprocess.run(["loginctl", "enable-linger"], capture_output=True)
-        ok("Enabled") if r.returncode == 0 else warn("Try: sudo loginctl enable-linger $USER")
+        linger = subprocess.run(["loginctl", "enable-linger"], capture_output=True)
+        ok("Enabled") if linger.returncode == 0 else warn("Try: sudo loginctl enable-linger $USER")
 
     section("Starting services")
     if dry_run:

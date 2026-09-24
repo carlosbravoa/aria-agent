@@ -46,7 +46,8 @@ def minimal_env(tmp_path, monkeypatch):
     monkeypatch.setenv("ARIA_REFLECT_EVERY", "0")  # no background reflect thread
     # Module-level paths computed from the REAL home at import time — redirect
     # them too, or tests write to the developer's ~/.aria.
-    import aria.agent, aria.tools.file_access
+    import aria.agent
+    import aria.tools.file_access
     monkeypatch.setattr(aria.agent, "_PROFILE_STATE", home / ".aria" / ".last_profile")
     monkeypatch.setattr(aria.tools.file_access, "_AUTH_FILE",
                         home / ".aria" / "authorized_dirs.json")

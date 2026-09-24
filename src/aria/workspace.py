@@ -17,6 +17,7 @@ import tempfile
 import threading
 from datetime import datetime
 from pathlib import Path
+from types import ModuleType
 
 # Defaults only — the live values are read from the environment at use time
 # (_window_messages()/_window_msg_chars()), because this module is imported
@@ -120,6 +121,7 @@ def _secure_write(path: Path, content: str) -> None:
 # flock on a sibling `.<name>.lock` file. Re-entrant per thread (flock on a
 # second fd of the same file would self-deadlock); no-op where fcntl is missing.
 
+_fcntl: ModuleType | None
 try:
     import fcntl as _fcntl
 except ImportError:          # pragma: no cover — Windows

@@ -197,7 +197,7 @@ def _python_grep(root, pattern, glob, ignore_case, limit):
                 continue
             fp = os.path.join(dirpath, fn)
             try:
-                with open(fp, "r", encoding="utf-8", errors="strict") as f:
+                with open(fp, encoding="utf-8", errors="strict") as f:
                     for i, line in enumerate(f, 1):
                         if rx.search(line):
                             hits.append(f"{fp}:{i}:{line.rstrip()}")

@@ -38,7 +38,6 @@ import http.server
 import json
 import logging
 import os
-import threading
 import time
 
 from aria import config

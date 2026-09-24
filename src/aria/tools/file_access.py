@@ -215,7 +215,7 @@ def _read_allow() -> list[Path]:
     )
     # Add user-authorized dirs (both read and write grants allow reading)
     authorized = _load_authorized()
-    for p, level in authorized.items():
+    for p in authorized:
         try:
             base.append(Path(p).expanduser().resolve())
         except Exception:
@@ -646,9 +646,9 @@ def execute(args: dict) -> str:
             work = path.read_text(encoding="utf-8")
             # Validate + apply on a working copy; write only if ALL succeed, so a
             # bad edit never leaves the file half-changed.
-            for i, e in enumerate(edits):
-                old = e.get("old", "")
-                new = e.get("new", "")
+            for i, ed in enumerate(edits):
+                old = ed.get("old", "")
+                new = ed.get("new", "")
                 if not old:
                     return f"[file_access] edit #{i+1}: 'old' is required — no changes made."
                 count = work.count(old)
@@ -667,7 +667,7 @@ def execute(args: dict) -> str:
             if not path.exists():
                 return f"[file_access] Not found: {path}"
             try:
-                start = int(args.get("start_line"))
+                start = int(args.get("start_line", ""))
                 end   = int(args.get("end_line", start))
             except (TypeError, ValueError):
                 return "[file_access] replace_lines needs integer start_line/end_line."
@@ -696,8 +696,8 @@ def execute(args: dict) -> str:
                 return f"[file_access] Not found: {path}"
             if path.is_file():
                 size  = path.stat().st_size
-                lines = sum(1 for _ in path.open(encoding="utf-8", errors="replace"))
-                return f"{path}  ({lines} lines, {size} bytes)"
+                n_lines = sum(1 for _ in path.open(encoding="utf-8", errors="replace"))
+                return f"{path}  ({n_lines} lines, {size} bytes)"
             entries = sorted(path.iterdir(), key=lambda p: (p.is_file(), p.name))
             return "\n".join(
                 f"{'📁' if e.is_dir() else '📄'} {e.name}" for e in entries

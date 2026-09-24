@@ -1,7 +1,5 @@
 """Tests for per-project context: conventions file + project-scoped notes (#3)."""
 
-import os
-from pathlib import Path
 
 import pytest
 

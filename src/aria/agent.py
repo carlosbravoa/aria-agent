@@ -23,7 +23,7 @@ from __future__ import annotations
 import json
 import os
 import re
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 from pathlib import Path
 from typing import Any
 
@@ -1075,7 +1075,7 @@ class Agent:
         calls_per_tool: dict[str, int] = {}   # thrash guard (per turn)
         # Friction stats for this turn (see _flag_friction). calls_per_tool is
         # shared by reference so the flag can report per-tool call counts.
-        fr = {"calls": 0, "errors": 0, "err_per_tool": {}, "consec": {},
+        fr: dict[str, Any] = {"calls": 0, "errors": 0, "err_per_tool": {}, "consec": {},
               "repeats": 0, "hard_stop": False, "calls_per_tool": calls_per_tool}
         # Higher loop limit for browser tasks — they need many sequential steps
         # (navigate, snapshot, click, type...).
@@ -1197,7 +1197,7 @@ class Agent:
                 results = self._run_calls_concurrent(indexed)
             else:
                 results = [self._run_one_call(tc, idx) for idx, tc in indexed]
-            for (idx, tc), result in zip(indexed, results):
+            for (_, tc), result in zip(indexed, results, strict=True):
                 name = tc.function.name
                 calls_per_tool[name] = calls_per_tool.get(name, 0) + 1
                 content = _wrap_untrusted(result)
@@ -1329,7 +1329,7 @@ class Agent:
         """One model call (always non-streaming). Returns the assistant `message`,
         or an `[error] …` string sentinel on failure (never raises). The final
         answer is rendered once by `_render_answer` after the loop settles."""
-        now      = datetime.now(timezone.utc).astimezone()
+        now      = datetime.now(UTC).astimezone()
         time_ctx = f"Current date and time: {now.strftime('%A, %Y-%m-%d %H:%M %Z')}"
         from aria import __version__
         # Keep the (large) system prompt byte-stable so the provider's prefix
@@ -1415,7 +1415,7 @@ class Agent:
             path = Path.home() / ".aria" / "usage.jsonl"
             path.parent.mkdir(parents=True, exist_ok=True)
             rec = {
-                "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                "ts": datetime.now(UTC).isoformat(timespec="seconds"),
                 "model": self.model, "profile": self._active_profile,
                 "channel": self.window_key, "in": tin, "out": tout,
             }

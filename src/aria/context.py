@@ -31,7 +31,7 @@ class ChannelContext(NamedTuple):
     user_id: str
 
 
-_active: contextvars.ContextVar["ChannelContext | None"] = contextvars.ContextVar(
+_active: contextvars.ContextVar[ChannelContext | None] = contextvars.ContextVar(
     "aria_active_channel", default=None
 )
 
@@ -50,7 +50,7 @@ def reset(token) -> None:
         _active.set(None)
 
 
-def current() -> "ChannelContext | None":
+def current() -> ChannelContext | None:
     """The active (channel, user_id), or None outside a channel turn."""
     return _active.get()
 

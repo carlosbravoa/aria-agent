@@ -122,7 +122,7 @@ class Task:
         }, indent=2, ensure_ascii=False)
 
     @staticmethod
-    def from_text(text: str) -> "Task":
+    def from_text(text: str) -> Task:
         """Parse a task file. Supports both JSON (current) and legacy key: value format."""
         text = text.strip()
         if text.startswith("{"):
@@ -233,7 +233,7 @@ class Task:
         except ValueError:
             return True  # malformed date → run immediately
 
-    def next_occurrence(self) -> "Task | None":
+    def next_occurrence(self) -> Task | None:
         """The next occurrence of this recurring task (same series, fresh id and
         retry budget), or None if it does not recur."""
         next_run = self.next_run_after()
