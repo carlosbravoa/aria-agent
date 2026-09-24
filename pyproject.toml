@@ -9,7 +9,7 @@ description = "A lean local-LLM agent with persistent workspace and pluggable to
 readme = "README.md"
 requires-python = ">=3.11"
 # Upper bounds at the next major: a self-updating agent with many users must
-# not pick up a breaking release on `pip install` (CI tests the latest allowed).
+# not pick up a breaking release on `pip install`.
 dependencies = [
     "openai>=1.0.0,<3",
     "python-dotenv>=1.0.0,<2",

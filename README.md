@@ -1226,7 +1226,8 @@ smoke tests (every module imports, required module-level symbols exist).
   import aria.agent, aria.workspace, aria.channel, aria.supervisor, aria.reflect, aria.task, aria.main
   from aria import tools; print(len(tools.load_all()), 'tools; all modules import OK')"
   ```
-  CI runs the same check on every module, plus `ruff check src tests` and `mypy`.
+  `pre-commit install` (after `pip install ".[dev]"`) runs this plus
+  `ruff check src tests` and `mypy` on every commit.
 - **New env vars** go in `setup.py`'s template as commented placeholders, and in
   the README's Configure section.
 
