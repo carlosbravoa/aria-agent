@@ -340,11 +340,12 @@ def _confirm(command: str, reason: str = "") -> bool:
 # Read-only commands allowed to run unattended under ARIA_SHELL_UNATTENDED=safe.
 # Deliberately excluded: sed/awk (write files / spawn commands), python/node/…
 # (arbitrary code, incl. `python -c`), curl/wget (exfiltration + download-run),
-# env/xargs/sudo and other wrappers (command smuggling), tee/chmod (writes).
+# env/xargs/sudo and other wrappers (command smuggling), tee/chmod (writes),
+# printenv (dumps the environment — API keys/tokens).
 _SAFE_UNATTENDED_CMDS = {
     "ls", "cat", "head", "tail", "grep", "rg", "find", "wc", "echo", "printf",
     "pwd", "whoami", "date", "ps", "df", "du", "stat", "file", "which",
-    "uname", "hostname", "id", "uptime", "free", "printenv", "sort", "uniq",
+    "uname", "hostname", "id", "uptime", "free", "sort", "uniq",
     "cut", "tr", "diff", "cmp", "md5sum", "sha1sum", "sha256sum", "basename",
     "dirname", "readlink", "realpath", "tree", "true", "false", "git",
 }
@@ -355,6 +356,52 @@ _GIT_SAFE_SUBCMDS = {
 }
 # Output redirections write files; only /dev/null and fd-dups (2>&1) are benign.
 _WRITE_REDIRECT_RE = re.compile(r"\d?>{1,2}(?!\s*(?:&\d|/dev/null\b))")
+# Flags that turn an allowlisted read-only command into code execution or a
+# file write: rg --pre runs a preprocessor binary; git -c/--config-env can set
+# core.pager/core.fsmonitor/alias.* (arbitrary commands), --exec-path swaps the
+# helper dir, --output/--ext-diff write files / run diff drivers; find
+# -fprint* writes; sort --compress-program runs a program and -o writes; tree
+# -o writes; date -s sets the clock.
+_UNSAFE_FLAGS = {
+    "rg":   re.compile(r"(?:^|\s)--pre(?:-glob)?\b"),
+    "git":  re.compile(r"(?:^|\s)(?:--output\S*|--ext-diff\b"
+                       r"|--upload-pack\S*|--receive-pack\S*)"),
+    "find": re.compile(r"(?:^|\s)-(?:exec|execdir|ok|okdir|delete|fprint0?|fprintf|fls)\b"),
+    "sort": re.compile(r"(?:^|\s)(?:--compress-program\S*|-o\S*|--output\S*"
+                       r"|-[a-zA-Z]*o\S*)"),
+    "tree": re.compile(r"(?:^|\s)-o\b"),
+    "date": re.compile(r"(?:^|\s)(?:-s\b|--set\b|--set=)"),
+}
+# git GLOBAL options (before the subcommand) that run code. Checked only in
+# that position: `git grep -c` (count) is harmless.
+_GIT_UNSAFE_GLOBAL = re.compile(r"^(?:-c\S*|--config-env\S*|--exec-path\S*)$")
+# Env prefixes that only affect locale/formatting — `LC_ALL=C sort` is fine.
+_BENIGN_ENV_PREFIX = re.compile(
+    r"^(?:(?:LC_\w+|LANG|LANGUAGE|TZ|TERM|COLUMNS|NO_COLOR)=\S*\s+)+")
+# uniq options that take a separate argument.
+_UNIQ_ARG_OPTS = {"-f", "-s", "-w", "--skip-fields", "--skip-chars", "--check-chars"}
+
+
+def _git_global_unsafe(s: str) -> str:
+    """The first code-running git global option (before the subcommand)."""
+    for t in s.split()[1:]:
+        if not t.startswith("-"):
+            return ""
+        if _GIT_UNSAFE_GLOBAL.match(t):
+            return t
+    return ""
+
+
+def _uniq_operands(s: str) -> int:
+    n, skip = 0, False
+    for t in s.split()[1:]:
+        if skip:
+            skip = False
+        elif t in _UNIQ_ARG_OPTS:
+            skip = True
+        elif not t.startswith("-"):
+            n += 1
+    return n
 
 
 def _safe_allowlist() -> set[str]:
@@ -375,7 +422,8 @@ def _safe_refusal(what: str) -> str:
 
 
 def _git_subcommand(s: str) -> str:
-    """First non-flag token after `git`, skipping arg-taking globals (-C, -c)."""
+    """First non-flag token after `git`, skipping arg-taking globals (-C, -c).
+    (-c itself is refused by _UNSAFE_FLAGS before this matters.)"""
     toks = s.split()[1:]
     skip_next = False
     for t in toks:
@@ -406,19 +454,32 @@ def _check_safe_unattended(payload: str) -> str | None:
         s = seg.strip()
         if not s or s.startswith("#"):
             continue
-        s = re.sub(r"^(?:\w+=\S*\s+)+", "", s)          # strip FOO=bar env prefixes
+        # FOO=bar prefixes are refused, not stripped: GIT_EXTERNAL_DIFF=…,
+        # GIT_CONFIG_*=…, RIPGREP_CONFIG_PATH=… turn a read-only verb into
+        # arbitrary code execution.
+        s = _BENIGN_ENV_PREFIX.sub("", s)
+        if re.match(r"\w+=", s):
+            return _safe_refusal("environment variable assignment (FOO=bar cmd)")
         m = re.match(r"[\"']?([\w./-]+)", s)
         if not m:
             return _safe_refusal(s.split()[0] if s.split() else s)
         cmd = os.path.basename(m.group(1)).lower()
         if cmd not in allow:
             return _safe_refusal(cmd)
+        unsafe = _UNSAFE_FLAGS.get(cmd)
+        if unsafe:
+            hit = unsafe.search(s[m.end():])
+            if hit:
+                return _safe_refusal(f"{cmd} {hit.group(0).strip()}")
         if cmd == "git":
+            bad = _git_global_unsafe(s)
+            if bad:
+                return _safe_refusal(f"git {bad}")
             sub = _git_subcommand(s)
             if sub not in _GIT_SAFE_SUBCMDS:
                 return _safe_refusal(f"git {sub}".strip())
-        if cmd == "find" and re.search(r"-(?:exec|execdir|ok|okdir|delete)\b", s):
-            return _safe_refusal("find -exec/-delete")
+        if cmd == "uniq" and _uniq_operands(s) > 1:
+            return _safe_refusal("uniq INPUT OUTPUT (writes a file)")
     return None
 
 
@@ -476,6 +537,50 @@ def _gate(payload: str) -> str | None:
 _ALLOWED_INTERPRETERS = {
     "bash", "sh", "python3", "python", "node", "ruby", "perl", "raku",
 }
+# Extra interpreter flags accepted after the binary ("python3 -u"). Anything
+# else is refused: -c/-e/-m/-r/--eval/--require would run code that never
+# passes through _gate.
+_SHELL_FLAG_RE = re.compile(r"^[-+][euxvn]+$|^[-+]o$|^(?:pipefail|errexit|nounset|xtrace)$")
+_INTERPRETER_FLAGS = {
+    "python3": {"-u", "-B", "-E", "-I", "-O", "-OO", "-s", "-S", "-q"},
+    "python":  {"-u", "-B", "-E", "-I", "-O", "-OO", "-s", "-S", "-q"},
+    "node":    {"--no-warnings", "--trace-warnings", "--enable-source-maps"},
+    "ruby":    {"-w", "-W", "-v"},
+    "perl":    {"-w", "-W", "-T", "-t"},
+    "raku":    set(),
+}
+# Upper bound on the `timeout` argument (seconds).
+_MAX_TIMEOUT = 3600
+
+
+def _interpreter_argv(interpreter: str) -> tuple[list[str], str | None]:
+    """Split 'python3 -u' into argv, validating the binary against the
+    whitelist and every extra token against that interpreter's safe flags.
+    Returns (argv, None) or ([], error)."""
+    import shlex
+    allowed = ", ".join(sorted(_ALLOWED_INTERPRETERS))
+    try:
+        parts = shlex.split(interpreter) or ["bash"]
+    except ValueError:
+        return [], f"[shell_run] Unparseable interpreter: '{interpreter}'."
+    binary, extra = parts[0], parts[1:]
+    if binary not in _ALLOWED_INTERPRETERS:
+        return [], f"[shell_run] Interpreter not allowed: '{binary}'. Allowed: {allowed}"
+    for flag in extra:
+        ok = (_SHELL_FLAG_RE.match(flag) if binary in ("bash", "sh")
+              else flag in _INTERPRETER_FLAGS.get(binary, set()))
+        if not ok:
+            return [], (f"[shell_run] Interpreter flag not allowed: '{flag}'. Put "
+                        "the code in 'script' instead of interpreter arguments.")
+    return parts, None
+
+
+def _timeout(raw) -> int:
+    """Coerce the timeout arg to an int in [1, _MAX_TIMEOUT]; default 60."""
+    try:
+        return max(1, min(int(raw), _MAX_TIMEOUT))
+    except (TypeError, ValueError):
+        return 60
 
 
 def execute(args: dict) -> str:
@@ -484,7 +589,7 @@ def execute(args: dict) -> str:
     interpreter    = args.get("interpreter", "bash").strip()
     stdin_text     = args.get("stdin")
     cwd            = args.get("cwd")
-    timeout        = int(args.get("timeout", 60))
+    timeout        = _timeout(args.get("timeout", 60))
 
     # ── Auto-redirect: command with quotes → script mode ──────────────────
     # A command containing quotes/backticks runs more predictably as a script
@@ -495,13 +600,13 @@ def execute(args: dict) -> str:
 
     # ── Script mode ───────────────────────────────────────────────────────
     if script_content:
-        # Whitelist interpreter — prevent injection via metacharacters
-        interp_bin = interpreter.split()[0]  # e.g. "python3" from "python3 -u"
-        if interp_bin not in _ALLOWED_INTERPRETERS:
-            return (
-                f"[shell_run] Interpreter not allowed: '{interp_bin}'. "
-                f"Allowed: {', '.join(sorted(_ALLOWED_INTERPRETERS))}"
-            )
+        # Whitelist interpreter — prevent injection via metacharacters. Split
+        # "python3 -u" into separate argv elements (passing it as ONE element
+        # made exec look for a binary literally named "python3 -u").
+        interp_argv, err = _interpreter_argv(interpreter)
+        if err:
+            return err
+        interp_bin = interp_argv[0]
         # Safety policy applies to script content too — script mode used to skip
         # every check, so a destructive script ran unguarded in any context.
         gate = _gate(script_content)
@@ -515,7 +620,7 @@ def execute(args: dict) -> str:
             tmp_path = tmp.name
         try:
             # Pass as a list — shell=False, no metacharacter risk
-            return _run_script([interpreter, tmp_path],
+            return _run_script([*interp_argv, tmp_path],
                                stdin_text=stdin_text, cwd=cwd, timeout=timeout)
         finally:
             Path(tmp_path).unlink(missing_ok=True)
@@ -566,7 +671,7 @@ def _run_script(
             text=True,
             timeout=timeout,
             cwd=cwd,
-            env=build_env(),
+            env=build_env(include_secrets=False),
             input=stdin_text,
         )
         out = result.stdout.strip()
@@ -620,7 +725,7 @@ def _run_shell(
             result = subprocess.run(
                 [*sandbox, "bash", "-c", command],
                 shell=False, capture_output=True, text=True,
-                timeout=timeout, cwd=cwd, env=build_env(), input=stdin_text,
+                timeout=timeout, cwd=cwd, env=build_env(include_secrets=False), input=stdin_text,
             )
         else:
             result = subprocess.run(
@@ -630,7 +735,7 @@ def _run_shell(
                 text=True,
                 timeout=timeout,
                 cwd=cwd,
-                env=build_env(),
+                env=build_env(include_secrets=False),
                 input=stdin_text,
             )
         out = result.stdout.strip()

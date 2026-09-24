@@ -769,8 +769,14 @@ def _execute_action(session: CDPSession, action: str, args: dict) -> str:
             # Open in a new tab — don't clobber whatever the user has open
             try:
                 import httpx
-                # Use CDP /json/new endpoint to create a new tab
-                r = httpx.get(f"{_CDP_HTTP}/json/new?{url}", timeout=5)
+                from urllib.parse import quote
+                # CDP /json/new creates a new tab. Chrome 111+ rejects GET here
+                # (PUT only); older browsers only accept GET. The target URL is
+                # percent-encoded so its own ?/&/# don't get parsed as ours.
+                endpoint = f"{_CDP_HTTP}/json/new?{quote(url, safe='')}"
+                r = httpx.put(endpoint, timeout=5)
+                if r.status_code >= 400:
+                    r = httpx.get(endpoint, timeout=5)
                 new_tab = r.json()
                 ws_url  = new_tab.get("webSocketDebuggerUrl")
                 if not ws_url:

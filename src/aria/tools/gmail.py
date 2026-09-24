@@ -130,7 +130,11 @@ def _format_threads(raw: str) -> str:
 
 def execute(args: dict) -> str:
     action = args["action"]
-    n = args.get("max_results", 10)
+    # Coerce to int — this is interpolated into a command line unquoted.
+    try:
+        n = max(1, int(args.get("max_results", 10)))
+    except (TypeError, ValueError):
+        n = 10
 
     match action:
         case "list":

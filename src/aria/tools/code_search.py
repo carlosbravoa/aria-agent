@@ -76,10 +76,19 @@ def execute(args: dict) -> str:
     pattern = args.get("pattern", "")
     if not pattern:
         return "[code_search] 'pattern' is required."
-    root = Path(args.get("path") or ".").expanduser()
+    root = Path(args.get("path") or ".").expanduser().resolve()
     if not root.exists():
         return f"[code_search] Path not found: {root}"
-    limit = int(args.get("max_results") or _MAX_RESULTS)
+    # Same permanent block-list as file_access: a search must not become a way
+    # to read ~/.aria/.env, ~/.ssh, cloud creds, … (hits under a blocked subtree
+    # of an allowed root are filtered out below too).
+    from aria.tools.file_access import _is_blocked
+    if _is_blocked(root):
+        return f"[code_search] Access denied — path is in a protected location: {root}"
+    try:
+        limit = max(1, int(args.get("max_results") or _MAX_RESULTS))
+    except (TypeError, ValueError):
+        limit = _MAX_RESULTS
 
     if action == "files":
         return _find_files(root, pattern, limit)
@@ -87,12 +96,32 @@ def execute(args: dict) -> str:
                    bool(args.get("ignore_case")), limit)
 
 
+def _prune(dirpath: str, dirnames: list[str]) -> None:
+    """os.walk pruning: skip noise dirs and anything file_access blocks."""
+    from aria.tools.file_access import _is_blocked
+    dirnames[:] = [d for d in dirnames if d not in _SKIP_DIRS
+                   and not _is_blocked(Path(dirpath, d))]
+
+
+def _blocked_file(dirpath: str, fn: str) -> bool:
+    from aria.tools.file_access import _is_blocked
+    return _is_blocked(Path(dirpath, fn).resolve())   # resolve: symlinks
+
+
+def _drop_blocked(lines: list[str], root: Path) -> list[str]:
+    """Remove `path:line:text` hits whose path is in a blocked location
+    (relative paths, as git grep prints them, are taken relative to root)."""
+    from aria.tools.file_access import _is_blocked
+    return [ln for ln in lines
+            if not _is_blocked(Path(root, ln.split(":", 1)[0]).resolve())]
+
+
 def _find_files(root: Path, glob: str, limit: int) -> str:
     matches: list[str] = []
     for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = [d for d in dirnames if d not in _SKIP_DIRS]
+        _prune(dirpath, dirnames)
         for fn in filenames:
-            if Path(fn).match(glob):
+            if Path(fn).match(glob) and not _blocked_file(dirpath, fn):
                 matches.append(os.path.join(dirpath, fn))
                 if len(matches) >= limit:
                     break
@@ -128,7 +157,7 @@ def _ripgrep(root, pattern, glob, ignore_case, limit):
     cmd += ["--regexp", pattern, str(root)]
     try:
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=30,
-                           env=build_env())
+                           env=build_env(include_secrets=False))
     except Exception:
         return None
     if r.returncode not in (0, 1):       # 1 = no matches (not an error)
@@ -145,7 +174,7 @@ def _git_grep(root, pattern, glob, ignore_case, limit):
         cmd += ["--", glob]
     try:
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=30,
-                           env=build_env())
+                           env=build_env(include_secrets=False))
     except Exception:
         return None
     if r.returncode not in (0, 1):
@@ -160,9 +189,11 @@ def _python_grep(root, pattern, glob, ignore_case, limit):
         return f"[code_search] Bad regex: {exc}"
     hits: list[str] = []
     for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = [d for d in dirnames if d not in _SKIP_DIRS]
+        _prune(dirpath, dirnames)
         for fn in filenames:
             if glob and not Path(fn).match(glob):
+                continue
+            if _blocked_file(dirpath, fn):
                 continue
             fp = os.path.join(dirpath, fn)
             try:
@@ -178,6 +209,7 @@ def _python_grep(root, pattern, glob, ignore_case, limit):
 
 
 def _format_lines(lines, pattern, root, limit):
+    lines = _drop_blocked(lines, root)
     capped = len(lines) > limit
     return _join(lines[:limit], pattern, limit, capped=capped)
 

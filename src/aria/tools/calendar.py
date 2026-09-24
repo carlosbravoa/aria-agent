@@ -147,7 +147,10 @@ def execute(args: dict) -> str:
     attendees   = args.get("attendees", "")
     location    = args.get("location", "")
     status      = args.get("status", "")
-    days        = int(args.get("days", 7))
+    try:
+        days    = max(1, int(args.get("days", 7)))
+    except (TypeError, ValueError):
+        days    = 7
 
     match action:
 

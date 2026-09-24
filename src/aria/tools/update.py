@@ -81,6 +81,13 @@ DEFINITION = {
                 "description": "Show what would happen without making changes.",
                 "default": False,
             },
+            "force": {
+                "type": "boolean",
+                "description": "Update even if the source dir has uncommitted "
+                               "changes (they are DISCARDED by the hard reset). "
+                               "Only set this when the user explicitly agrees.",
+                "default": False,
+            },
         },
     },
 }
@@ -206,6 +213,16 @@ def execute(args: dict) -> str:
         return "\n".join(lines)
 
     # ── 3. Hard-reset to the target (deploy clone; avoids merge conflicts) ────
+    # A hard reset silently destroys local edits — refuse on a dirty tree
+    # unless the user explicitly asked to force it.
+    rc, dirty, err = _git(["status", "--porcelain", "--untracked-files=no"], src)
+    if rc != 0:
+        return f"[update] git status failed:\n{err}"
+    if dirty and not args.get("force"):
+        return ("[update] Refused — the source directory has uncommitted changes "
+                f"that `git reset --hard` would DESTROY:\n{dirty}\n"
+                f"Commit or stash them in {src}, or re-run with force=true to "
+                "discard them.")
     rc, _, err = _git(["reset", "--hard", target_sha], src)
     if rc != 0:
         return f"[update] git reset failed:\n{err}"

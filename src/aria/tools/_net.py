@@ -13,6 +13,7 @@ Underscore-prefixed so the tool auto-loader skips it (it's a helper, not a tool)
 from __future__ import annotations
 
 import ipaddress
+import os
 import socket
 from urllib.parse import urljoin, urlparse
 
@@ -32,10 +33,34 @@ def _ip_is_blocked(ip: str, *, allow_loopback: bool, allow_private: bool) -> boo
     # (169.254.169.254), the highest-impact SSRF target.
     if addr.is_link_local or addr.is_reserved or addr.is_multicast or addr.is_unspecified:
         return True
-    if addr.is_loopback and not allow_loopback:
-        return True
-    if addr.is_private and not allow_private:
-        return True
+    # IPv4-mapped IPv6 (::ffff:127.0.0.1) — judge the embedded IPv4 address.
+    mapped = getattr(addr, "ipv4_mapped", None)
+    if mapped is not None:
+        return _ip_is_blocked(str(mapped), allow_loopback=allow_loopback,
+                              allow_private=allow_private)
+    if addr.is_loopback:
+        return not allow_loopback
+    # Anything not globally routable — RFC1918, CGNAT 100.64/10, ULA fc00::/7,
+    # benchmarking/documentation ranges… — is "private" for SSRF purposes.
+    # (is_private alone misses 100.64/10.)
+    if addr.is_private or not addr.is_global:
+        return not (allow_private or _user_allowed(addr))
+    return False
+
+
+def _user_allowed(addr) -> bool:
+    """ARIA_NET_ALLOW: comma-separated CIDRs the user explicitly trusts, e.g.
+    100.64.0.0/10 (Tailscale) or 198.18.0.0/15 (fake-IP proxies such as
+    Clash/sing-box, where EVERY hostname resolves into that range)."""
+    raw = os.environ.get("ARIA_NET_ALLOW", "")
+    for cidr in (c.strip() for c in raw.split(",")):
+        if not cidr:
+            continue
+        try:
+            if addr in ipaddress.ip_network(cidr, strict=False):
+                return True
+        except ValueError:
+            continue
     return False
 
 

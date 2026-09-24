@@ -34,6 +34,7 @@ Configure in ~/.aria/.env:
 from __future__ import annotations
 
 import base64
+import functools
 import json
 import os
 import shutil
@@ -55,13 +56,47 @@ _BLOCKED = [
     "~/.aws",
     "~/.azure",
     "~/.gcloud",
+    "~/.config/gcloud",
     "~/.netrc",
+    "~/.kube",
+    "~/.docker",
+    "~/.git-credentials",
+    "~/.config/gh",
+    "~/.local/share/keyrings",
+    "~/.pgpass",
+    # Browser profiles: cookies, saved passwords, session tokens.
+    "~/.mozilla",
+    "~/.config/google-chrome",
+    "~/.config/chromium",
+    "~/snap/chromium",
+    "~/snap/firefox",
     "/etc",
     "/proc",
     "/sys",
     "/dev",
     "/boot",
 ]
+
+# Readable but never WRITABLE: shell startup files and user service/autostart
+# dirs — a write there is code execution at next login (persistence).
+_WRITE_BLOCKED = [
+    "~/.bashrc",
+    "~/.bash_profile",
+    "~/.bash_login",
+    "~/.bash_logout",
+    "~/.profile",
+    "~/.zshrc",
+    "~/.zshenv",
+    "~/.zprofile",
+    "~/.zlogin",
+    "~/.config/fish",
+    "~/.config/systemd",
+    "~/.config/autostart",
+    "~/.config/environment.d",
+    "~/.local/bin",
+]
+
+_WRITE_ACTIONS = ("write", "append", "patch", "edit", "replace_lines", "undo", "delete")
 
 # Authorization request sentinel — agent uses this to detect a permission request
 _AUTH_REQUEST = "[file_access:auth_required]"
@@ -120,8 +155,16 @@ def _undo(path: Path) -> str:
     return result
 
 
-def _blocked_paths() -> list[Path]:
-    return [Path(p).expanduser().resolve() for p in _BLOCKED]
+def _blocked_paths(write: bool = False) -> list[Path]:
+    # Cached per HOME: resolving ~35 paths on every call made code_search's
+    # per-file checks slow on large trees.
+    return list(_resolved_blocked(write, str(Path.home())))
+
+
+@functools.lru_cache(maxsize=8)
+def _resolved_blocked(write: bool, _home: str) -> tuple[Path, ...]:
+    paths = _BLOCKED + (_WRITE_BLOCKED if write else [])
+    return tuple(Path(p).expanduser().resolve() for p in paths)
 
 
 def _workspace() -> Path:
@@ -193,8 +236,9 @@ def _write_allow() -> list[Path]:
     return base
 
 
-def _is_blocked(p: Path) -> bool:
-    """Return True if path is in a permanently blocked location.
+def _is_blocked(p: Path, write: bool = False) -> bool:
+    """Return True if path is in a permanently blocked location (write=True also
+    applies _WRITE_BLOCKED).
 
     The agent's workspace lives under ~/.aria but is legitimately accessible
     (memory, soul, sessions), so it is carved out BEFORE the block check — this
@@ -207,7 +251,7 @@ def _is_blocked(p: Path) -> bool:
             return False
     except Exception:
         pass
-    for blocked in _blocked_paths():
+    for blocked in _blocked_paths(write):
         if p_str == str(blocked) or p_str.startswith(str(blocked) + "/"):
             return True
     return False
@@ -225,7 +269,7 @@ def _safe_path(raw: str, allow: list[Path], action: str = "") -> Path:
     p_str = str(p)
 
     # 1. Hard block — can never be authorized
-    if _is_blocked(p):
+    if _is_blocked(p, write=action in _WRITE_ACTIONS):
         raise ValueError(f"Access denied — path is in a protected location: {p}")
 
     # 2. Must be within an allowed directory
@@ -474,6 +518,17 @@ def resolve_readable(raw_path: str) -> tuple[Path | None, str | None]:
         return None, _auth_message(e, raw_path)
 
 
+def resolve_writable(raw_path: str) -> tuple[Path | None, str | None]:
+    """Write-side twin of resolve_readable: same allow-list and block-lists as
+    action='write'. For tools that save files locally (drive download)."""
+    try:
+        return _safe_path(raw_path, _write_allow(), "write"), None
+    except ValueError as e:
+        return None, f"[file_access] {e}"
+    except PermissionError as e:
+        return None, _auth_message(e, raw_path)
+
+
 def execute(args: dict) -> str:
     action: str  = args["action"]
     raw_path: str = args.get("path", "")
@@ -651,6 +706,11 @@ def execute(args: dict) -> str:
         case "delete":
             if not path.exists():
                 return f"[file_access] Not found: {path}"
+            # Never wipe the workspace itself or the whole memory store — only
+            # things inside them.
+            ws = _workspace()
+            if path in (ws, ws / "memory"):
+                return f"[file_access] Refused — cannot delete {path} itself."
             if path.is_dir():
                 import shutil
                 shutil.rmtree(path)
@@ -680,6 +740,18 @@ def _do_authorize(raw_path: str, level: str) -> str:
             f"[file_access] Cannot authorize access to `{p}` — "
             f"this is a protected system location."
         )
+
+    # Refuse over-broad grants: the filesystem root, the home dir itself, or any
+    # ancestor of a protected location (e.g. ~/.config). Even though per-access
+    # block checks would still apply, a grant that wide defeats the allow-list.
+    home = Path.home().resolve()
+    if p == Path(p.anchor) or p == home:
+        return (f"[file_access] Cannot authorize `{p}` — too broad. "
+                "Authorize a specific project directory instead.")
+    for blocked in _blocked_paths(write=True):
+        if str(blocked).startswith(str(p).rstrip("/") + "/"):
+            return (f"[file_access] Cannot authorize `{p}` — it contains the "
+                    f"protected location `{blocked}`. Authorize a narrower directory.")
 
     level = level.lower().strip()
     if level not in ("read", "write"):

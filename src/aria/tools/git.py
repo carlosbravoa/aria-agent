@@ -77,7 +77,7 @@ def _git(root: Path, *git_args: str) -> str:
     cmd = ["git", "-C", str(root), *git_args]
     try:
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=60,
-                           env=build_env())
+                           env=build_env(include_secrets=False))
     except FileNotFoundError:
         return "[git] git is not installed."
     except subprocess.TimeoutExpired:
@@ -90,10 +90,20 @@ def _git(root: Path, *git_args: str) -> str:
     return "\n".join(parts) or "(ok, no output)"
 
 
+def _bad_arg(value: str) -> bool:
+    """A ref/path that starts with '-' would be parsed by git as an OPTION
+    (e.g. ref='--output=/home/u/.bashrc' makes `git diff` overwrite a file)."""
+    return bool(value) and str(value).lstrip().startswith("-")
+
+
 def execute(args: dict) -> str:
     if not shutil.which("git"):
         return "[git] git is not installed."
     action = args.get("action", "")
+    if _bad_arg(args.get("ref") or ""):
+        return "[git] 'ref' must not start with '-' (it would be read as an option)."
+    if any(_bad_arg(p) for p in (args.get("paths") or [])):
+        return "[git] 'paths' entries must not start with '-'."
     root = Path(args.get("path") or ".").expanduser()
     if not (root / ".git").exists() and action not in ("checkout",):
         # Allow git to resolve a parent repo, but warn if clearly not one.
@@ -113,7 +123,10 @@ def execute(args: dict) -> str:
         return _git(root, *cmd)
 
     if action == "log":
-        limit = int(args.get("limit") or 15)
+        try:
+            limit = max(1, int(args.get("limit") or 15))
+        except (TypeError, ValueError):
+            limit = 15
         cmd = ["log", f"-{limit}", "--oneline", "--decorate"]
         if args.get("ref"):
             cmd.append(args["ref"])
@@ -136,8 +149,10 @@ def execute(args: dict) -> str:
         return _git(root, *cmd)
 
     if action == "add":
-        paths = args.get("paths") or ["-A"]
-        return _git(root, "add", *paths) or "Staged."
+        paths = args.get("paths")
+        if not paths:
+            return _git(root, "add", "-A") or "Staged."
+        return _git(root, "add", "--", *paths) or "Staged."
 
     if action == "commit":
         message = (args.get("message") or "").strip()

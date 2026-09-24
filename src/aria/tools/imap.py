@@ -123,9 +123,13 @@ def _get_credentials(account: str) -> tuple[str, str, str, int]:
 
 # ── Connection ────────────────────────────────────────────────────────────────
 
+_TIMEOUT = 30  # seconds, socket-level (connect + each command)
+
+
 def _connect(host: str, user: str, passw: str, port: int) -> imaplib.IMAP4_SSL:
     try:
-        conn = imaplib.IMAP4_SSL(host, port)
+        # timeout: a hung server must not wedge a channel/supervisor turn.
+        conn = imaplib.IMAP4_SSL(host, port, timeout=_TIMEOUT)
         conn.login(user, passw)
         return conn
     except imaplib.IMAP4.error as e:
@@ -329,7 +333,14 @@ def _dispatch(conn: imaplib.IMAP4_SSL, action: str, args: dict) -> str:
             if not uid or not destination:
                 return "[imap] 'uid' and 'destination' are required for move."
             conn.select(folder)
-            conn.uid("copy", uid, destination)
+            typ, data = conn.uid("copy", uid, destination)
+            if typ != "OK":
+                # Never flag the source \Deleted unless the copy landed — a
+                # failed COPY (bad folder name, quota) would otherwise lose mail.
+                detail = b" ".join(d for d in (data or []) if isinstance(d, bytes))
+                return (f"[imap] Move failed — could not copy {uid} to "
+                        f"{destination}: {detail.decode(errors='replace') or typ}. "
+                        "Source message left untouched.")
             conn.uid("store", uid, "+FLAGS", "\\Deleted")
             # UID EXPUNGE removes ONLY this message. A bare expunge() would purge
             # EVERY \Deleted-flagged message in the folder (data loss), so we

@@ -17,6 +17,7 @@ supported.
 from __future__ import annotations
 
 import os
+from urllib.parse import quote
 
 # Stateless REST calls over httpx, no shared local state — a batch may run
 # concurrently.
@@ -177,14 +178,25 @@ def _default_project(args: dict) -> str:
     return project
 
 
+def _q(key: str) -> str:
+    """URL-escape an issue key for a path segment (a key like '../x' or 'A?b'
+    must not rewrite the REST path)."""
+    key = str(key).strip()
+    if key in (".", "..") or not key:
+        raise ValueError(f"invalid issue key: {key!r}")
+    return quote(key, safe="")
+
+
 def _format_issue(issue: dict) -> str:
     """Format a Jira issue dict into a readable summary."""
-    f       = issue.get("fields", {})
+    # `or {}`: Jira returns explicit nulls (e.g. "priority": null), and
+    # .get(k, {}) only defaults a MISSING key, not a None value.
+    f       = issue.get("fields") or {}
     key     = issue.get("key", "?")
-    summary = f.get("summary", "")
-    status  = f.get("status", {}).get("name", "")
-    itype   = f.get("issuetype", {}).get("name", "")
-    prio    = f.get("priority", {}).get("name", "")
+    summary = f.get("summary") or ""
+    status  = (f.get("status") or {}).get("name", "")
+    itype   = (f.get("issuetype") or {}).get("name", "")
+    prio    = (f.get("priority") or {}).get("name", "")
     asgn    = (f.get("assignee") or {}).get("displayName", "Unassigned")
     url     = f"{os.environ.get('JIRA_BASE_URL', '').rstrip('/')}/browse/{key}"
     return f"[{key}] {summary}\n  Type: {itype} | Status: {status} | Priority: {prio} | Assignee: {asgn}\n  URL: {url}"
@@ -217,7 +229,7 @@ def _execute(args: dict) -> str:
             key = args.get("issue_key", "")
             if not key:
                 return "[jira] 'issue_key' is required for get."
-            r = client.get(f"/issue/{key}")
+            r = client.get(f"/issue/{_q(key)}")
             _check(r)
             issue = r.json()
             f = issue.get("fields", {})
@@ -316,7 +328,7 @@ def _execute(args: dict) -> str:
             if not fields:
                 return ("[jira] nothing to update — provide one of: summary, "
                         "description, priority, labels, components.")
-            r = client.put(f"/issue/{key}", json={"fields": fields})
+            r = client.put(f"/issue/{_q(key)}", json={"fields": fields})
             _check(r)
             return f"Updated {key} ({', '.join(fields)})."
 
@@ -327,7 +339,7 @@ def _execute(args: dict) -> str:
             if not key or not body:
                 return "[jira] 'issue_key' and 'comment_body' are required for comment."
             payload = {"body": _text_to_adf(body)}
-            r = client.post(f"/issue/{key}/comment", json=payload)
+            r = client.post(f"/issue/{_q(key)}/comment", json=payload)
             _check(r)
             return f"Comment added to {key}."
 
@@ -338,7 +350,7 @@ def _execute(args: dict) -> str:
             if not key or not tname:
                 return "[jira] 'issue_key' and 'transition_name' are required."
             # Fetch available transitions
-            r = client.get(f"/issue/{key}/transitions")
+            r = client.get(f"/issue/{_q(key)}/transitions")
             _check(r)
             transitions = r.json().get("transitions", [])
             match = next(
@@ -348,7 +360,7 @@ def _execute(args: dict) -> str:
             if not match:
                 names = ", ".join(t["name"] for t in transitions)
                 return f"[jira] Transition '{tname}' not found. Available: {names}"
-            r = client.post(f"/issue/{key}/transitions",
+            r = client.post(f"/issue/{_q(key)}/transitions",
                             json={"transition": {"id": match["id"]}})
             _check(r)
             return f"{key} transitioned to '{match['name']}'."
@@ -360,7 +372,7 @@ def _execute(args: dict) -> str:
             if not key or not assignee:
                 return "[jira] 'issue_key' and 'assignee' are required for assign."
             account_id = _resolve_account_id(client, assignee)
-            r = client.put(f"/issue/{key}/assignee",
+            r = client.put(f"/issue/{_q(key)}/assignee",
                            json={"accountId": account_id})
             _check(r)
             who = "Unassigned" if account_id is None else assignee

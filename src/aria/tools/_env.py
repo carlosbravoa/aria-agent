@@ -13,7 +13,30 @@ env dict that includes:
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
+
+
+# Env var NAMES that look like credentials. Stripped from the environment handed
+# to arbitrary-code subprocesses (shell_run, code_search) so `printenv`/`env`/
+# `echo $LLM_API_KEY` can't dump Aria's secrets. Tools that genuinely need a
+# secret (gog needs GOG_KEYRING_PASSWORD) keep the full env.
+_SECRET_NAME_RE = re.compile(
+    r"KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|_PASS$|_PWD$", re.I)
+# ...except these non-secret names the pattern would otherwise catch.
+_NOT_SECRET = frozenset({"GOG_KEYRING_BACKEND"})
+# Only ARIA'S OWN secrets are stripped: keys defined in ~/.aria/.env, plus
+# secret-looking names with these prefixes (config.load() copies .env into the
+# process env). The user's own environment — GH_TOKEN, AWS_* credentials,
+# GNOME_KEYRING_CONTROL, PASSWORD_STORE_DIR — is theirs and keeps working.
+_ARIA_PREFIXES = ("LLM_", "TELEGRAM_", "WHATSAPP_", "ARIA_", "JIRA_", "IMAP_",
+                  "GOG_", "GMAIL_", "OPENAI_", "ANTHROPIC_")
+
+
+def _is_secret_name(name: str) -> bool:
+    if name in _NOT_SECRET:
+        return False
+    return bool(_SECRET_NAME_RE.search(name))
 
 
 # Commands that require an interactive TTY and will hang or fail in background.
@@ -57,7 +80,7 @@ def gog_keyring_hint(text: str) -> str:
     return ""
 
 
-def build_env() -> dict[str, str]:
+def build_env(include_secrets: bool = True) -> dict[str, str]:
     """
     Return an environment dict suitable for subprocess calls from a
     background process.
@@ -66,6 +89,11 @@ def build_env() -> dict[str, str]:
       1. Variables in ~/.aria/.env  ← put GMAIL_ACCOUNT etc. here
       2. Current process environment
       3. Constructed PATH and XDG defaults
+
+    include_secrets=False drops Aria's own secret-looking vars (see
+    _SECRET_NAME_RE / _ARIA_PREFIXES) — use it for subprocesses that run
+    agent-chosen code.
+    Names listed in ARIA_SHELL_ENV_ALLOW (comma-separated) are kept anyway.
     """
     home = str(Path.home())
 
@@ -101,6 +129,7 @@ def build_env() -> dict[str, str]:
     # We parse it manually (no dotenv dep here) so we don't re-trigger
     # config.load() and cause circular imports.
     aria_env = Path(home) / ".aria" / ".env"
+    aria_keys: set[str] = set()
     if aria_env.exists():
         for line in aria_env.read_text(encoding="utf-8").splitlines():
             line = line.strip()
@@ -111,5 +140,13 @@ def build_env() -> dict[str, str]:
             value = value.strip().strip('"').strip("'")
             if key:
                 env[key] = value   # .env always wins for subprocess env
+                aria_keys.add(key)
+
+    if not include_secrets:
+        keep = {k.strip() for k in env.get("ARIA_SHELL_ENV_ALLOW", "").split(",")
+                if k.strip()}
+        env = {k: v for k, v in env.items()
+               if k in keep or not _is_secret_name(k)
+               or not (k in aria_keys or k.startswith(_ARIA_PREFIXES))}
 
     return env

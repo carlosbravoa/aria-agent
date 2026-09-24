@@ -120,6 +120,14 @@ def _run(cmd: str, capture_stdout: bool = True) -> str:
         return f"[drive error] {exc}"
 
 
+def _int(value, default: int) -> int:
+    """Coerce a numeric arg to a positive int (never interpolate raw text)."""
+    try:
+        return max(1, int(value))
+    except (TypeError, ValueError):
+        return default
+
+
 def execute(args: dict) -> str:
     action  = args["action"]
     file_id = shlex.quote(args["file_id"]) if args.get("file_id") else ""
@@ -127,7 +135,7 @@ def execute(args: dict) -> str:
     path    = args.get("path", "")
     name    = args.get("name", "")
     fmt     = args.get("format", "")
-    n       = int(args.get("max_results", 20))
+    n       = _int(args.get("max_results", 20), 20)
     query   = args.get("query", "")
 
     match action:
@@ -190,6 +198,13 @@ def execute(args: dict) -> str:
                 return "[drive] 'file_id' is required for download."
             if not path:
                 return "[drive] 'path' is required for download (local destination)."
+            # Same write allow/block-list as file_access — a download must not
+            # be a way to overwrite ~/.bashrc or drop files in ~/.aria/tools.
+            from aria.tools.file_access import resolve_writable
+            dest, denial = resolve_writable(path)
+            if denial:
+                return denial
+            path = str(dest)
             cmd = f"{_CLI} drive download {file_id} --out {shlex.quote(path)}"
             if fmt:
                 cmd += f" --format {shlex.quote(fmt)}"
@@ -199,6 +214,13 @@ def execute(args: dict) -> str:
         case "upload":
             if not path:
                 return "[drive] 'path' is required for upload."
+            # Uploading is exfiltration of a local file — same read check as
+            # file_access so ~/.ssh / ~/.aria/.env can't be sent to Drive.
+            from aria.tools.file_access import resolve_readable
+            src, denial = resolve_readable(path)
+            if denial:
+                return denial
+            path = str(src)
             cmd = f"{_CLI} drive upload {shlex.quote(path)}"
             if parent:
                 cmd += f" --parent {shlex.quote(parent)}"
