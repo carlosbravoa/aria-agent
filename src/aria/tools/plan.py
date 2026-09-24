@@ -10,11 +10,20 @@ finish each step.
 
 State is stored in the workspace so "show me the plan" works and it survives a
 restart. Local state → not parallel-safe.
+
+Plans are scoped per conversation (the agent's window key: "repl",
+"telegram:<id>", "supervisor", …). A single global plan leaked across channels:
+every request carries the unfinished plan with "continue from the first
+unfinished step", so a Telegram plan step like "schedule the daily digest" was
+re-executed by background supervisor tasks — one source of duplicated tasks.
+The agent sets the scope around each tool call (set_scope/reset_scope).
 """
 
 from __future__ import annotations
 
+import contextvars
 import json
+import re
 
 from aria import config
 from aria.workspace import Workspace
@@ -23,8 +32,36 @@ _STATUS_ICON = {"pending": "☐", "in_progress": "◐", "done": "☑"}
 _VALID = set(_STATUS_ICON)
 
 
-def _plan_path():
-    return config.workspace_dir() / "memory" / "current_plan.json"
+_scope: contextvars.ContextVar[str] = contextvars.ContextVar("aria_plan_scope", default="repl")
+
+
+def set_scope(key: str | None):
+    """Bind the plan scope for the current thread/context. Returns a token."""
+    return _scope.set(key or "repl")
+
+
+def reset_scope(token) -> None:
+    try:
+        _scope.reset(token)
+    except (ValueError, LookupError):
+        _scope.set("repl")
+
+
+def _plan_path(scope: str | None = None):
+    key = scope or _scope.get()
+    mem = config.workspace_dir() / "memory"
+    if key == "repl":
+        return mem / "current_plan.json"      # pre-scoping location, kept for the REPL
+    safe = re.sub(r"[^A-Za-z0-9._-]", "_", key)
+    return mem / f"plan__{safe}.json"
+
+
+def clear(scope: str | None = None) -> None:
+    """Delete the plan for `scope` (default: the current scope)."""
+    try:
+        _plan_path(scope).unlink(missing_ok=True)
+    except OSError:
+        pass
 
 
 DEFINITION = {
@@ -78,13 +115,13 @@ def _render(todos: list) -> str:
     return header + "\n" + "\n".join(lines)
 
 
-def context_block() -> str:
+def context_block(scope: str | None = None) -> str:
     """The rendered current plan when it has unfinished steps, else "". The
     agent injects this into every model request (the trailing context message)
     so an in-flight task survives interruptions — errors, compaction, restarts:
     the plan lives on disk and each request re-reads it, so 'continue' can
     always pick up from the first unfinished step."""
-    path = _plan_path()
+    path = _plan_path(scope)
     if not path.exists():
         return ""
     try:
@@ -105,10 +142,7 @@ def execute(args: dict) -> str:
     action = args.get("action") or ("set" if args.get("todos") is not None else "show")
 
     if action == "clear":
-        try:
-            path.unlink(missing_ok=True)
-        except OSError:
-            pass
+        clear()
         return "[plan] Cleared."
 
     if action == "show":

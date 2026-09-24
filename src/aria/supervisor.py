@@ -136,9 +136,11 @@ class Supervisor:
     def _tick(self, list_pending, claim, complete, fail) -> None:
         # Crash recovery first: requeue/fail tasks a previous process left
         # orphaned in running/ before claiming any new work.
-        from aria.task import reap_running
+        from aria.task import reap_running, dedupe_pending
         for note in reap_running():
             log.warning("Reaper: %s", note)
+        for note in dedupe_pending():
+            log.warning("Dedupe: %s", note)
 
         pending = list_pending()
         if not pending:
@@ -268,18 +270,34 @@ def run_with_timeout(target, args: tuple = (), timeout: int | None = None):
     return payload
 
 
-def _run_agent_task(prompt: str) -> str:
+def _run_agent_task(prompt: str, task_id: str = "") -> str:
     """Module-level worker executed in the child process: re-init config + Agent
     and run the prompt. It shares no in-memory state with the parent (under
-    spawn/forkserver nothing is inherited), so it loads config itself."""
+    spawn/forkserver nothing is inherited), so it loads config itself.
+
+    ARIA_TASK_ID marks "inside a scheduled task" for the tools (the schedule
+    tool refuses to create recurring tasks there). It is restored afterwards
+    because with ARIA_TASK_TIMEOUT<=0 this runs inline in the supervisor."""
     from aria import config
     config.load()
-    from aria.agent import Agent
-    agent = Agent(window_key="supervisor", terminal=False)
+    prev = os.environ.get("ARIA_TASK_ID")
+    os.environ["ARIA_TASK_ID"] = task_id or "unknown"
     try:
-        return agent.chat_collect(prompt)
+        from aria.agent import Agent
+        from aria.tools import plan as _plan
+        # Each task starts with a clean plan: the supervisor's plan is per task,
+        # never a leftover from a previous (different) task.
+        _plan.clear("supervisor")
+        agent = Agent(window_key="supervisor", terminal=False)
+        try:
+            return agent.chat_collect(prompt)
+        finally:
+            agent.close()
     finally:
-        agent.close()
+        if prev is None:
+            os.environ.pop("ARIA_TASK_ID", None)
+        else:
+            os.environ["ARIA_TASK_ID"] = prev
 
 
 def _execute(task) -> str:
@@ -299,12 +317,14 @@ def _execute(task) -> str:
     wrapped = (
         f"{task.prompt}\n\n"
         "(This is an automated task. Do NOT call the notify tool — "
-        "your response will be delivered automatically when you are done.)"
+        "your response will be delivered automatically when you are done. "
+        "Do NOT call the schedule tool to create, re-create or reschedule this "
+        "task — if it recurs, the supervisor requeues it automatically.)"
     )
 
     from aria.task import task_timeout
     timeout = task_timeout()
-    result = run_with_timeout(_run_agent_task, (wrapped,), timeout)
+    result = run_with_timeout(_run_agent_task, (wrapped, task.task_id), timeout)
 
     if task.notify and result:
         try:
@@ -345,9 +365,9 @@ def main() -> None:
 
     if args.once:
         from aria import config
-        from aria.task import list_pending, claim, complete, fail, reap_running
+        from aria.task import list_pending, claim, complete, fail, reap_running, dedupe_pending
         config.load()
-        for note in reap_running():
+        for note in reap_running() + dedupe_pending():
             print(f"! {note}")
         for path, task in list_pending():
             running_path = claim(path, task)

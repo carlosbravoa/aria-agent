@@ -55,8 +55,30 @@ def _looks_like_error(result: str) -> bool:
     head = (result or "").lstrip()[:48].lower()
     return head.startswith("[") and ("error" in head or "could not" in head)
 
-# Persists the last-used model profile across sessions
+# Persists the last-used model profile across sessions. This is the REPL's
+# file; other channels get their own (see _profile_state_path) so a /model
+# switch on WhatsApp no longer moves the REPL, Telegram and background tasks.
 _PROFILE_STATE = Path.home() / ".aria" / ".last_profile"
+
+
+def _profile_state_path(window_key: str) -> Path | None:
+    """Where a /model switch in this conversation is saved. The terminal entry
+    points (REPL, single-shot CLI, --notify) share the main file; each channel
+    conversation gets its own. None for the supervisor, which never saves."""
+    if window_key == "supervisor":
+        return None
+    if window_key in ("repl", "cli", "notify"):
+        return _PROFILE_STATE
+    safe = re.sub(r"[^A-Za-z0-9._-]", "_", window_key)
+    return _PROFILE_STATE.with_name(f".last_profile__{safe}")
+
+
+def _profile_to_restore(window_key: str) -> Path:
+    """The conversation's own saved profile, else the main one. Background
+    tasks follow the main (REPL) choice — if the default endpoint is down and
+    the user switched, tasks must not keep failing on it."""
+    own = _profile_state_path(window_key)
+    return own if own is not None and own.exists() else _PROFILE_STATE
 
 # Markdown detection — patterns that only appear in intentional markdown
 _MD_PATTERNS = re.compile(
@@ -290,10 +312,11 @@ class Agent:
         self._response_cb = None
         self._activity_cb = None
 
-        # Restore last used profile (persisted across sessions)
-        if _PROFILE_STATE.exists():
+        # Restore this conversation's last used profile (persisted across sessions)
+        state = _profile_to_restore(self.window_key)
+        if state.exists():
             try:
-                saved = _PROFILE_STATE.read_text().strip()
+                saved = state.read_text().strip()
                 if saved and saved != "default":
                     self.switch_profile(saved)
             except Exception:
@@ -316,16 +339,29 @@ class Agent:
         no new sessions and returns immediately (idempotent, negligible cost).
         """
         reflect_every = int(os.environ.get("ARIA_REFLECT_EVERY", "86400"))
-        if reflect_every <= 0:
-            return
+        if reflect_every <= 0 or self.window_key == "supervisor":
+            return   # the supervisor runs reflection as its own periodic job
 
-        # Check time since last reflection via watermark file mtime
+        # Check time since the last reflection (watermark mtime) AND since the
+        # last attempt: the watermark only moves on success, so while the LLM
+        # is failing every new session (each Telegram chat, each task) would
+        # otherwise start another pass. Retry at most hourly in that case.
+        import time
+        now = time.time()
         watermark = self.ws.root / "memory" / "reflect_watermark"
-        if watermark.exists():
-            import time
-            age = time.time() - watermark.stat().st_mtime
-            if age < reflect_every:
-                return  # Not due yet
+        if watermark.exists() and now - watermark.stat().st_mtime < reflect_every:
+            return  # Not due yet
+        attempt = self.ws.root / "memory" / ".reflect_attempt"
+        try:
+            if now - attempt.stat().st_mtime < min(reflect_every, 3600):
+                return
+        except OSError:
+            pass
+        try:
+            attempt.parent.mkdir(parents=True, exist_ok=True)
+            attempt.touch()
+        except OSError:
+            pass
 
         import threading
         import logging
@@ -387,6 +423,16 @@ class Agent:
             })
         return profiles
 
+    def _save_profile(self, name: str) -> None:
+        state = _profile_state_path(self.window_key)
+        if state is None:
+            return
+        try:
+            state.parent.mkdir(parents=True, exist_ok=True)
+            state.write_text(name)
+        except Exception:
+            pass
+
     def switch_profile(self, name: str) -> str:
         """
         Switch to a named model profile. Rebuilds the OpenAI client and
@@ -401,10 +447,7 @@ class Agent:
             self.client = _make_client(self._base_url, self._api_key)
             self.model = os.environ.get("LLM_MODEL", "llama3.2")
             self._active_profile = "default"
-            try:
-                _PROFILE_STATE.write_text("default")
-            except Exception:
-                pass
+            self._save_profile("default")
             return f"Switched to default ({self.model})"
 
         for i in range(1, 10):
@@ -423,11 +466,7 @@ class Agent:
                 self.client = _make_client(base_url, api_key)
                 self.model  = model
                 self._active_profile = name
-                try:
-                    _PROFILE_STATE.parent.mkdir(parents=True, exist_ok=True)
-                    _PROFILE_STATE.write_text(name)
-                except Exception:
-                    pass
+                self._save_profile(name)
                 return f"Switched to {name} ({model})"
 
         available = [p["name"] for p in self.list_profiles()]
@@ -626,9 +665,9 @@ class Agent:
         try:
             if self._is_terminal:
                 with self._console().status("[dim]Compacting…[/dim]", spinner="dots"):
-                    summary = self._summarize_messages(self.history)
+                    summary = self._summarize_messages(self.history, strict=True)
             else:
-                summary = self._summarize_messages(self.history)
+                summary = self._summarize_messages(self.history, strict=True)
         except Exception as exc:
             return f"[compact failed] {exc}"
         if not summary:
@@ -663,11 +702,15 @@ class Agent:
                 out.append(f"Tool result: {content}")
         return "\n\n".join(out)
 
-    def _summarize_messages(self, msgs: list[dict]) -> str:
+    def _summarize_messages(self, msgs: list[dict], strict: bool = False) -> str:
         """Summarize a slice of history into a compact context note. Chunked so a
         huge history never becomes one unbounded request (the exact call most
         likely to overflow) — each chunk is summarized, then the partials are
-        folded together."""
+        folded together.
+
+        strict=True (manual /compact) lets an LLM error propagate instead of
+        falling back to truncated raw text — otherwise an outage reported
+        "compacted" and replaced the saved window with that raw text."""
         text = self._render_msgs_text(msgs)
         if not text.strip():
             return ""
@@ -686,6 +729,8 @@ class Agent:
                 self._record_usage(getattr(resp, "usage", None))
                 return (resp.choices[0].message.content or "").strip()
             except Exception:
+                if strict:
+                    raise
                 return body[:2000]   # never lose content on a transient error
 
         partials = [p for p in (_one(pc) for pc in pieces) if p]
@@ -704,6 +749,8 @@ class Agent:
             self._record_usage(getattr(resp, "usage", None))
             return (resp.choices[0].message.content or "").strip() or combined
         except Exception:
+            if strict:
+                raise
             return combined
 
     def _maybe_compact(self) -> None:
@@ -1299,7 +1346,7 @@ class Agent:
         # already outside the provider's cached prefix (it changes per minute).
         try:
             from aria.tools import plan as _plan_tool
-            plan_block = _plan_tool.context_block()
+            plan_block = _plan_tool.context_block(self.window_key)
         except Exception:
             plan_block = ""
         if plan_block:
@@ -1714,6 +1761,11 @@ class Agent:
                         "(usually a turn interrupted mid-tool-call). Send your "
                         "message again — history is repaired at the start of "
                         "each turn — or /compact to reset the context.")
+        elif any(k in low for k in ("context length", "context_length",
+                                     "maximum context", "context window",
+                                     "prompt is too long", "too many tokens")):
+            friendly = ("The conversation is too long for this model's context "
+                        "window. Run /compact (or /clear) and send it again.")
         elif (("tool" in low or "function" in low)
                 and ("not support" in low or "unsupported" in low
                      or "invalid" in low or "400" in msg)):
@@ -1736,6 +1788,19 @@ class Agent:
 
     # ── Session continuity ────────────────────────────────────────────────────
 
+    def clear_session(self) -> None:
+        """/clear: forget this conversation for real — in-memory history, the
+        persisted conversation window (otherwise the "cleared" chat resumes on
+        the next session) and this conversation's plan. Memory files are kept."""
+        self.history = list(self._seed)
+        self._last_result_for.clear()
+        try:
+            self.ws._window_path().unlink(missing_ok=True)
+        except OSError:
+            pass
+        from aria.tools import plan as _plan_tool
+        _plan_tool.clear(self.window_key)
+
     def close(self) -> None:
         """
         Trim the conversation window to the last ARIA_WINDOW_MESSAGES entries.
@@ -1746,7 +1811,14 @@ class Agent:
     # ── Tool execution ────────────────────────────────────────────────────────
 
     def _execute_tool(self, name: str, args: dict) -> str:
-        result = tools.dispatch(name, args, self.tool_schemas)
+        # Tools are module-level functions; the plan tool needs to know whose
+        # plan it is editing. Bound per call so it holds in worker threads too.
+        from aria.tools import plan as _plan_tool
+        token = _plan_tool.set_scope(self.window_key)
+        try:
+            result = tools.dispatch(name, args, self.tool_schemas)
+        finally:
+            _plan_tool.reset_scope(token)
         if len(result) > 6000:
             result = result[:6000] + "\n\u2026 [truncated]"
         return result

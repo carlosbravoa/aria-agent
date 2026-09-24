@@ -7,6 +7,11 @@ Tasks are stored as JSON files under ~/.aria/tasks/:
   running/   ← being executed right now (crash-safe hand-off)
   done/      ← completed successfully
   failed/    ← failed after retries exhausted
+  cancelled/ ← cancelled by the user
+
+Recurring tasks form a *series*: every occurrence carries the same series_id
+(stable across requeues) and a scheduled_for slot time, so cancelling by series
+stops future runs, and a retried/late occurrence never shifts the schedule.
 
 File format (task_<id>.task):
   JSON object — handles any content in prompts without truncation issues.
@@ -56,6 +61,19 @@ def _parse_dt(value: str) -> datetime:
     return dt
 
 
+def recur_step(recur: str) -> timedelta | None:
+    """The interval for a recurrence spec, or None if it is not a valid one.
+    Valid: "daily", "weekly", "weekdays", "<N>m" with N > 0."""
+    r = (recur or "").strip().lower()
+    if r in ("daily", "weekdays"):
+        return timedelta(days=1)
+    if r == "weekly":
+        return timedelta(weeks=1)
+    if r.endswith("m") and r[:-1].isdigit() and int(r[:-1]) > 0:
+        return timedelta(minutes=int(r[:-1]))
+    return None
+
+
 def task_timeout() -> int:
     """Per-task wall-clock ceiling AND running/ lease, in seconds
     (ARIA_TASK_TIMEOUT, default 900). <=0 disables both."""
@@ -77,6 +95,12 @@ class Task:
     task_id:     str        = field(default_factory=lambda: uuid.uuid4().hex[:8])
     recur:       str        = ""            # "", "daily", "weekly", "weekdays", or "<N>m" (every N minutes)
     started_at:  str        = ""            # ISO datetime stamped by claim() (running/ lease start)
+    series_id:   str        = ""            # stable id shared by every occurrence of a recurring task
+    scheduled_for: str      = ""            # the slot this occurrence belongs to (retries don't move it)
+
+    def __post_init__(self) -> None:
+        if self.recur and not self.series_id:
+            self.series_id = self.task_id
 
     # ── Serialisation ─────────────────────────────────────────────────────────
 
@@ -93,6 +117,8 @@ class Task:
             "id":          self.task_id,
             "recur":       self.recur,
             "started_at":  self.started_at,
+            "series_id":   self.series_id,
+            "scheduled_for": self.scheduled_for,
         }, indent=2, ensure_ascii=False)
 
     @staticmethod
@@ -113,6 +139,8 @@ class Task:
                 task_id     = d.get("id", uuid.uuid4().hex[:8]),
                 recur       = d.get("recur", ""),
                 started_at  = d.get("started_at", ""),
+                series_id   = d.get("series_id", ""),
+                scheduled_for = d.get("scheduled_for", ""),
             )
         else:
             # Legacy key: value format
@@ -154,11 +182,15 @@ class Task:
         # re-derived), so "daily at 08:00" stays 08:00 across a DST change.
         # Legacy naive bases are localized for the maths but keep a naive
         # output so old task files stay format-stable.
+        # The base is the occurrence's slot (scheduled_for), NOT run_after: a
+        # retry pushes run_after forward by its backoff, and basing the next
+        # occurrence on it made "daily at 08:00" drift to 08:01, 08:03, …
         naive_base = False
         base = None
-        if self.run_after:
+        anchor = self.scheduled_for or self.run_after
+        if anchor:
             try:
-                base = datetime.fromisoformat(self.run_after)
+                base = datetime.fromisoformat(anchor)
             except ValueError:
                 base = None
             else:
@@ -169,16 +201,8 @@ class Task:
             base = _now_dt()
 
         recur = self.recur.strip().lower()
-
-        if recur == "daily":
-            step = timedelta(days=1)
-        elif recur == "weekly":
-            step = timedelta(weeks=1)
-        elif recur == "weekdays":
-            step = timedelta(days=1)
-        elif recur.endswith("m") and recur[:-1].isdigit() and int(recur[:-1]) > 0:
-            step = timedelta(minutes=int(recur[:-1]))
-        else:
+        step = recur_step(recur)
+        if step is None:
             return ""
 
         # Advance strictly past 'now'. Without this, a task whose run_after is in
@@ -208,6 +232,24 @@ class Task:
             return _now_dt() >= _parse_dt(self.run_after)
         except ValueError:
             return True  # malformed date → run immediately
+
+    def next_occurrence(self) -> "Task | None":
+        """The next occurrence of this recurring task (same series, fresh id and
+        retry budget), or None if it does not recur."""
+        next_run = self.next_run_after()
+        if not next_run:
+            return None
+        return Task(
+            prompt        = self.prompt,
+            notify        = self.notify,
+            priority      = self.priority,
+            run_after     = next_run,
+            max_retries   = self.max_retries,
+            source        = self.source,
+            recur         = self.recur,
+            series_id     = self.series_id or self.task_id,
+            scheduled_for = next_run,
+        )
 
     def filename(self) -> str:
         # priority prefix so sorted() gives natural execution order
@@ -263,6 +305,10 @@ def claim(path: Path, task: Task) -> Path | None:
     # crash. Best-effort: if the rewrite fails, the file mtime (set by the
     # rename) still serves as the reaper's fallback.
     task.started_at = _now()
+    if not task.scheduled_for:
+        # First claim of this occurrence: pin its slot so retries (which move
+        # run_after) can't shift the recurrence.
+        task.scheduled_for = task.run_after or task.started_at
     try:
         dest.write_text(task.to_text(), encoding="utf-8")
     except OSError:
@@ -313,7 +359,11 @@ def reap_running() -> list[str]:
 
 
 def complete(path: Path, task: Task, result: str) -> None:
-    """Move a finished task to done/ and requeue if recurring."""
+    """Move a finished task to done/ and requeue if recurring.
+
+    If the running file vanished while the task ran, it was cancelled
+    (schedule cancel moves it to cancelled/) — the series is NOT requeued."""
+    cancelled = not path.exists()
     done_dir = _queue_dir("done")
     d = json.loads(task.to_text())
     d["result"]    = result[:500]
@@ -322,22 +372,23 @@ def complete(path: Path, task: Task, result: str) -> None:
     dest.write_text(json.dumps(d, indent=2, ensure_ascii=False), encoding="utf-8")
     path.unlink(missing_ok=True)
 
-    # Auto-requeue recurring tasks with a fresh task_id and updated run_after
-    if task.recur:
-        next_run = task.next_run_after()
-        if next_run:
-            import uuid as _uuid
-            next_task = Task(
-                prompt      = task.prompt,
-                notify      = task.notify,
-                priority    = task.priority,
-                run_after   = next_run,
-                max_retries = task.max_retries,
-                source      = task.source,
-                recur       = task.recur,
-                task_id     = _uuid.uuid4().hex[:8],
-            )
-            enqueue(next_task)
+    if not cancelled:
+        _requeue_series(task)
+
+
+def _requeue_series(task: Task) -> None:
+    """Enqueue the next occurrence of a recurring task — unless that series
+    already has an occurrence pending or running (e.g. a reaper and the owner
+    both finishing the same task), which would fork it into two copies."""
+    nxt = task.next_occurrence()
+    if nxt is None:
+        return
+    if find_series(nxt.series_id, states=("pending", "running")):
+        logging.getLogger(__name__).warning(
+            "Series %s already queued — not requeuing a duplicate", nxt.series_id
+        )
+        return
+    enqueue(nxt)
 
 
 def fail(path: Path, task: Task, error: str) -> None:
@@ -352,6 +403,8 @@ def fail(path: Path, task: Task, error: str) -> None:
     task.retries += 1
     task.started_at = ""                    # lease is over either way
     if task.retries <= task.max_retries:
+        if not path.exists():
+            return                          # cancelled while running — don't resurrect it
         base = int(os.environ.get("ARIA_TASK_RETRY_BASE", "60"))
         cap  = int(os.environ.get("ARIA_TASK_RETRY_MAX",  "3600"))
         delay = min(base * (2 ** (task.retries - 1)), cap)
@@ -363,11 +416,134 @@ def fail(path: Path, task: Task, error: str) -> None:
         d = json.loads(task.to_text())
         d["error"]     = error[:500]
         d["failed_at"] = _now()
+        cancelled = not path.exists()
         (failed_dir / path.name).write_text(
             json.dumps(d, indent=2, ensure_ascii=False), encoding="utf-8"
         )
         path.unlink(missing_ok=True)
+        # One bad occurrence must not end a recurring series forever: the next
+        # slot is scheduled with a fresh retry budget.
+        if not cancelled:
+            _requeue_series(task)
 
 
 def _now() -> str:
     return _now_dt().isoformat(timespec="seconds")
+
+
+# ── Lookup / dedupe / cancel ──────────────────────────────────────────────────
+
+def _iter_state(state: str):
+    d = tasks_dir() / state
+    if not d.exists():
+        return
+    for p in sorted(d.glob("*.task")):
+        try:
+            yield p, Task.from_text(p.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+
+
+def find_series(series_id: str,
+                states: tuple[str, ...] = ("pending", "running")) -> list[tuple[Path, Task]]:
+    """Queued occurrences belonging to a recurring series."""
+    if not series_id:
+        return []
+    return [(p, t) for st in states for p, t in _iter_state(st)
+            if (t.series_id or t.task_id) == series_id]
+
+
+def _norm_prompt(text: str) -> str:
+    return " ".join((text or "").lower().split())
+
+
+def _slot_key(recur: str, when: str) -> str:
+    """The recurring slot a time belongs to: "HH:MM" for daily/weekdays,
+    "<weekday> HH:MM" for weekly, "" for minute intervals. The same prompt at
+    08:00 and 20:00 daily is two legitimate jobs, not a duplicate."""
+    r = (recur or "").strip().lower()
+    if not when or (r.endswith("m") and r[:-1].isdigit()):
+        return ""
+    try:
+        dt = _parse_dt(when)
+    except ValueError:
+        return when
+    hm = dt.strftime("%H:%M")
+    return f"{dt.weekday()} {hm}" if r == "weekly" else hm
+
+
+def _task_slot(t: Task) -> str:
+    return _slot_key(t.recur, t.scheduled_for or t.run_after)
+
+
+def find_duplicate(prompt: str, recur: str = "",
+                   run_after: str = "") -> Task | None:
+    """An already-queued task equivalent to the one about to be created: same
+    (whitespace/case-normalised) prompt, same recurrence, and the same slot
+    (time of day for recurring tasks, exact run_after for one-shots)."""
+    want = _norm_prompt(prompt)
+    rec = (recur or "").strip().lower()
+    slot = _slot_key(rec, run_after) if rec else (run_after or "")
+    for st in ("pending", "running"):
+        for _, t in _iter_state(st):
+            if _norm_prompt(t.prompt) != want or t.recur.strip().lower() != rec:
+                continue
+            if (_task_slot(t) if rec else (t.run_after or "")) == slot:
+                return t
+    return None
+
+
+def cancel(ident: str) -> list[str]:
+    """Cancel by task id OR series id. Cancelling any occurrence of a recurring
+    task cancels the whole series (every pending/running occurrence) — the old
+    id-per-occurrence scheme meant yesterday's id no longer matched anything
+    and the series lived on. Returns the ids of the cancelled task files."""
+    ident = (ident or "").strip()
+    if not ident:
+        return []
+    series = ""
+    for st in ("pending", "running"):
+        for _, t in _iter_state(st):
+            if t.task_id == ident and t.series_id:
+                series = t.series_id
+    done: list[str] = []
+    dest = _queue_dir("cancelled")
+    for st in ("pending", "running"):
+        for p, t in _iter_state(st):
+            # Filename is "<priority>_<task_id>.task"; match the id EXACTLY
+            # (from the file or its name), never as a substring.
+            file_id = p.stem.split("_", 1)[1] if "_" in p.stem else p.stem
+            if (ident in (t.task_id, file_id)
+                    or (t.series_id and t.series_id in (ident, series))):
+                try:
+                    p.rename(dest / p.name)
+                    done.append(file_id)
+                except FileNotFoundError:
+                    pass      # finished/claimed in the meantime
+    return done
+
+
+def dedupe_pending() -> list[str]:
+    """Collapse duplicate recurring tasks already in pending/: tasks with the
+    same normalised prompt, recurrence and slot (time of day) are one logical
+    job. The earliest
+    occurrence is kept, the rest move to cancelled/. Cleans up queues that
+    multiplied before the create-time guards existed. Returns log notes."""
+    seen: dict[tuple[str, str, str], Task] = {}
+    notes: list[str] = []
+    rows = sorted(_iter_state("pending"),
+                  key=lambda pt: (pt[1].run_after or "", pt[1].created))
+    for p, t in rows:
+        if not t.recur:
+            continue
+        key = (_norm_prompt(t.prompt), t.recur.strip().lower(), _task_slot(t))
+        if key not in seen:
+            seen[key] = t
+            continue
+        try:
+            p.rename(_queue_dir("cancelled") / p.name)
+        except FileNotFoundError:
+            continue
+        notes.append(f"task {t.task_id} duplicates series "
+                     f"{seen[key].series_id or seen[key].task_id} → cancelled")
+    return notes

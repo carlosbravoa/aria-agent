@@ -1,8 +1,18 @@
 """
 aria/tools/schedule.py — Schedule, list, and cancel tasks for the supervisor.
+
+Duplicate guards (recurring tasks used to multiply):
+  - create is idempotent: an equivalent queued task (same prompt + recurrence)
+    is reported instead of a second copy being enqueued;
+  - inside a running supervisor task (ARIA_TASK_ID set) creating a RECURRING
+    task is refused — a recurring prompt like "every morning, …" otherwise made
+    each run schedule another copy of itself;
+  - cancel takes a task id or series id and stops the whole series.
 """
 
 from __future__ import annotations
+
+import os
 
 DEFINITION = {
     "name": "schedule",
@@ -11,10 +21,12 @@ DEFINITION = {
         "Actions: "
         "create — schedule a new task; "
         "list — show all pending tasks (use this when the user asks what reminders or tasks are scheduled); "
-        "cancel — cancel a pending task by its ID."
+        "cancel — cancel a task by its ID or series ID (cancelling a recurring "
+        "task stops all its future runs)."
         "\n"
         "For recurring tasks use the 'recur' field — the supervisor requeues automatically. "
-        "Never reschedule manually inside a task."
+        "Never reschedule manually inside a task. To change a recurring task, cancel "
+        "the old one first, then create the new one."
     ),
     "parameters": {
         "type": "object",
@@ -31,7 +43,7 @@ DEFINITION = {
             },
             "task_id": {
                 "type": "string",
-                "description": "Task ID to cancel (required for cancel). Get it from list.",
+                "description": "Task ID or series ID to cancel (required for cancel). Get it from list.",
             },
             "run_after": {
                 "type": "string",
@@ -78,21 +90,49 @@ def execute(args: dict) -> str:
 
 
 def _create_task(args: dict) -> str:
-    from aria.task import Task, enqueue
+    from datetime import datetime
+    from aria.task import Task, enqueue, find_duplicate, recur_step
 
-    prompt = args.get("prompt", "").strip()
+    prompt = (args.get("prompt") or "").strip()
     if not prompt:
         return "[schedule] 'prompt' is required for create."
 
-    task = Task(
-        prompt      = prompt,
-        notify      = args.get("notify", True),
-        priority    = int(args.get("priority", 5)),
-        run_after   = args.get("run_after", ""),
-        max_retries = int(args.get("max_retries", 2)),
-        recur       = args.get("recur", ""),
-        source      = "agent",
-    )
+    recur = (args.get("recur") or "").strip().lower()
+    if recur and recur_step(recur) is None:
+        return (f"[schedule error] invalid recur {recur!r}. Use 'daily', 'weekly', "
+                "'weekdays', or '<N>m' (e.g. '60m' for hourly).")
+    run_after = (args.get("run_after") or "").strip()
+    if run_after:
+        try:
+            datetime.fromisoformat(run_after)
+        except ValueError:
+            return (f"[schedule error] invalid run_after {run_after!r}. "
+                    "Use ISO format, e.g. 2026-04-10T08:00:00.")
+
+    running = os.environ.get("ARIA_TASK_ID", "")
+    if running and recur:
+        return ("[schedule error] this is already a scheduled task (id "
+                f"{running}); its recurrence is handled automatically. Do not "
+                "create recurring tasks from inside a task.")
+
+    dup = find_duplicate(prompt, recur, run_after)
+    if dup is not None:
+        ref = f"series {dup.series_id}" if dup.series_id else f"id {dup.task_id}"
+        return (f"[schedule] Already scheduled ({ref}, run_after="
+                f"{dup.run_after or 'now'}) — not creating a duplicate.")
+
+    try:
+        task = Task(
+            prompt      = prompt,
+            notify      = bool(args.get("notify", True)),
+            priority    = min(10, max(1, int(args.get("priority", 5)))),
+            run_after   = run_after,
+            max_retries = max(0, int(args.get("max_retries", 2))),
+            recur       = recur,
+            source      = "agent",
+        )
+    except (TypeError, ValueError) as exc:
+        return f"[schedule error] {exc}"
     try:
         enqueue(task)
         recur_str = f", recurs {task.recur}" if task.recur else ""
@@ -117,7 +157,8 @@ def _list_tasks() -> str:
             try:
                 task = Task.from_text(p.read_text(encoding="utf-8"))
                 when     = task.run_after or "now"
-                recur    = f" [{task.recur}]" if task.recur else ""
+                recur    = (f" [{task.recur}, series={task.series_id}]"
+                            if task.recur else "")
                 rows.append(
                     f"- [{state}] id={task.task_id} run_after={when}{recur}: {task.prompt[:80]}"
                 )
@@ -130,23 +171,16 @@ def _list_tasks() -> str:
 
 
 def _cancel_task(task_id: str) -> str:
-    from aria.task import tasks_dir
+    from aria.task import cancel
 
+    task_id = (task_id or "").strip()
     if not task_id:
         return "[schedule] 'task_id' is required for cancel."
 
-    for state in ("pending", "running"):
-        directory = tasks_dir() / state
-        if not directory.exists():
-            continue
-        for p in directory.glob("*.task"):
-            # Filename is "<priority>_<task_id>.task" — match the id EXACTLY,
-            # not as a substring (which could hit the wrong task).
-            file_id = p.stem.split("_", 1)[1] if "_" in p.stem else p.stem
-            if file_id == task_id:
-                cancelled_dir = tasks_dir() / "cancelled"
-                cancelled_dir.mkdir(exist_ok=True)
-                p.rename(cancelled_dir / p.name)
-                return f"[schedule] Task {task_id} cancelled."
-
-    return f"[schedule] Task {task_id} not found in pending or running."
+    cancelled = cancel(task_id)
+    if not cancelled:
+        return f"[schedule] Task {task_id} not found in pending or running."
+    if cancelled == [task_id]:
+        return f"[schedule] Task {task_id} cancelled."
+    return (f"[schedule] Cancelled {len(cancelled)} queued task(s) for {task_id} "
+            f"(ids: {', '.join(cancelled)}); the series will not run again.")
