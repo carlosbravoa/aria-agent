@@ -10,49 +10,33 @@ Each item: **value** / **effort** / notes. Ordered by priority within sections.
 
 ---
 
-## 1. Documentation (do first)
+## 1. Documentation — ✅ done
 
-- **Rewrite CLAUDE.md** — high / low. Badly stale, and it steers every future
-  Claude Code session:
-  - It still describes the removed `TOOL:`/`INPUT:` text protocol,
-    `_TOOL_RE`, `_parse_tool_args`, the `REMEMBER:`/`LEARN:` markers and
-    line-buffered streaming. The agent now uses native tool calling with
-    non-streaming requests.
-  - It says "88 tests in 5 files"; there are ~500 in ~30 files.
-  - The repo layout is missing `attachments.py`, `context.py`, `project.py`,
-    `usage.py`, `whatsapp_deploy.py`, `whatsapp_notify.py` and the tools
-    `code_search`, `git`, `learn`, `memory_search`, `plan`, `remember`,
-    `send_file`, `_net`.
-  - It says the conversation window is one `conversation_window.md`; it is now
-    one window per conversation key.
-  - The browser flag is now `--remote-allow-origins=http://localhost`.
-  - Document the new task fields `series_id`/`scheduled_for`, `ARIA_TASK_ID`,
-    per-conversation plans and model profiles.
-- **README** — med / low. The same stale test counts (README:1133, 1171) and the
-  conversation window filename (README:426, 662).
-- **`setup.py` / `docs/native-function-calling-spec.md`** — low / low. Mark the
-  spec as implemented, and make the "Aria 2.0 requires native tool calling"
-  wording consistent everywhere.
+CLAUDE.md rewritten from the code (native tool loop, full layout, task
+series/dedupe, per-conversation plans/profiles, security model, update/rollback).
+README gained an "Upgrading" section and fixed stale counts/filenames. The
+native function calling spec is marked implemented.
 
-## 2. Tooling & packaging
+- **Move CLAUDE.md into the repo** — low / trivial. It currently lives in the
+  parent directory, outside git, so contributors and CI never see it.
 
-- **CI (GitHub Actions)** — high / low. There is no `.github/`. Add a matrix for
-  Python 3.11–3.14 that runs `pytest` plus the import smoke test from CLAUDE.md,
-  on every push and PR.
-- **ruff (lint + format)** — med / low. It would already flag the redundant
-  imports (`workspace.py`, `reflect.py`) and the imports inside functions.
-  Enable it in CI.
-- **mypy** — med / med. The code is mostly annotated already. Start with
-  `--ignore-missing-imports` on `task.py`, `workspace.py` and `context.py`, then
-  widen.
-- **Dependency hygiene** — med / low. Dependencies have lower bounds only.
-  - Add upper bounds (or a constraints file) for `openai`,
-    `python-telegram-bot` and `trafilatura`.
-  - Commit a `package-lock.json` for `whatsapp/`: `whatsapp-web.js ^1.23`
-    breaks often upstream.
-- **`py.typed`** — low / trivial. `pyproject.toml` declares it but the file is
-  missing. Add it or drop the declaration.
-- **pre-commit** — low / low. Run ruff and the import smoke test.
+## 2. Tooling & packaging — ✅ done
+
+CI (`.github/workflows/ci.yml`) runs ruff and mypy, a pytest matrix on
+3.11–3.14, an import smoke test of every module, and `node --check` on the
+bridge. `.pre-commit-config.yaml` runs the same checks locally. Dependencies
+have major-version upper bounds; `[dev]` includes ruff, mypy and pre-commit.
+`py.typed` was added, and `whatsapp/package-lock.json` is deployed (`npm ci`).
+
+Follow-ups:
+- **Tighten mypy** — med / med. It passes with default settings. Next, turn on
+  `check_untyped_defs`, then `disallow_untyped_defs` module by module
+  (`task.py`, `context.py` and `usage.py` first).
+- **Wider ruff rules** — low / low. Only bug-finding rules are on (F, B, UP,
+  E4/7/9, W). Consider `I` (import sorting) and `SIM` once someone accepts the
+  churn. `ruff format` is deliberately not used, to keep the aligned-`=` style.
+- **Dependabot / Renovate** — low / low. Bump the upper bounds and the npm
+  lockfile with CI as the gate.
 
 ## 3. Architecture / refactors
 

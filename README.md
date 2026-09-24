@@ -19,7 +19,7 @@ The result is an agent that will impress you with how useful it can be while rem
 - **Rich tool ecosystem** — web content fetching (via trafilatura), file read/write, shell execution, Gmail and Google Drive (via gog), Google Calendar, IMAP email, Jira tickets, scheduled reminders, and memory reflection. You can also write your own tools — or ask the agent to write them for you.
 - **Multi-model support** — switch between models mid-session (e.g. local Ollama and a cloud model) with `/model <name>`
 - **Autonomous background tasks** — a supervisor runs scheduled tasks, sends proactive notifications, and reflects on past conversations to improve over time
-- **Lean token usage** — careful context management and a plain-text tool protocol mean you get impressive capability at a fraction of the cost of comparable agents
+- **Lean token usage** — careful context management, native tool calling and a cache-friendly prompt layout mean you get impressive capability at a fraction of the cost of comparable agents
 - **Browser automation** *(experimental)* — control your real Chrome/Chromium with existing sessions via CDP; navigate, click, read content from any logged-in site
 
 ## What is on the roadmap
@@ -34,6 +34,7 @@ The result is an agent that will impress you with how useful it can be while rem
 1. [Requirements](#requirements)
 2. [Quickstart — CLI only](#quickstart--cli-only)
 3. [Quickstart — with services](#quickstart--with-services)
+   - [Upgrading to this version](#upgrading-to-this-version)
 4. [Configure](#configure)
 5. [Model profiles](#model-profiles)
 6. [CLI commands](#cli-commands)
@@ -45,7 +46,7 @@ The result is an agent that will impress you with how useful it can be while rem
 12. [Memory](#memory)
 13. [Memory reflection](#memory-reflection)
 14. [Session continuity](#session-continuity)
-15. [Tool protocol](#tool-protocol)
+15. [Tool calling](#tool-calling)
 16. [Built-in tools](#built-in-tools)
 17. [Web fetching](#web-fetching)
 18. [Adding custom tools](#adding-custom-tools)
@@ -169,6 +170,25 @@ aria-install --dry-run    # preview changes without applying
 aria-install --uninstall  # remove all services
 ```
 
+### Upgrading to this version
+
+After `git pull && pip install .`:
+
+- **Re-run `aria-install --services`** — services now use a recovery template
+  unit (`aria-rollback@.service`, via `OnFailure=`) instead of ending in a
+  permanent failed state.
+- **`/model` in a channel is now per conversation.** A switch on Telegram or
+  WhatsApp is saved for that chat only (`~/.aria/.last_profile__<chat>`); the
+  REPL keeps `~/.aria/.last_profile`, which background tasks also follow.
+- **`./.env` in the current directory is no longer read.** Keep config in
+  `~/.aria/.env`, or point at another file with `ARIA_ENV=./.env`.
+- **Shell subprocesses no longer see Aria's own secrets** (API keys, tokens,
+  passwords from `.env`). If a script you run through `shell_run` needs one,
+  list its name in `ARIA_SHELL_ENV_ALLOW`.
+- **`web_fetch`/`browser` block every non-public address range.** On Tailscale
+  (100.64.0.0/10) or a fake-IP proxy such as Clash/sing-box (198.18.0.0/15),
+  allow the range with `ARIA_NET_ALLOW`.
+
 ---
 
 ## Configure
@@ -198,6 +218,8 @@ TELEGRAM_ALLOWED=<your chat ID>
 # ARIA_WA_PORT=7532
 # ARIA_WA_SECRET=pick-any-random-string
 # WHATSAPP_ALLOWED=34612345678      # international format, no +
+# ARIA_WA_PUSH_PORT=7533            # Node listener for outbound push (notify tool)
+# ARIA_WA_TIMEOUT=600               # seconds to wait for a reply; later replies are pushed
 
 # ── Gmail & Calendar ──────────────────────────────────────────────────────────
 # Required for: gmail and calendar tools
@@ -237,15 +259,21 @@ TELEGRAM_ALLOWED=<your chat ID>
 # ARIA_TOOL_BROKEN_AFTER=3         # N consecutive same-tool failures → "tool may be broken" escalation (0 off)
 # ARIA_FRICTION_MIN_CALLS=6        # flag high-friction turns to the user + friction log (0 off)
 # ARIA_FRICTION_REFLECT_MIN=3      # reflection diagnoses the friction log at N events per tool (0 off)
-# ARIA_CHANNEL_IDLE_MINUTES=60     # idle minutes before channel session summarised
-# ARIA_OPSMEM_MAX_LINES=40         # operational memory cap (LEARN: entries)
+# ARIA_CHANNEL_IDLE_MINUTES=60     # idle minutes before a channel session's window is trimmed
+# ARIA_OPSMEM_MAX_LINES=40         # operational memory cap (learn tool entries)
 # ARIA_WINDOW_MESSAGES=15          # exchanges kept in the rolling conversation window
 # ARIA_WINDOW_MSG_CHARS=300        # chars per message before truncation
 
 # ── Shell security ────────────────────────────────────────────────────────────
 # ARIA_SHELL_UNATTENDED=safe       # channels/supervisor: safe | off | full
 # ARIA_SHELL_SANDBOX=              # optional wrapper, e.g. "firejail --quiet --private-tmp"
+# ARIA_SHELL_SAFE_EXTRA=make,pytest # extra read-only commands allowed in safe mode
+# ARIA_SHELL_ENV_ALLOW=             # env var names passed to shell_run despite looking secret
 # "always" approvals are saved to ~/.aria/shell_allowlist.json — audit with /trust
+
+# ── Network ───────────────────────────────────────────────────────────────────
+# web_fetch/browser refuse non-public addresses; allow trusted ranges explicitly
+# ARIA_NET_ALLOW=100.64.0.0/10,198.18.0.0/15   # e.g. Tailscale, fake-IP proxies
 
 # ── Browser automation (experimental) ────────────────────────────────────────
 # Needs: pip install websockets, and chromium/chrome started with the debug port
@@ -263,6 +291,7 @@ TELEGRAM_ALLOWED=<your chat ID>
 # ARIA_REFLECT_BATCH=10            # sessions analysed per batch
 # ARIA_REFLECT_SESSION_CHARS=3000  # max chars read per session log
 # ARIA_REFLECT_MAX_LINES=40        # max bullet points in patterns.md
+# ARIA_REFLECT_SETTLE_MIN=10       # skip sessions active in the last N minutes
 
 # ── Self-update ───────────────────────────────────────────────────────────────
 # ARIA_SOURCE_DIR=~/aria-agent     # git checkout the update tool pulls from
@@ -354,7 +383,7 @@ Profiles are numbered 1–9. Each has an optional `NAME` used for switching — 
 /model fast     → switches and confirms
 ```
 
-> **Note:** Profile switches are per-session and per-channel. The supervisor always uses the default profile for scheduled tasks.
+> **Note:** Profile switches are saved per conversation: the REPL (and single-shot/`--notify`) use `~/.aria/.last_profile`, each Telegram/WhatsApp chat its own `~/.aria/.last_profile__<chat>`. Scheduled tasks follow the REPL's saved profile and never change it.
 
 ---
 
@@ -424,8 +453,8 @@ file's contents, `Esc`/`Ctrl+C` interrupts a reply while keeping context, and
 `Alt+Enter` inserts a newline.
 
 On exit, the rolling conversation window is trimmed and saved to
-`memory/conversation_window.md`, loaded into the next session for lightweight
-continuity — no LLM summarisation step.
+`memory/conversation_window__repl.md`, and resumed as history in the next
+session — no LLM summarisation step.
 
 ---
 
@@ -440,15 +469,15 @@ continuity — no LLM summarisation step.
    ```
 4. Start: `nohup aria-telegram >> ~/.aria/telegram.log 2>&1 &`
 
-Bot commands: `/start` `/memory` `/tools` `/clear` `/save <note>` `/version`
+Bot commands: `/start` `/memory` `/tools` `/clear` `/save <note>` `/version` `/model [name]` `/models`
 
 Replies **stream as the agent works**: each response arrives as its own message
 as soon as it's ready, a typing indicator stays alive during long turns, and a
 single live-edited "tool trail" message shows each tool call as it runs
 (`ARIA_TELEGRAM_PROGRESS=on`, the default — set `off` to disable the trail).
 
-Sessions are summarised after `ARIA_CHANNEL_IDLE_MINUTES` of inactivity
-so the agent has context when you return.
+After `ARIA_CHANNEL_IDLE_MINUTES` of inactivity the chat's conversation window
+is trimmed and the session closed; it resumes with that context when you return.
 
 ### Sending and receiving files
 
@@ -480,12 +509,13 @@ usual "may I access this?" approval flow first.
 
 Requires Node.js 18+.
 
-`aria-install` (answer yes to WhatsApp) now **copies `bridge.js` + `package.json`
-into `~/.aria/whatsapp/` for you** and refreshes them on every reinstall; the
+`aria-install` (answer yes to WhatsApp) now **copies `bridge.js`, `package.json`
+and `package-lock.json` into `~/.aria/whatsapp/` for you** and refreshes them on every reinstall; the
 self-update tool refreshes them too, so the Node side always tracks the Python
-side. It only touches those two files — your `node_modules/` and login state
-(`.wwebjs_auth/`) are left alone. You still run `npm install` once (and again
-if `package.json` changed — the installer/updater tells you when).
+side. It only touches those files — your `node_modules/` and login state
+(`.wwebjs_auth/`) are left alone. You still run `npm ci` once (and again
+if the package files changed — the installer/updater tells you when). The
+lockfile pins the exact `whatsapp-web.js` build, which breaks often upstream.
 
 ```bash
 # 1. Configure — run aria-install and answer yes to WhatsApp, or add to ~/.aria/.env:
@@ -494,8 +524,8 @@ if `package.json` changed — the installer/updater tells you when).
 # ARIA_WA_SECRET=your-secret
 # WHATSAPP_ALLOWED=34612345678
 
-# 2. Install Node deps (bridge.js/package.json are already deployed by aria-install)
-cd ~/.aria/whatsapp && npm install
+# 2. Install Node deps (bridge files are already deployed by aria-install)
+cd ~/.aria/whatsapp && npm ci
 
 # 3. Start both processes
 nohup aria-whatsapp >> ~/.aria/whatsapp.log 2>&1 &
@@ -560,10 +590,17 @@ schedule one for you:
 | `max_retries` | `2`        | Retry count on failure                           |
 | `source`      | `user`     | `cron`, `agent`, `user`, or `script`             |
 
+Recurring occurrences also carry `series_id` (shared by every run of the
+series) and `scheduled_for` (the slot the run belongs to, so retries don't
+shift the schedule). These are filled in automatically.
+
 ### Recurring tasks
 
 Set `recur` and the supervisor automatically re-enqueues the task after each
-run — no need to reschedule manually. Ask the agent to create one:
+run — no need to reschedule manually. Creating the same task twice (same
+prompt, recurrence and slot) returns the existing one; a running task can't
+create recurring tasks; cancelling any occurrence stops the whole series.
+Ask the agent to create one:
 
 ```
 You: create a daily morning briefing at 8am every weekday
@@ -658,30 +695,26 @@ Aria: 🔧 calling reflect...
 
 ## Session continuity
 
-A rolling window of the last `ARIA_WINDOW_MESSAGES` exchanges is kept in
-`memory/conversation_window.md` and loaded under `## Recent Conversation` in the
-next session's system prompt. No LLM summarisation on exit — the window is just
-trimmed, so it works instantly and offline.
+A rolling window of the last `ARIA_WINDOW_MESSAGES` messages is kept per
+conversation in `memory/conversation_window__<key>.md` (`repl` for the terminal,
+`telegram_<chat>` / `whatsapp_<number>` for channels) and replayed as real
+conversation history in the next session. No LLM summarisation on exit — the
+window is just trimmed, so it works instantly and offline. `/clear` deletes it.
 
 Works across all interfaces: REPL, single-shot, Telegram, WhatsApp.
 
 ---
 
-## Tool protocol
+## Tool calling
 
-Aria uses plain text that any LLM can produce:
+Aria 2.x uses the provider's native tool/function-calling API: tool schemas are
+sent with every request and the model returns structured `tool_calls`, so no
+JSON has to be parsed out of free text. This requires a tool-aware model; for
+models without tool support, use Aria 1.x (plain-text protocol). Several calls
+in one turn are supported, and read-only tools run in parallel.
 
-```
-TOOL: file_access
-INPUT: {"action": "list", "path": "~/projects"}
-
-RESULT: my-app/ notes.md script.py
-```
-
-For saving facts:
-```
-REMEMBER: User prefers bullet-point responses.
-```
+Memory is written through tools too: `remember` (facts about you) and `learn`
+(operational notes).
 
 Tools are auto-discovered from `src/aria/tools/` and `~/.aria/tools/`
 at startup — no registration needed.
@@ -709,7 +742,7 @@ at startup — no registration needed.
 | `reflect`     | Trigger memory reflection on demand.                                      |
 | `jira`        | Create, search, comment, transition Jira issues via REST API.             |
 | `browser`     | *(experimental)* Control Chrome/Chromium via CDP — viewport-based snapshots, click, type, read, scroll, with human-like input by default. Uses your real sessions. |
-| `imap`        | List, search, read, move, delete emails on any IMAP provider.             |
+| `imap`        | List, search, read, mark read/unread, move emails, list folders on any IMAP provider. |
 | `drive`       | List, search, read, download, upload, organise Google Drive files via gog. |
 | `update`      | Self-update from the git source checkout: fetch, diff, dry-run import check, apply. Service updates arm a rollback watchdog (`aria-rollback`) that auto-reverts a crash-looping update within `ARIA_UPDATE_CONFIRM_SEC`. |
 
@@ -1058,6 +1091,10 @@ aria-install --services    # reinstall after git pull + pip install .
 aria-install --uninstall   # remove all services
 ```
 
+Each service has `OnFailure=aria-rollback@%n.service`: if a service
+crash-loops within `ARIA_UPDATE_CONFIRM_SEC` of a self-update, the
+`aria-rollback` template unit reverts to the previous commit and restarts it.
+
 ### Day-to-day management
 
 ```bash
@@ -1087,9 +1124,11 @@ nohup aria-supervisor  >> ~/.aria/supervisor.log  2>&1 &
 ```
 ~/.aria/
 ├── .env                                      ← configuration
-├── .last_profile                             ← persisted active model profile
+├── .last_profile                             ← REPL model profile (.last_profile__<chat> per channel chat)
 ├── authorized_dirs.json                      ← directories granted on the fly
 ├── browser_state.json                        ← paused browser task (for resume)
+├── shell_allowlist.json                      ← "always" shell approvals (/trust)
+├── usage.jsonl                               ← token usage log (aria --usage)
 ├── tools/                                    ← custom tool .py files
 ├── whatsapp/                                 ← Node.js WhatsApp bridge
 │   ├── package.json
@@ -1103,16 +1142,20 @@ nohup aria-supervisor  >> ~/.aria/supervisor.log  2>&1 &
 │   └── cancelled/
 └── workspace/
     ├── memory/                               ← chmod 700; files 600
-    │   ├── core.md                           ← user facts (REMEMBER: lines)
-    │   ├── operational_memory.md             ← procedures/shortcuts (LEARN: lines)
-    │   ├── conversation_window.md            ← rolling last N exchanges
+    │   ├── core.md                           ← user facts (remember tool)
+    │   ├── operational_memory.md             ← procedures/shortcuts (learn tool)
+    │   ├── project_notes/                    ← per-repository notes (learn scope=project)
+    │   ├── conversation_window__<key>.md     ← rolling last N messages, one per conversation
+    │   ├── plan__<key>.json                  ← active task plan per conversation
     │   ├── patterns.md                       ← behavioural patterns (aria-reflect)
-    │   ├── notify_feed.md                     ← recent proactive messages
+    │   ├── notify_feed.md                    ← recent proactive messages
+    │   ├── friction_log.md                   ← turns where tools kept failing
     │   └── reflect_watermark                 ← tracks last analysed session
     ├── soul/
     │   └── identity.md                       ← agent persona (edit freely)
     ├── sessions/                             ← chmod 700; files 600
-    │   └── session_YYYYMMDD_HHMMSS.md        ← per-session logs
+    │   └── session_YYYYMMDD_HHMMSS_ffffff.md ← per-session logs
+    ├── inbox/                                ← files sent to Aria over channels
     └── tools_registry/
         └── available_tools.md                ← auto-generated tool reference
 ```
@@ -1122,7 +1165,7 @@ nohup aria-supervisor  >> ~/.aria/supervisor.log  2>&1 &
 ## Development
 
 Aria is built to be taken forward with a coding agent (e.g. Claude Code) or by
-hand. The repo includes `CLAUDE.md` — a context file documenting the
+hand. A `CLAUDE.md` context file documents the
 architecture, conventions, and known pitfalls — which Claude Code reads
 automatically.
 
@@ -1130,14 +1173,17 @@ automatically.
 
 ```bash
 pip install ".[dev]"   # installs pytest + pytest-mock
-pytest                 # run all 88 tests
-pytest tests/test_agent_loop.py -v
+pytest                 # run the 600+ tests (a few seconds)
+pytest tests/test_native_tools.py -v
 pytest --cov=aria --cov-report=term-missing   # coverage (needs pytest-cov)
+ruff check src tests   # lint
+mypy                   # type-check (config in pyproject.toml)
 ```
 
-Tests cover workspace persistence, the task queue, text formatting, tool
-security (path blocking, command rejection, shell quoting), and the agent loop
-(memory markers, response selection, module-level constant existence).
+Tests cover the native tool loop, workspace persistence and locking, the task
+queue and recurring-task dedupe, channels, tool security (path blocking, shell
+policy, SSRF guard, secret stripping), reflection, self-update, and import
+smoke tests (every module imports, required module-level symbols exist).
 
 ### Conventions
 
@@ -1150,12 +1196,12 @@ security (path blocking, command rejection, shell quoting), and the agent loop
 - **New env vars** go in `setup.py`'s template as commented placeholders, and in
   the README's Configure section.
 
-### The roadmap item that matters most
+### Roadmap
 
-The plain-text tool protocol's JSON parsing is fragile for coding tasks (quotes,
-braces, newlines in values). The correct fix is native function calling — a full
-design spec is parked at `docs/native-function-calling-spec.md`. Start there if
-you want Aria to be a reliable coding agent.
+Open work (modernisation, refactors, features) is tracked in `docs/ROADMAP.md`;
+parked tool-specific items in `docs/BACKLOG.md`. Native function calling —
+long the most important item — shipped in 2.0; its design notes are kept in
+`docs/native-function-calling-spec.md`.
 
 ---
 
@@ -1167,15 +1213,11 @@ aria-agent/
 ├── README.md
 ├── CLAUDE.md                          ← context for Claude Code
 ├── docs/
-│   └── native-function-calling-spec.md  ← parked design spec
-├── tests/                             ← 88 tests (pytest)
-│   ├── conftest.py
-│   ├── test_workspace.py
-│   ├── test_task.py
-│   ├── test_formatting.py
-│   ├── test_tools_security.py
-│   └── test_agent_loop.py
-├── whatsapp/                          ← copy to ~/.aria/whatsapp/
+│   ├── ROADMAP.md                     ← open work
+│   ├── BACKLOG.md                     ← parked tool items
+│   └── native-function-calling-spec.md  ← 2.0 design (implemented)
+├── tests/                             ← 600+ tests (pytest), conftest.py + ~33 test files
+├── whatsapp/                          ← deployed to ~/.aria/whatsapp/ by aria-install / update
 │   ├── package.json
 │   └── bridge.js
 └── src/
@@ -1195,11 +1237,14 @@ aria-agent/
         ├── task.py                    ← task model (JSON), queue ops, recurrence
         ├── telegram_bot.py            ← Telegram bot
         ├── telegram_notify.py         ← push-only Telegram sender + _md_to_html
+        ├── usage.py                   ← token usage log summary (aria --usage, /usage)
         ├── whatsapp_bridge.py         ← HTTP bridge for whatsapp-web.js
-        ├── workspace.py               ← markdown persistence, secret redaction, permissions
+        ├── whatsapp_deploy.py         ← copies bridge.js/package.json to ~/.aria/whatsapp/
+        ├── whatsapp_notify.py         ← push to WhatsApp via the bridge's push listener
+        ├── workspace.py               ← markdown persistence, secret redaction, permissions, file locks
         └── tools/
             ├── __init__.py            ← auto-loader and dispatcher
-            ├── _env.py                ← subprocess environment builder
+            ├── _env.py                ← subprocess environment builder (optionally strips Aria's secrets)
             ├── _net.py                ← shared SSRF guard for outbound fetches
             ├── browser.py             ← Chrome/Chromium via raw CDP (httpx + websockets), humanized input
             ├── calendar.py            ← Google Calendar via gog
@@ -1210,11 +1255,12 @@ aria-agent/
             ├── gmail.py               ← Gmail via gog
             ├── imap.py                ← IMAP email for any provider
             ├── jira.py                ← Jira REST API via httpx
-            ├── learn.py               ← save an operational/procedural note
-            ├── notify.py              ← Telegram push notification
+            ├── learn.py               ← add/list/forget operational notes (global or project)
+            ├── memory_search.py       ← search across all memory stores
+            ├── notify.py              ← push notification on the current channel (Telegram/WhatsApp)
             ├── plan.py                ← task-plan/todo checklist (rendered live in the REPL)
             ├── reflect.py             ← on-demand memory reflection
-            ├── remember.py            ← save a permanent user fact
+            ├── remember.py            ← add/list/forget permanent user facts
             ├── schedule.py            ← create/list/cancel supervisor tasks
             ├── send_file.py           ← send a file to the user over Telegram
             ├── shell_run.py           ← shell commands, script mode, learnable approval, opt-in sandbox

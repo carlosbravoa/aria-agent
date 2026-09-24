@@ -1,5 +1,16 @@
 # Tool Calling — 2.0 Native Rewrite Plan
 
+> **Status: implemented (Aria 2.0+). Kept as design history.**
+> The native-only engine described here is what ships: `agent.py` sends
+> `tools=` on every non-streaming request, handles lists of `tool_calls`, runs
+> `PARALLEL_SAFE` tools concurrently, and persists memory via the `remember` /
+> `learn` tools. There is **no** text-protocol fallback and no
+> `LLM_NATIVE_TOOLS` switch — an endpoint without tool support gets a friendly
+> hard error (`Agent._friendly_error`) pointing at a tool-aware model or 1.x.
+> Not done: token-by-token streaming of the final answer (the optional
+> follow-up in decision 7). Current behaviour is documented in `CLAUDE.md` and
+> the README; open work lives in `docs/ROADMAP.md`.
+
 Build sheet for Aria 2.0: a **native-only** tool-calling engine that replaces the
 text `TOOL:`/`INPUT:` protocol for tool-aware models. Written so the rewrite can
 be picked up cold. Supersedes the earlier "Step 2 — dual-mode / `auto` fallback"
