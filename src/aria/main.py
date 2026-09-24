@@ -44,6 +44,8 @@ _THEME = Theme({
 })
 
 console = Console(theme=_THEME, highlight=False)
+# Console.print has no `file=` kwarg — errors go through a stderr console.
+err_console = Console(theme=_THEME, highlight=False, stderr=True)
 
 
 # ── Input: prompt_toolkit session ─────────────────────────────────────────────
@@ -198,7 +200,9 @@ _HELP_TEXT = """
 """
 
 
-_MENTION_RE = re.compile(r"(?<![\w@])@([^\s@]+)")
+# \S+ rather than [^\s@]+: paths may contain '@' (/home/user@corp.com/x). The
+# lookbehind still keeps email addresses (user@host) from matching.
+_MENTION_RE = re.compile(r"(?<![\w@])@(\S+)")
 _MENTION_MAX_BYTES = 100_000  # per-file cap; keeps a stray @bigfile from blowing context
 
 
@@ -449,7 +453,10 @@ def repl(agent: Agent) -> None:
             console.rule()
 
         elif cmd == "/clear":
-            agent.history = list(agent._seed)   # seed is empty; examples live in the system prompt
+            if hasattr(agent, "clear_session"):
+                agent.clear_session()   # also resets the persisted window + plan
+            else:
+                agent.history = list(agent._seed)   # seed is empty; examples live in the system prompt
             console.print("  [success]History cleared.[/]")
 
         elif cmd == "/save":
@@ -551,7 +558,7 @@ def main() -> None:
                 send(error_msg, chat_id=args.chat)
             except Exception:
                 pass
-            console.print(f"[error]{error_msg}[/]", file=sys.stderr)
+            err_console.print(f"[error]{error_msg}[/]")
             sys.exit(1)
 
     elif query:

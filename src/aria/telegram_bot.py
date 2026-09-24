@@ -15,6 +15,7 @@ import time
 
 from telegram import Update
 from telegram.constants import ChatAction
+from telegram.error import RetryAfter
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -26,6 +27,7 @@ from telegram.request import HTTPXRequest
 
 from aria import attachments, config, __version__
 from aria.channel import get_session, handle, shutdown
+from aria.telegram_notify import _split  # single shared implementation
 
 log     = logging.getLogger(__name__)
 CHANNEL = "telegram"
@@ -38,22 +40,6 @@ def _is_allowed(update: Update) -> bool:
     allowed     = {s.strip() for s in allowed_raw.split(",") if s.strip()}
     chat_id     = str(update.effective_chat.id)  # type: ignore[union-attr]
     return chat_id in allowed
-
-
-def _split(text: str, max_len: int = 4000) -> list[str]:
-    if len(text) <= max_len:
-        return [text]
-    chunks, buf = [], ""
-    for line in text.splitlines(keepends=True):
-        if len(buf) + len(line) > max_len:
-            if buf:
-                chunks.append(buf)
-            buf = line
-        else:
-            buf += line
-    if buf:
-        chunks.append(buf)
-    return chunks or [text[:max_len]]
 
 
 async def _reply(update: Update, text: str, parse_html: bool = True) -> None:
@@ -109,7 +95,10 @@ async def cmd_clear(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not _is_allowed(update):
         return
     agent = get_session(CHANNEL, str(update.effective_chat.id))  # type: ignore[union-attr]
-    agent.history = list(agent._seed)
+    if hasattr(agent, "clear_session"):
+        agent.clear_session()   # also resets the persisted window + plan
+    else:
+        agent.history = list(agent._seed)
     await _reply(update, "History cleared.")
 
 
@@ -155,6 +144,16 @@ async def cmd_save(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 # ── Live progress bridge (sync agent loop ↔ async bot) ────────────────────────
 
+_MAX_RETRY_AFTER = 30.0   # cap flood-control sleeps so a turn can't hang
+
+
+def _retry_seconds(exc: RetryAfter) -> float:
+    """RetryAfter.retry_after is an int or (PTB >= 22) a timedelta."""
+    ra = exc.retry_after
+    secs = ra.total_seconds() if hasattr(ra, "total_seconds") else float(ra)
+    return max(0.0, min(secs, _MAX_RETRY_AFTER))
+
+
 class _Progress:
     """Bridges the synchronous agent loop (run in a worker thread) to the bot's
     asyncio loop: keeps the typing indicator alive, maintains ONE live tool-trail
@@ -169,6 +168,7 @@ class _Progress:
         self.status_id = None          # message_id of the live trail (lazy)
         self.steps: list[str] = []
         self.sent      = 0             # responses streamed (0 → send a fallback)
+        self.undelivered: list[str] = []   # text that never went out (flushed at end)
         self._alive    = True
         self._task     = None
         self._show_trail = os.environ.get(
@@ -200,26 +200,46 @@ class _Progress:
         except Exception:
             pass
 
+    async def _send_chunk(self, chunk: str) -> bool:
+        """Send one chunk as HTML, falling back to plain text. A RetryAfter
+        (flood control) sleeps the requested time and retries once."""
+        from aria.telegram_notify import _md_to_html
+        for html_mode in (True, False):
+            body = _md_to_html(chunk) if html_mode else chunk
+            mode = "HTML" if html_mode else None
+            for attempt in range(2):
+                try:
+                    await self.bot.send_message(self.chat_id, body, parse_mode=mode)
+                    return True
+                except RetryAfter as exc:
+                    if attempt:
+                        log.error("stream send rate-limited twice: %s", exc)
+                        return False
+                    await asyncio.sleep(_retry_seconds(exc))
+                except Exception as exc:
+                    log.error("stream send failed (%s): %s",
+                              "HTML" if html_mode else "plain", exc)
+                    break           # HTML rejected → try plain text
+        return False
+
+    async def _send_chunks(self, chunks: list[str]) -> list[str]:
+        """Send chunks in order; return the ones that could not be delivered."""
+        return [c for c in chunks if not await self._send_chunk(c)]
+
     async def _send_response(self, text: str) -> bool:
         """Send the response (chunked). Returns True if at least one chunk was
-        delivered, so the caller only counts a response as sent when it really
-        went out."""
-        from aria.telegram_notify import _md_to_html
-        delivered = False
-        for chunk in _split(text):
-            if not chunk.strip():
-                continue
-            try:
-                await self.bot.send_message(
-                    self.chat_id, _md_to_html(chunk), parse_mode="HTML")
-                delivered = True
-            except Exception:
-                try:
-                    await self.bot.send_message(self.chat_id, chunk)
-                    delivered = True
-                except Exception as exc:
-                    log.error("stream send failed: %s", exc)
-        return delivered
+        delivered. A partial delivery retries the missing chunks once; any still
+        missing are kept in `undelivered` for _run_turn to flush at the end, so
+        the fallback never re-sends (duplicates) the chunks that did go out."""
+        chunks = [c for c in _split(text) if c.strip()]
+        failed = await self._send_chunks(chunks)
+        if not failed:
+            return True
+        if len(failed) == len(chunks):
+            return False
+        failed = await self._send_chunks(failed)
+        self.undelivered.extend(failed)
+        return True
 
     # ---- worker-thread side (agent callbacks) -------------------------------
     def activity(self, detail: str) -> None:
@@ -238,11 +258,15 @@ class _Progress:
         # loss. Now a failed stream leaves sent==0 so the fallback re-sends it.
         try:
             delivered = asyncio.run_coroutine_threadsafe(
-                self._send_response(text), self.loop).result(timeout=120)
+                self._send_response(text), self.loop).result(timeout=300)
         except Exception:
             delivered = False
         if delivered:
             self.sent += 1
+        else:
+            # Keep it: if an earlier response did go out (sent > 0) the
+            # whole-turn fallback won't fire, so _run_turn flushes these.
+            self.undelivered.append(text)
 
     # ---- lifecycle ----------------------------------------------------------
     def start(self) -> None:
@@ -292,6 +316,9 @@ async def _run_turn(update: Update, context: ContextTypes.DEFAULT_TYPE,
             responses = ["(no response)"]
         for response in responses:
             await _reply(update, response)
+    elif progress.undelivered:
+        for text in progress.undelivered:
+            await _reply(update, text)
 
 
 async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

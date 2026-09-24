@@ -16,6 +16,7 @@ Setup:
        ARIA_WA_PUSH_PORT=7533      # Node push listener for outbound (default 7533)
        ARIA_WA_SECRET=<token>      # shared secret for Node↔Python auth
        WHATSAPP_ALLOWED=<phone1,phone2>  # allowed sender numbers (international format)
+       ARIA_WA_TIMEOUT=600         # seconds bridge.js waits for a turn (default 600)
 
 Outbound push: the Node bridge runs a local push listener on ARIA_WA_PUSH_PORT;
 aria.whatsapp_notify.send POSTs to it so the agent can push messages to
@@ -38,6 +39,7 @@ import json
 import logging
 import os
 import threading
+import time
 
 from aria import config
 from aria.channel import handle
@@ -54,6 +56,19 @@ def _allowed() -> set[str]:
 
 def _secret() -> str:
     return os.environ.get("ARIA_WA_SECRET", "")
+
+
+_DEFAULT_TIMEOUT = 600
+
+
+def _turn_timeout() -> float:
+    """ARIA_WA_TIMEOUT: how long bridge.js waits for a reply (shared env var,
+    same default as the Node side)."""
+    raw = os.environ.get("ARIA_WA_TIMEOUT", "").strip()
+    try:
+        return float(raw) if raw else float(_DEFAULT_TIMEOUT)
+    except ValueError:
+        return float(_DEFAULT_TIMEOUT)
 
 
 def _strip_agent_prefix(reply: str) -> str:
@@ -147,12 +162,25 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             return
 
         # Run through the agent (blocking — bridge runs handler in a thread)
+        started   = time.monotonic()
         responses = handle(CHANNEL, sender, text)
         reply = "\n\n".join(r for r in responses if r.strip())
 
         # Strip a leading agent-name prefix ("Aria: ") only — never a colon
         # that legitimately appears in the reply (e.g. "Status: done").
         reply = _strip_agent_prefix(reply)
+
+        # bridge.js gives up after ARIA_WA_TIMEOUT; a turn that outlived it has
+        # nobody listening on this socket, so push the reply out-of-band rather
+        # than lose it. The small margin covers time spent before handle().
+        if time.monotonic() - started >= _turn_timeout() - 5 and reply:
+            try:
+                from aria import whatsapp_notify
+                whatsapp_notify.send(reply, to=sender)
+                log.info("Late reply for %s delivered via push", sender)
+            except Exception as exc:
+                log.error("Late reply push to %s failed: %s", sender, exc)
+            return
 
         self._respond({"reply": reply})
 

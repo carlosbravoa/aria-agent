@@ -41,11 +41,17 @@ class _Session:
         self.user_id   = user_id
         self._timer: threading.Timer | None = None
         self._gen      = 0          # bumped on every activity; stale timers bail
-        self._lock     = threading.Lock()
+        self._lock     = threading.Lock()   # held for a whole turn; idle waits on it
+        self.closed    = False      # set (under both locks) once evicted/closed
         self._reset_timer()
 
-    def handle(self, text: str, response_cb=None, activity_cb=None) -> list[str]:
+    def handle(self, text: str, response_cb=None,
+               activity_cb=None) -> list[str] | None:
+        """Run one turn. Returns None if the session was evicted between lookup
+        and lock acquisition — the caller must fetch a fresh session."""
         with self._lock:
+            if self.closed:
+                return None
             self._reset_timer()
             # Publish the channel/user for the duration of the turn so delivery
             # tools (notify, send_file) reply here instead of broadcasting.
@@ -57,6 +63,9 @@ class _Session:
                                              activity_cb=activity_cb)
             finally:
                 context.reset(token)
+                # Restart the countdown from the END of the turn: a turn longer
+                # than the idle window must not be evicted the moment it ends.
+                self._reset_timer()
 
     def _reset_timer(self) -> None:
         """Restart the inactivity countdown. Called under self._lock."""
@@ -72,13 +81,16 @@ class _Session:
         """Called after inactivity — trim the window and drop from the registry.
         Bails if newer activity reset the timer (gen mismatch), and only evicts
         itself if the registry still maps the key to this exact session (so an
-        orphaned duplicate can never evict a live one)."""
+        orphaned duplicate can never evict a live one). Holding self._lock
+        means eviction waits for an in-flight turn; marking `closed` makes a
+        message that already looked this session up retry on a fresh one."""
         with self._lock:
-            if gen != self._gen:
+            if gen != self._gen or self.closed:
                 return                       # a newer message reset the timer
             log.info("Session idle for %d min (%s/%s)",
                      _IDLE_SECONDS // 60, self.channel, self.user_id)
             with _registry_lock:
+                self.closed = True
                 if _sessions.get(self.key) is self:
                     _sessions.pop(self.key, None)
             self.agent.close()
@@ -94,16 +106,35 @@ class _Session:
 # concurrently) and idle-timer threads both mutate it.
 _sessions: dict[tuple[str, str], _Session] = {}
 _registry_lock = threading.Lock()
+# Per-key creation locks: building an Agent is slow (tools, prompt, workspace),
+# so it happens outside _registry_lock — other users are never blocked — while
+# concurrent first messages from the SAME user still create exactly one session.
+_create_locks: dict[tuple[str, str], threading.Lock] = {}
+
+
+def _live(key: tuple[str, str]) -> _Session | None:
+    """Registered, not-yet-closed session for key. Call under _registry_lock."""
+    sess = _sessions.get(key)
+    return sess if sess is not None and not sess.closed else None
 
 
 def _get_or_create(channel: str, user_id: str) -> _Session:
-    """Atomically fetch or create the session for this (channel, user_id)."""
+    """Fetch or create the session for this (channel, user_id) — double-checked
+    under a per-key lock so the Agent is constructed outside the global lock."""
     key = (channel, user_id)
     with _registry_lock:
-        sess = _sessions.get(key)
-        if sess is None:
-            log.info("New session: channel=%s user=%s", channel, user_id)
-            sess = _Session(channel, user_id)
+        sess = _live(key)
+        if sess is not None:
+            return sess
+        key_lock = _create_locks.setdefault(key, threading.Lock())
+    with key_lock:
+        with _registry_lock:
+            sess = _live(key)
+            if sess is not None:
+                return sess
+        log.info("New session: channel=%s user=%s", channel, user_id)
+        sess = _Session(channel, user_id)
+        with _registry_lock:
             _sessions[key] = sess
         return sess
 
@@ -124,7 +155,14 @@ def handle(channel: str, user_id: str, text: str,
     progress mid-turn (used by Telegram); omitting them keeps the batched return
     (used by WhatsApp and the rest).
     """
-    return _get_or_create(channel, user_id).handle(text, response_cb, activity_cb)
+    # A session evicted by its idle timer between lookup and lock acquisition
+    # returns None — retry on a fresh one instead of running on a closed agent.
+    for _ in range(3):
+        result = _get_or_create(channel, user_id).handle(
+            text, response_cb, activity_cb)
+        if result is not None:
+            return result
+    raise RuntimeError(f"could not obtain a live session for {channel}/{user_id}")
 
 
 def shutdown() -> None:
@@ -135,6 +173,9 @@ def shutdown() -> None:
     for session in sessions:
         session.cancel()
         with session._lock:
+            if session.closed:
+                continue
+            session.closed = True
             session.agent.close()
 
 

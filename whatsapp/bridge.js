@@ -23,11 +23,15 @@
  *   ARIA_WA_PUSH_PORT=7533     (local push listener Python POSTs outbound to)
  *   ARIA_WA_SECRET=<same secret as in ~/.aria/.env>
  *   WHATSAPP_ALLOWED=1234567890,0987654321   (international format, no +)
+ *   ARIA_WA_TIMEOUT=600        (seconds to wait for an agent turn; keep in sync
+ *                               with the Python bridge, which pushes the reply
+ *                               out-of-band if a turn outlives this)
  */
 
 const { Client, LocalAuth } = require("whatsapp-web.js");
 const qrcode = require("qrcode-terminal");
 const http = require("http");
+const crypto = require("crypto");
 const fs = require("fs");
 const path = require("path");
 
@@ -58,6 +62,16 @@ const ALLOWED = (process.env.WHATSAPP_ALLOWED || "")
   .split(",")
   .map((s) => s.trim())
   .filter(Boolean);
+// Agent turns (tool marathons, browser tasks) routinely exceed two minutes.
+const TIMEOUT_MS = (parseInt(process.env.ARIA_WA_TIMEOUT || "600") || 600) * 1000;
+
+// Constant-time secret comparison; length mismatch is a plain (safe) reject
+// because timingSafeEqual throws on unequal lengths.
+function secretMatches(given) {
+  const a = Buffer.from(String(given || ""));
+  const b = Buffer.from(SECRET);
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
 
 // ── WhatsApp client ───────────────────────────────────────────────────────────
 
@@ -92,25 +106,33 @@ client.on("message", async (msg) => {
   // Strip @c.us suffix WhatsApp appends to numbers
   const sender = msg.from.replace(/@c\.us$/, "");
 
-  if (ALLOWED.length && !ALLOWED.includes(sender)) {
+  // FAIL CLOSED like the Python side: an empty allowlist accepts nobody.
+  if (!ALLOWED.includes(sender)) {
     console.log(`Ignored message from non-allowed sender: ${sender}`);
     return;
   }
 
   console.log(`[${sender}]: ${msg.body.slice(0, 80)}`);
 
-  // Show "typing..." indicator
-  const chat = await msg.getChat();
-  await chat.sendStateTyping();
-
+  // Everything awaits inside try: a rejected getChat()/sendStateTyping() in an
+  // async event handler would otherwise be an unhandled rejection (node exit).
+  let chat = null;
   try {
+    chat = await msg.getChat();
+    await chat.sendStateTyping();
     const reply = await callBridge(sender, msg.body);
     await chat.clearState();
     await msg.reply(reply);
   } catch (err) {
-    await chat.clearState();
     console.error("Bridge error:", err.message);
-    await msg.reply("⚠️ Something went wrong. Please try again.");
+    try {
+      if (chat) await chat.clearState();
+      await msg.reply(err.timedOut
+        ? "⏳ Still working on that — I'll send the answer when it's ready."
+        : "⚠️ Something went wrong. Please try again.");
+    } catch (err2) {
+      console.error("Error reply failed:", err2.message);
+    }
   }
 });
 
@@ -146,9 +168,11 @@ function callBridge(from, text) {
     });
 
     req.on("error", reject);
-    req.setTimeout(120000, () => {
+    req.setTimeout(TIMEOUT_MS, () => {
       req.destroy();
-      reject(new Error("Bridge request timed out"));
+      const err = new Error("Bridge request timed out");
+      err.timedOut = true;
+      reject(err);
     });
 
     req.write(body);
@@ -182,7 +206,7 @@ function startPushServer() {
       reply(403, { error: "bridge not configured: set ARIA_WA_SECRET" });
       return;
     }
-    if (req.headers["x-aria-secret"] !== SECRET) {
+    if (!secretMatches(req.headers["x-aria-secret"])) {
       reply(403, { error: "forbidden" });
       return;
     }

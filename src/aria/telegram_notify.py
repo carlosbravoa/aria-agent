@@ -25,7 +25,10 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import json
+import logging
 from pathlib import Path
+
+log = logging.getLogger(__name__)
 
 # Telegram's own limits.
 _MAX_UPLOAD  = 50 * 1024 * 1024
@@ -48,10 +51,19 @@ def _chat_ids() -> list[int]:
 
 
 def _split(text: str, max_len: int = 4000) -> list[str]:
+    """Split text into chunks of at most max_len chars, preferring line breaks.
+    A single line longer than max_len is hard-split so no chunk ever exceeds
+    the limit. Shared by telegram_bot — keep this the only implementation."""
     if len(text) <= max_len:
         return [text]
     chunks, buf = [], ""
     for line in text.splitlines(keepends=True):
+        while len(line) > max_len:           # overlong line → hard-split
+            if buf:
+                chunks.append(buf)
+                buf = ""
+            chunks.append(line[:max_len])
+            line = line[max_len:]
         if len(buf) + len(line) > max_len:
             if buf:
                 chunks.append(buf)
@@ -67,20 +79,29 @@ def _md_to_html(text: str) -> str:
     """
     Convert common Markdown patterns to Telegram HTML.
     Telegram HTML supports: <b>, <i>, <u>, <s>, <code>, <pre>.
+    Code spans/blocks are pulled out into placeholders before inline formatting
+    runs, so `__init__` or `**kwargs` inside code is never turned into bold.
     """
-    # 1. Escape HTML special chars first
-    result = html.escape(text)
+    # 1. Escape HTML special chars first (NULs dropped: they delimit placeholders)
+    result = html.escape(text.replace("\x00", ""))
+
+    stash: list[str] = []
+
+    def _keep(fragment: str) -> str:
+        stash.append(fragment)
+        return f"\x00{len(stash) - 1}\x00"
 
     # 2. Fenced code blocks ```lang\n...\n``` → <pre><code>...</code></pre>
     result = re.sub(
         r"```(?:\w+)?\n(.*?)```",
-        lambda m: f"<pre><code>{m.group(1).rstrip()}</code></pre>",
+        lambda m: _keep(f"<pre><code>{m.group(1).rstrip()}</code></pre>"),
         result,
         flags=re.DOTALL,
     )
 
     # 3. Inline code `...` → <code>...</code>
-    result = re.sub(r"`([^`\n]+)`", r"<code>\1</code>", result)
+    result = re.sub(r"`([^`\n]+)`", lambda m: _keep(f"<code>{m.group(1)}</code>"),
+                    result)
 
     # 4. Bold **text** or __text__ → <b>text</b>  (DOTALL for multiline)
     result = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", result, flags=re.DOTALL)
@@ -95,7 +116,8 @@ def _md_to_html(text: str) -> str:
     # 7. Headers # ## ### → <b>text</b>
     result = re.sub(r"^#{1,6}\s+(.+)$", r"<b>\1</b>", result, flags=re.MULTILINE)
 
-    return result
+    # 8. Restore the protected code fragments
+    return re.sub(r"\x00(\d+)\x00", lambda m: stash[int(m.group(1))], result)
 
 
 def current_chat_id() -> int | None:
@@ -125,39 +147,73 @@ def _targets(chat_id: int | None) -> list[int]:
     return [current] if current else _chat_ids()
 
 
+def _post_message(url: str, chat_id: int, text: str, html_mode: bool) -> None:
+    """POST one sendMessage. Raises urllib.error.HTTPError / URLError."""
+    body: dict = {"chat_id": chat_id, "text": text}
+    if html_mode:
+        body["parse_mode"] = "HTML"
+    req = urllib.request.Request(
+        url,
+        data=json.dumps(body).encode(),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        resp.read()
+
+
+def _send_chunk(url: str, chat_id: int, chunk: str) -> None:
+    """Send one Markdown chunk as HTML; on an HTML rejection (400, typically a
+    'can't parse entities' error) retry the same chunk as plain text."""
+    try:
+        _post_message(url, chat_id, _md_to_html(chunk), html_mode=True)
+        return
+    except urllib.error.HTTPError as e:
+        if e.code != 400:
+            body_err = e.read().decode(errors="replace")
+            raise RuntimeError(f"Telegram API error {e.code}: {body_err}") from e
+    try:
+        _post_message(url, chat_id, chunk, html_mode=False)
+    except urllib.error.HTTPError as e:
+        body_err = e.read().decode(errors="replace")
+        raise RuntimeError(f"Telegram API error {e.code}: {body_err}") from e
+
+
 def send(text: str, chat_id: int | None = None) -> None:
     """
     Send text to one specific chat_id, to the chat of the active turn, or to
     all TELEGRAM_ALLOWED chats when there is no active channel.
     Converts Markdown to Telegram HTML so formatting renders correctly.
     Uses only stdlib — no python-telegram-bot dependency needed.
+
+    The Markdown is split BEFORE conversion (so a split can never cut an HTML
+    tag), and each chunk falls back to plain text if Telegram rejects its HTML.
+    A failing chat does not abort the broadcast to the others; raises
+    RuntimeError only when no chat received the message.
     """
     token   = _token()
     targets = _targets(chat_id)
     url     = f"https://api.telegram.org/bot{token}/sendMessage"
-    body    = _md_to_html(text)
+    chunks  = [c for c in _split(text) if c.strip()] or [text]
 
+    errors: list[str] = []
+    delivered = 0
     for cid in targets:
-        for chunk in _split(body):
-            payload = json.dumps({
-                "chat_id":    cid,
-                "text":       chunk,
-                "parse_mode": "HTML",
-            }).encode()
-            req = urllib.request.Request(
-                url,
-                data=payload,
-                headers={"Content-Type": "application/json"},
-                method="POST",
-            )
+        chat_ok = True
+        for chunk in chunks:
             try:
-                with urllib.request.urlopen(req, timeout=15) as resp:
-                    resp.read()
-            except urllib.error.HTTPError as e:
-                body_err = e.read().decode(errors="replace")
-                raise RuntimeError(f"Telegram API error {e.code}: {body_err}") from e
+                _send_chunk(url, cid, chunk)
+            except (RuntimeError, urllib.error.URLError, OSError) as e:
+                chat_ok = False
+                errors.append(f"chat {cid}: {e}")
+                log.error("Telegram send to chat %s failed: %s", cid, e)
+        if chat_ok:
+            delivered += 1
 
-    _record_feed(text)
+    if delivered:
+        _record_feed(text)
+    if not delivered:
+        raise RuntimeError("; ".join(errors) or "Telegram send failed")
 
 
 def _record_feed(text: str) -> None:
