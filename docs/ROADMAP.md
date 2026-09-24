@@ -117,8 +117,17 @@ Follow-ups:
 
 ## 5. Features
 
-- **`web_search` tool** — high / low. Only `web_fetch` exists. Use a pluggable
-  backend (SearXNG, Brave or Tavily), with its key configured in `.env`.
+- **`web_search` tool (free backends only)** — med / low. Only `web_fetch`
+  exists. Paid search APIs (Brave, Tavily, Serper, …) are ruled out: every one
+  charges. Free options:
+  - **SearXNG** (self-hosted, JSON API): free and private. Only enabled when
+    `SEARXNG_URL` is set; the user runs it (one Docker container).
+  - **DuckDuckGo HTML endpoint** (`html.duckduckgo.com`): no key and no cost,
+    but it is scraping, so it is rate-limited and can break. Only viable as a
+    best-effort fallback.
+  - **Already possible today:** the `browser` tool can open a search page in the
+    user's own Chromium. Make that a documented pattern (or a thin `search`
+    action on the browser tool) instead of a new dependency.
 - **Auto compact-and-retry** — high / low. When a request fails on context
   length, compact and retry once automatically. It currently shows a friendly
   error that suggests `/compact`.
