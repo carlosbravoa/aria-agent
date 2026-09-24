@@ -17,10 +17,9 @@ Docs: https://github.com/steipete/gogcli
 from __future__ import annotations
 
 import os
-import subprocess
 import shlex
 
-from aria.tools._env import build_env, gog_keyring_hint
+from aria.tools import _gog
 
 _CLI = os.getenv("GMAIL_CLI", "gog")
 
@@ -66,37 +65,14 @@ DEFINITION = {
 
 
 def _run(cmd: str) -> str:
-    env = build_env()
-    # Ensure GOG_ACCOUNT is set — gog requires it
-    if "GOG_ACCOUNT" not in env:
-        return (
-            "[gmail error] GOG_ACCOUNT is not set. "
-            "Add GOG_ACCOUNT=you@gmail.com to ~/.aria/.env"
-        )
-    try:
-        result = subprocess.run(
-            shlex.split(cmd),
-            capture_output=True,
-            text=True,
-            timeout=30,
-            env=env,
-        )
-        out = result.stdout.strip()
-        err = result.stderr.strip()
-        if result.returncode != 0:
-            details = err or out or "no output"
-            return (f"[gmail error] exit={result.returncode}\ncmd: {cmd}\n{details}"
-                    + gog_keyring_hint(details))
-        return out or "(no output)"
-    except FileNotFoundError:
-        return (
-            f"[gmail error] '{_CLI}' not found in PATH. "
-            "Ensure it is installed and GMAIL_CLI is set correctly in ~/.aria/.env"
-        )
-    except subprocess.TimeoutExpired:
-        return f"[gmail error] command timed out: {cmd}"
-    except Exception as exc:
-        return f"[gmail error] {exc}"
+    return _gog.run(
+        cmd,
+        tag="gmail",
+        no_account=("[gmail error] GOG_ACCOUNT is not set. "
+                    "Add GOG_ACCOUNT=you@gmail.com to ~/.aria/.env"),
+        not_found=(f"[gmail error] '{_CLI}' not found in PATH. "
+                   "Ensure it is installed and GMAIL_CLI is set correctly in ~/.aria/.env"),
+    )
 
 
 def _format_threads(raw: str) -> str:

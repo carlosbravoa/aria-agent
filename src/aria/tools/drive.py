@@ -26,7 +26,8 @@ import os
 import shlex
 import subprocess
 
-from aria.tools._env import build_env, gog_keyring_hint
+from aria.tools import _gog
+from aria.tools._env import build_env
 
 _CLI = os.getenv("GMAIL_CLI", "gog")
 
@@ -91,33 +92,14 @@ DEFINITION = {
 
 
 def _run(cmd: str, capture_stdout: bool = True) -> str:
-    env = build_env()
-    if "GOG_ACCOUNT" not in env:
-        return (
-            "[drive error] GOG_ACCOUNT not set. "
-            "Add GOG_ACCOUNT=you@gmail.com to ~/.aria/.env"
-        )
-    try:
-        result = subprocess.run(
-            shlex.split(cmd),
-            capture_output=True,
-            text=True,
-            timeout=30,
-            env=env,
-        )
-        out = result.stdout.strip()
-        err = result.stderr.strip()
-        if result.returncode != 0:
-            detail = err or out or "no output"
-            return (f"[drive error] exit={result.returncode}\ncmd: {cmd}\n{detail}"
-                    + gog_keyring_hint(detail))
-        return out or "(no output)"
-    except FileNotFoundError:
-        return f"[drive error] '{_CLI}' not found. Ensure gog is installed."
-    except subprocess.TimeoutExpired:
-        return f"[drive error] command timed out: {cmd}"
-    except Exception as exc:
-        return f"[drive error] {exc}"
+    # capture_stdout is accepted for call compatibility; it has never changed behaviour.
+    return _gog.run(
+        cmd,
+        tag="drive",
+        no_account=("[drive error] GOG_ACCOUNT not set. "
+                    "Add GOG_ACCOUNT=you@gmail.com to ~/.aria/.env"),
+        not_found=f"[drive error] '{_CLI}' not found. Ensure gog is installed.",
+    )
 
 
 def _int(value, default: int) -> int:
