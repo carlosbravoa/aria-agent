@@ -118,6 +118,19 @@ AGENT_NAME=Aria
 # (self-heals a wedged polling loop after a network drop; 0 disables)
 # ARIA_TELEGRAM_STALL_MIN=10
 
+# ── Channels (messaging plugins) ─────────────────────────────────────
+# Enabled channels, comma-separated (aria-install writes this). Unset → every
+# channel whose settings are present is enabled (TELEGRAM_TOKEN → telegram,
+# WHATSAPP_ALLOWED → whatsapp), as before plugins existed. List them with
+# `aria-channel --list`.
+# ARIA_CHANNELS=telegram,whatsapp
+# Where pushes outside a conversation go (supervisor results, reflection
+# notices, `aria --notify`, the notify tool in the REPL). Unset → telegram when
+# enabled, else the first enabled channel that can push.
+# ARIA_NOTIFY_CHANNEL=telegram
+# Directory of user channel plugins (*.py drop-ins, see docs/channel-plugins.md)
+# ARIA_CHANNELS_DIR=~/.aria/channels
+
 # ── Inbound attachments ──────────────────────────────────────────────
 # Files sent over a channel are saved under <workspace>/inbox/ and pruned:
 # first anything older than KEEP_DAYS, then oldest-first past MAX_MB.

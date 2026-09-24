@@ -82,6 +82,15 @@ Follow-ups:
 
 ## 4. Channels
 
+✅ **Channel plugins** are done. Telegram and WhatsApp are built-in plugins;
+custom channels go in `~/.aria/channels/` (`docs/channel-plugins.md`). Legacy
+installs work unchanged. Follow-ups:
+- **Shared slash commands in the host** — med / low. `/clear`, `/model`,
+  `/memory` are still implemented separately in each channel. A host-level
+  command handler would give custom channels these for free.
+- **pip entry-point plugins** — low / low. An `aria.channels` entry-point group,
+  for sharing plugins as packages.
+
 - **Telegram concurrency** — high / med. Updates are handled one at a time, so
   one long turn blocks every other chat and command. Enable
   `concurrent_updates`, with one lock per chat so a single chat stays ordered.

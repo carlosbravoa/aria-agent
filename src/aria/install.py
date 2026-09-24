@@ -18,6 +18,7 @@ import os
 import shutil
 import subprocess
 import sys
+from contextlib import contextmanager
 from pathlib import Path
 
 
@@ -178,35 +179,117 @@ def _write_env(path: Path, values: dict[str, str]) -> Path | None:
 
 # ── Feature selection ─────────────────────────────────────────────────────────
 
+# Non-channel features. Messaging channels (Telegram, WhatsApp, user plugins in
+# ~/.aria/channels/) come from the channel plugin registry and are listed
+# first in the menu — see _channel_plugins().
 FEATURES = {
-    "telegram":   "Telegram bot  (aria-telegram + aria --notify)",
-    "whatsapp":   "WhatsApp bridge  (aria-whatsapp, needs Node.js)",
     "supervisor": "Autonomous supervisor  (task queue + memory reflection)",
     "gmail":      "Gmail & Calendar  (requires gogcli)",
 }
+_RESERVED = set(FEATURES) | {"browser"}
 
 
-def _select_features(existing: dict[str, str]) -> set[str]:
-    """Ask which features to enable. Defaults reflect what's already configured."""
+@contextmanager
+def _env_overlay(existing: dict[str, str]):
+    """Expose the .env being edited to code that reads os.environ (plugin
+    is_configured(), channels.enabled(), ARIA_CHANNELS_DIR, deploy hooks) for
+    the duration of the block. Like config.load(): the process environment
+    wins over the file. Restored afterwards."""
+    added = [k for k in existing if k not in os.environ]
+    for k in added:
+        os.environ[k] = existing[k]
+    try:
+        yield
+    finally:
+        for k in added:
+            os.environ.pop(k, None)
+
+
+def _channel_plugins() -> dict:
+    """Discovered channel plugins by name (built-ins first, then user plugins),
+    minus any whose name would collide with a non-channel feature."""
+    from aria import channels
+    plugins = {}
+    for name, plugin in channels.discover(refresh=True).items():
+        if name in _RESERVED:
+            warn(f"Channel plugin '{name}' clashes with a built-in feature name — ignored")
+            continue
+        plugins[name] = plugin
+    return plugins
+
+
+def _explicit_channels(existing: dict[str, str]) -> list[str] | None:
+    raw = os.environ.get("ARIA_CHANNELS", existing.get("ARIA_CHANNELS"))
+    if raw is None:
+        return None
+    return [n.strip().lower() for n in raw.split(",") if n.strip()]
+
+
+def _title(plugin) -> str:
+    """Section/menu name of a channel (its `title`, else the capitalised name)."""
+    return plugin.display_name
+
+
+def _select_features(existing: dict[str, str], plugins: dict | None = None) -> set[str]:
+    """Ask which features to enable. Defaults reflect what's already configured:
+    a channel is preselected when ARIA_CHANNELS lists it (or, on a pre-plugin
+    .env without ARIA_CHANNELS, when its settings are present)."""
+    if plugins is None:
+        plugins = _channel_plugins()
     print()
     print(_bold("Which features do you want to enable?"))
     info("Press Enter to keep the current selection. Space/Enter to toggle.")
     print()
 
-    defaults = {
-        "telegram":   bool(existing.get("TELEGRAM_TOKEN")),
-        "whatsapp":   bool(existing.get("WHATSAPP_ALLOWED")),
-        "supervisor": True,   # always on by default
-        "gmail":      bool(existing.get("GOG_ACCOUNT")),
-    }
+    explicit = _explicit_channels(existing)
+    menu: list[tuple[str, str, bool]] = []
+    for name, plugin in plugins.items():
+        if explicit is not None:
+            default = name in explicit
+        else:
+            try:
+                default = bool(plugin.is_configured())
+            except Exception:
+                default = False
+        menu.append((name, plugin.description or name, default))
+    menu.append(("supervisor", FEATURES["supervisor"], True))   # always on by default
+    menu.append(("gmail", FEATURES["gmail"], bool(existing.get("GOG_ACCOUNT"))))
 
     selected: set[str] = set()
-    for key, label in FEATURES.items():
-        default = defaults[key]
+    for key, label, default in menu:
         if _ask_bool(f"  {label}?", default=default):
             selected.add(key)
 
     return selected
+
+
+def _print_note(note) -> None:
+    """Render one install() note: (level, text) with level ok/warn/info, or a
+    plain string (shown as a hint)."""
+    level, text = note if isinstance(note, tuple) else ("info", note)
+    {"ok": ok, "warn": warn}.get(level, info)(text)
+
+
+def _run_install_hook(plugin, dry_run: bool) -> list:
+    try:
+        return list(plugin.install(dry_run) or [])
+    except Exception as exc:
+        warn(f"{plugin.name}: install hook failed: {exc}")
+        return []
+
+
+def _configure_channel(plugin, e, dry_run: bool) -> dict[str, str]:
+    """Prompt for a selected channel's settings, then run its install hook."""
+    section(_title(plugin))
+    for line in (plugin.setup_help or "").splitlines():
+        info(line)
+    out: dict[str, str] = {}
+    for f in plugin.config_fields:
+        out[f.key] = _ask(f.prompt or f.key, e(f.key) or f.default,
+                          secret=f.secret, required=f.required, hint=f.help)
+    for note in _run_install_hook(plugin, dry_run):
+        _print_note(note)
+    return out
 
 
 # ── Env config wizard ─────────────────────────────────────────────────────────
@@ -233,7 +316,9 @@ def configure_env(dry_run: bool = False) -> tuple[dict[str, str], set[str]]:
         print(f"  Press {_bold('Enter')} to keep existing values.")
 
     # ── Feature selection ─────────────────────────────────────────────────────
-    features = _select_features(existing)
+    with _env_overlay(existing):
+        plugins  = _channel_plugins()
+        features = _select_features(existing, plugins)
 
     values: dict[str, str] = {}
 
@@ -256,47 +341,18 @@ def configure_env(dry_run: bool = False) -> tuple[dict[str, str], set[str]]:
     values["AGENT_NAME"]   = _ask("AGENT_NAME",   e("AGENT_NAME")   or "Aria",
                                    hint="Display name shown in terminal and messages")
 
-    # ── Telegram ──────────────────────────────────────────────────────────────
-    if "telegram" in features:
-        section("Telegram")
-        info("Get token from @BotFather — get your chat ID from @userinfobot")
-        values["TELEGRAM_TOKEN"]   = _ask("TELEGRAM_TOKEN",   e("TELEGRAM_TOKEN"),   secret=True, required=True)
-        values["TELEGRAM_ALLOWED"] = _ask("TELEGRAM_ALLOWED", e("TELEGRAM_ALLOWED"), required=True,
-                                           hint="Comma-separated chat IDs allowed to use the bot")
-    else:
-        values["TELEGRAM_TOKEN"]   = e("TELEGRAM_TOKEN")
-        values["TELEGRAM_ALLOWED"] = e("TELEGRAM_ALLOWED")
-
-    # ── WhatsApp ──────────────────────────────────────────────────────────────
-    if "whatsapp" in features:
-        section("WhatsApp")
-        info("Needs Node.js and ~/.aria/whatsapp/bridge.js — see README")
-        values["ARIA_WA_PORT"]     = _ask("ARIA_WA_PORT",     e("ARIA_WA_PORT")     or "7532",
-                                           hint="Port for Python↔Node.js bridge")
-        values["ARIA_WA_PUSH_PORT"] = _ask("ARIA_WA_PUSH_PORT", e("ARIA_WA_PUSH_PORT") or "7533",
-                                           hint="Port the Node bridge listens on for outbound push")
-        values["ARIA_WA_SECRET"]   = _ask("ARIA_WA_SECRET",   e("ARIA_WA_SECRET"),  secret=True,
-                                           hint="Shared secret between Python and Node.js bridges")
-        values["WHATSAPP_ALLOWED"] = _ask("WHATSAPP_ALLOWED", e("WHATSAPP_ALLOWED"),
-                                           hint="Your number in international format, no + (e.g. 34612345678)")
-        # Deploy/refresh the Node bridge files (bridge.js + package.json) into
-        # ~/.aria/whatsapp/ so a reinstall always ships the current bridge —
-        # node_modules/ and the WhatsApp login state are left untouched.
-        from aria import whatsapp_deploy
-        res = whatsapp_deploy.deploy()
-        if res["error"]:
-            warn(res["error"])
-        elif res["copied"]:
-            ok(f"Deployed bridge files: {', '.join(res['copied'])} → {res['dest']}")
-        else:
-            ok("WhatsApp bridge files already up to date.")
-        if res["source"] and (res["package_changed"]
-                              or not (res["dest"] / "node_modules").exists()):
-            npm = "npm ci" if (res["dest"] / "package-lock.json").exists() else "npm install"
-            info(f"Run: cd {res['dest']} && {npm}")
-    else:
-        for k in ("ARIA_WA_PORT", "ARIA_WA_PUSH_PORT", "ARIA_WA_SECRET", "WHATSAPP_ALLOWED"):
-            values[k] = e(k)
+    # ── Channels (plugins: Telegram, WhatsApp, ~/.aria/channels/*.py) ────────
+    # Unselected channels keep their existing settings untouched.
+    selected_channels: list[str] = []
+    with _env_overlay(existing):
+        for name, plugin in plugins.items():
+            if name in features:
+                selected_channels.append(name)
+                values.update(_configure_channel(plugin, e, dry_run))
+            else:
+                for f in plugin.config_fields:
+                    values[f.key] = e(f.key)
+    values["ARIA_CHANNELS"] = ",".join(selected_channels) or "none"
 
     # ── Gmail / Calendar ──────────────────────────────────────────────────────
     if "gmail" in features:
@@ -472,6 +528,99 @@ def _rollback_service(rollback_bin: str, env_file: str) -> str:
 
 # ── Service installation ──────────────────────────────────────────────────────
 
+def _resolve_exe(exe: str) -> str | None:
+    """A unit's executable: a bare "aria-…" console script via _aria_bin, an
+    absolute path if it exists, else a PATH lookup."""
+    if exe.startswith("aria-") and "/" not in exe:
+        return _aria_bin(exe)
+    if os.path.isabs(exe):
+        return exe if Path(exe).exists() else None
+    return shutil.which(exe)
+
+
+def _collect_services(features: set[str] | None,
+                      dry_run: bool) -> tuple[dict[str, dict], set[str]]:
+    """Resolve the units to write: the supervisor plus every selected channel's
+    services(). `features=None` (the --services path) infers the channels from
+    the registry (ARIA_CHANNELS, else legacy keys). Returns (units, features).
+    Caller holds _env_overlay."""
+    from aria import channels
+
+    plugins = _channel_plugins()
+    if features is None:
+        features = {"supervisor"}          # supervisor default-on
+        try:
+            features |= {p.name for p in channels.enabled() if p.name in plugins}
+        except Exception as exc:
+            warn(f"Could not read enabled channels: {exc}")
+
+    section("Detecting binaries")
+    services: dict[str, dict] = {}
+
+    if "supervisor" in features:
+        bin_path = _aria_bin("aria-supervisor")
+        if bin_path:
+            ok(f"aria-supervisor: {bin_path}")
+            services["aria-supervisor"] = {"description": "Aria Task Supervisor",
+                                           "exec": bin_path}
+        else:
+            warn("aria-supervisor: binary not found — skipping")
+            info("Run: pip install -e .")
+    else:
+        info("• aria-supervisor: skipped (not selected)")
+
+    for name, plugin in plugins.items():
+        try:
+            specs = list(plugin.services())
+        except Exception as exc:
+            warn(f"{name}: services() failed — skipping ({exc})")
+            continue
+        if name not in features:
+            for spec in specs:
+                if not spec.optional:
+                    info(f"• {spec.unit}: skipped (not selected)")
+            continue
+        # Make sure helper files are present/current before wiring the units
+        # (a services-only rerun skips the config step that also runs this).
+        _run_install_hook(plugin, dry_run)
+        for spec in specs:
+            _add_spec(services, spec)
+    return services, features
+
+
+def _add_spec(services: dict[str, dict], spec) -> None:
+    unit = spec.unit
+    if not spec.exec_start:
+        warn(f"{unit}: no ExecStart — skipping")
+        return
+    if spec.requires and spec.requires.removesuffix(".service") not in services:
+        (info if spec.optional else warn)(
+            f"• {unit}: skipped ({spec.requires} is not being installed)")
+        return
+    exe, args = spec.exec_start[0], list(spec.exec_start[1:])
+    path = _resolve_exe(exe)
+    if not path:
+        if spec.optional:
+            warn(f"{Path(exe).name} not found — {unit} skipped")
+        else:
+            warn(f"{unit}: binary not found — skipping")
+            if exe.startswith("aria-"):
+                info("Run: pip install -e .")
+        return
+    missing = [a for a in args if os.path.isabs(a) and not Path(a).exists()]
+    if missing:
+        for a in missing:
+            warn(f"{Path(a).name} not found: {a}")
+        warn(f"{unit} skipped")
+        return
+    label = unit if exe.startswith("aria-") else Path(exe).name
+    ok(f"{label}: {path}")
+    cfg = {"description": spec.description, "exec": " ".join([path, *args])}
+    if spec.requires:
+        cfg["requires"] = spec.requires
+    services[unit] = cfg
+
+
 def install_services(features: set[str] | None = None, dry_run: bool = False) -> None:
     """
     Install systemd services for the selected features.
@@ -492,66 +641,12 @@ def install_services(features: set[str] | None = None, dry_run: bool = False) ->
         sys.exit(1)
     ok(f"Config: {env_file}")
 
-    # Infer features from env if not provided (--services flag path)
-    if features is None:
-        existing = _load_existing_env(env_file)
-        features = set()
-        if existing.get("TELEGRAM_TOKEN"):
-            features.add("telegram")
-        if existing.get("WHATSAPP_ALLOWED"):
-            features.add("whatsapp")
-        if existing.get("ARIA_SUPERVISOR_INTERVAL") or True:  # supervisor default-on
-            features.add("supervisor")
-
-    section("Detecting binaries")
-
-    # Map feature → (service name, description, required binary)
-    candidates = [
-        ("aria-telegram",   "Aria Telegram Bot",           "telegram"   in features),
-        ("aria-supervisor", "Aria Task Supervisor",         "supervisor" in features),
-        ("aria-whatsapp",   "Aria WhatsApp Python Bridge",  "whatsapp"   in features),
-    ]
-
-    services: dict[str, dict] = {}
-    for name, desc, wanted in candidates:
-        if not wanted:
-            info(f"• {name}: skipped (not selected)")
-            continue
-        bin_path = _aria_bin(name)
-        if bin_path:
-            ok(f"{name}: {bin_path}")
-            services[name] = {"description": desc, "exec": bin_path}
-        else:
-            warn(f"{name}: binary not found — skipping")
-            info("Run: pip install -e .")
-
-    # WhatsApp Node.js bridge
-    if "aria-whatsapp" in services:
-        node      = _node_bin()
-        # Ensure the bridge files are present/current before wiring the service
-        # (a services-only rerun may skip the WhatsApp config step above).
-        try:
-            from aria import whatsapp_deploy
-            whatsapp_deploy.deploy()
-        except Exception as exc:
-            warn(f"WhatsApp bridge deploy skipped: {exc}")
-        wa_bridge = Path.home() / ".aria" / "whatsapp" / "bridge.js"
-        if node and wa_bridge.exists():
-            ok(f"node: {node}")
-            services["aria-whatsapp-node"] = {
-                "description": "Aria WhatsApp Node.js Bridge",
-                "exec":        f"{node} {wa_bridge}",
-                "requires":    "aria-whatsapp.service",
-            }
-        else:
-            if not node:
-                warn("node not found — aria-whatsapp-node skipped")
-            if not wa_bridge.exists():
-                warn(f"bridge.js not found: {wa_bridge}")
-                info("See README — WhatsApp section")
+    existing = _load_existing_env(env_file)
+    with _env_overlay(existing):
+        services, features = _collect_services(features, dry_run)
 
     if not services:
-        if not features or features == set():
+        if not features:
             ok("CLI-only mode — no background services to install.")
         else:
             err("No services to install. Check binaries and .env.")
@@ -571,7 +666,7 @@ def install_services(features: set[str] | None = None, dry_run: bool = False) ->
             description = cfg["description"],
             exec_start  = cfg["exec"],
             env_file    = str(env_file),
-            after       = "aria-whatsapp.service" if requires else "",
+            after       = requires,          # Requires= always implies ordering after it
             requires    = requires,
         )
         path = systemd_dir / f"{name}.service"
@@ -655,6 +750,14 @@ def install_services(features: set[str] | None = None, dry_run: bool = False) ->
 def uninstall() -> None:
     section("Uninstalling Aria services")
     names = ["aria-telegram", "aria-supervisor", "aria-whatsapp", "aria-whatsapp-node"]
+    try:
+        with _env_overlay(_load_existing_env(Path.home() / ".aria" / ".env")):
+            for plugin in _channel_plugins().values():
+                for spec in plugin.services():
+                    if spec.unit not in names:
+                        names.append(spec.unit)
+    except Exception as exc:
+        warn(f"Channel plugins not inspected: {exc}")
     for unit in (_ROLLBACK_UNIT, "aria-rollback.service"):
         path = Path.home() / ".config" / "systemd" / "user" / unit
         if path.exists():

@@ -41,6 +41,7 @@ The result is an agent that will impress you with how useful it can be while rem
 7. [Interactive REPL](#interactive-repl)
 8. [Channels — Telegram](#telegram)
 9. [Channels — WhatsApp](#whatsapp)
+   - [Custom channels](#custom-channels)
 10. [Scheduled tasks](#scheduled-tasks)
 11. [Autonomous supervisor](#autonomous-supervisor)
 12. [Memory](#memory)
@@ -188,6 +189,11 @@ After `git pull && pip install .`:
 - **`web_fetch`/`browser` block every non-public address range.** On Tailscale
   (100.64.0.0/10) or a fake-IP proxy such as Clash/sing-box (198.18.0.0/15),
   allow the range with `ARIA_NET_ALLOW`.
+- **Channels are plugins now; nothing to change.** An existing `.env` with
+  `TELEGRAM_TOKEN` and/or `WHATSAPP_ALLOWED` keeps both channels enabled.
+  `aria-telegram` / `aria-whatsapp` and their systemd units are unchanged. The
+  next `aria-install` run writes `ARIA_CHANNELS` explicitly. See
+  [Custom channels](#custom-channels).
 
 ---
 
@@ -502,6 +508,29 @@ usual "may I access this?" approval flow first.
 > **Multi-user note:** replies, notifications and files now go to the chat you
 > are actually talking in, rather than to every ID in `TELEGRAM_ALLOWED`.
 > Identical behaviour for single-user setups.
+
+---
+
+## Custom channels
+
+Telegram and WhatsApp are built-in **channel plugins**. You can add your own
+(Discord, Matrix, Signal, a webhook for Home Assistant or n8n, …) by putting one
+Python file in `~/.aria/channels/`. The plugin only moves text in and out; Aria
+provides sessions, memory, tools and delivery routing.
+
+```bash
+cp docs/examples/channels/webhook.py ~/.aria/channels/   # a working example
+aria-channel --list                                      # discovered + enabled channels
+aria-install                                             # select it, configure, get a unit
+```
+
+| Setting | Meaning |
+|---|---|
+| `ARIA_CHANNELS=telegram,webhook` | Enabled channels. Unset → every configured channel (legacy behaviour). |
+| `ARIA_NOTIFY_CHANNEL=webhook` | Where pushes go outside a conversation. Default: Telegram, when enabled. |
+| `ARIA_CHANNELS_DIR` | Plugin directory. Default `~/.aria/channels`. |
+
+Full guide: [`docs/channel-plugins.md`](docs/channel-plugins.md).
 
 ---
 
@@ -1229,7 +1258,12 @@ aria-agent/
         ├── __init__.py                ← version via importlib.metadata
         ├── agent.py                   ← native tool-calling ReAct loop, markdown toggle, model profiles, background reflection
         ├── attachments.py             ← inbound file storage: name sanitising, inbox layout, retention
-        ├── channel.py                 ← multi-channel registry, idle timer
+        ├── channel.py                 ← session registry per (channel, user), idle timer
+        ├── telegram_*.py, whatsapp_*.py ← legacy aliases of the modules in channels/
+        ├── channels/                  ← channel plugins: base.py contract, registry, host API,
+        │   │                            cli.py (aria-channel); user plugins in ~/.aria/channels/
+        │   ├── telegram/              ← bot.py, notify.py (+ plugin in __init__.py)
+        │   └── whatsapp/              ← bridge.py, notify.py, deploy.py
         ├── config.py                  ← path resolution, .env loading
         ├── context.py                 ← active channel/user for the current turn (delivery routing)
         ├── install.py                 ← setup wizard (aria-install)
@@ -1239,12 +1273,7 @@ aria-agent/
         ├── setup.py                   ← first-run wizard, env template
         ├── supervisor.py              ← task supervisor with periodic reflection (aria-supervisor)
         ├── task.py                    ← task model (JSON), queue ops, recurrence
-        ├── telegram_bot.py            ← Telegram bot
-        ├── telegram_notify.py         ← push-only Telegram sender + _md_to_html
         ├── usage.py                   ← token usage log summary (aria --usage, /usage)
-        ├── whatsapp_bridge.py         ← HTTP bridge for whatsapp-web.js
-        ├── whatsapp_deploy.py         ← copies bridge.js/package.json to ~/.aria/whatsapp/
-        ├── whatsapp_notify.py         ← push to WhatsApp via the bridge's push listener
         ├── workspace.py               ← markdown persistence, secret redaction, permissions, file locks
         └── tools/
             ├── __init__.py            ← auto-loader and dispatcher

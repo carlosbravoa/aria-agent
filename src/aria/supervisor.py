@@ -11,7 +11,7 @@ Built-in periodic jobs (all configurable via ~/.aria/.env):
 Config:
   ARIA_SUPERVISOR_INTERVAL=30   # poll interval in seconds (default 30)
   ARIA_REFLECT_EVERY=86400      # seconds between reflection runs (0 = disabled)
-  ARIA_REFLECT_NOTIFY=true      # send Telegram notification after reflection
+  ARIA_REFLECT_NOTIFY=true      # push a notification after reflection (ARIA_NOTIFY_CHANNEL, default Telegram)
   ARIA_TASK_TIMEOUT=900         # per-task wall-clock ceiling AND running/ lease (0 = off)
   ARIA_TASK_RETRY_BASE=60       # retry backoff base in seconds (exponential)
   ARIA_TASK_RETRY_MAX=3600      # retry backoff cap in seconds
@@ -328,8 +328,8 @@ def _execute(task) -> str:
 
     if task.notify and result:
         try:
-            from aria.telegram_notify import send
-            send(result)
+            from aria import channels
+            channels.push(result)     # ARIA_NOTIFY_CHANNEL, else Telegram
         except Exception as exc:
             log.warning("Telegram notify failed: %s", exc)
 

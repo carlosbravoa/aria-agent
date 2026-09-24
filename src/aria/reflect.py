@@ -269,8 +269,8 @@ def _phase_friction(ws, client, model: str, notify: bool) -> str:
         pass
     if notify:
         try:
-            from aria.telegram_notify import send
-            send(f"⚠ Reflection found a possible systemic issue:\n{diagnosis[:800]}")
+            from aria import channels
+            channels.push(f"⚠ Reflection found a possible systemic issue:\n{diagnosis[:800]}")
         except Exception as exc:
             log.warning("Friction notify failed: %s", exc)
     log.info("Friction diagnosis: %s", flat)
@@ -520,8 +520,8 @@ def _run_locked(ws, notify: bool, *, base_url: str | None = None,
 
     if notify:
         try:
-            from aria.telegram_notify import send
-            send(f"🧠 {msg}")
+            from aria import channels
+            channels.push(f"🧠 {msg}")
         except Exception as exc:
             log.warning("Telegram notification failed: %s", exc)
 
@@ -541,7 +541,7 @@ def main() -> None:
         description="Analyse session logs and update memory patterns.",
     )
     parser.add_argument("--notify", "-n", action="store_true",
-                        help="Send result to Telegram when done")
+                        help="Send result to the notification channel (Telegram by default) when done")
     parser.add_argument("--verbose", "-v", action="store_true",
                         help="Show debug output")
     args = parser.parse_args()

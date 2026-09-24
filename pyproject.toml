@@ -39,6 +39,7 @@ aria-reflect    = "aria.reflect:main"
 aria-supervisor = "aria.supervisor:main"
 aria-install    = "aria.install:main"
 aria-rollback   = "aria.tools.update:rollback_main"
+aria-channel    = "aria.channels.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

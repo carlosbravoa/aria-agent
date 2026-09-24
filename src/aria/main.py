@@ -4,8 +4,9 @@ aria/main.py — CLI entry point.
 Usage:
   aria                          # interactive REPL
   aria "query"                  # single-shot, prints to stdout
-  aria --notify "query"         # single-shot, sends result to Telegram
-  aria --notify --chat 123 "q"  # single-shot, sends to a specific chat ID
+  aria --notify "query"         # single-shot, pushes the result (Telegram by default)
+  aria --notify --chat 123 "q"  # single-shot, sends to a specific recipient/chat ID
+  aria --notify --channel whatsapp "q"   # push via a specific channel plugin
   aria --version                # print version and exit
 """
 
@@ -549,7 +550,7 @@ def main() -> None:
     parser.add_argument(
         "--notify", "-n",
         action="store_true",
-        help="Run single-shot and send result to Telegram",
+        help="Run single-shot and push the result (ARIA_NOTIFY_CHANNEL, default Telegram)",
     )
     parser.add_argument(
         "--usage", "-u",
@@ -558,10 +559,15 @@ def main() -> None:
     )
     parser.add_argument(
         "--chat", "-c",
-        type=int,
         default=None,
         metavar="CHAT_ID",
-        help="Telegram chat ID to notify",
+        help="Recipient to notify (Telegram chat ID, WhatsApp number, …)",
+    )
+    parser.add_argument(
+        "--channel",
+        default=None,
+        metavar="NAME",
+        help="Channel to push --notify results through (default: ARIA_NOTIFY_CHANNEL, else Telegram)",
     )
     parser.add_argument(
         "query",
@@ -580,17 +586,24 @@ def main() -> None:
         if not query:
             parser.error("--notify requires a query")
 
-        from aria.telegram_notify import send
+        from aria import channels
+        if args.channel and channels.get(args.channel) is None:
+            parser.error(f"unknown channel '{args.channel}' "
+                         f"(available: {', '.join(sorted(channels.discover()))})")
+
+        def send(text: str) -> None:
+            channels.push(text, to=args.chat, channel=args.channel)
+
         agent = Agent(window_key="notify", terminal=False)
         try:
             result = agent.chat_collect(query)
             agent.close()
-            send(result, chat_id=args.chat)
+            send(result)
             console.print(f"[success]Sent:[/] {result[:120]}{'...' if len(result) > 120 else ''}")
         except Exception as e:
             error_msg = f"⚠️ {agent.name} task failed: {e}"
             try:
-                send(error_msg, chat_id=args.chat)
+                send(error_msg)
             except Exception:
                 pass
             err_console.print(f"[error]{error_msg}[/]")

@@ -1,0 +1,224 @@
+"""
+aria/channels/whatsapp/bridge.py — HTTP bridge between whatsapp-web.js and the Aria agent.
+
+Architecture:
+  whatsapp-web.js (Node.js)
+    → POST http://localhost:ARIA_WA_PORT/message  {"from": "...", "text": "..."}
+    ← {"reply": "..."}
+
+  This server receives the message, runs it through the agent via the shared
+  channel session registry, and returns the reply. The Node.js side then sends
+  it back to WhatsApp.
+
+Setup:
+  1. Add to ~/.aria/.env:
+       ARIA_WA_PORT=7532           # port for this bridge (default 7532)
+       ARIA_WA_PUSH_PORT=7533      # Node push listener for outbound (default 7533)
+       ARIA_WA_SECRET=<token>      # shared secret for Node↔Python auth
+       WHATSAPP_ALLOWED=<phone1,phone2>  # allowed sender numbers (international format)
+       ARIA_WA_TIMEOUT=600         # seconds bridge.js waits for a turn (default 600)
+
+Outbound push: the Node bridge runs a local push listener on ARIA_WA_PUSH_PORT;
+aria.channels.whatsapp.notify.send POSTs to it so the agent can push messages to
+WhatsApp (the `notify` tool, scheduled tasks).
+
+  2. Start the bridge:
+       aria-whatsapp          (or: aria-channel whatsapp)
+
+  3. Start the Node.js side:
+       node ~/.aria/whatsapp/bridge.js
+
+Dependencies: none (uses stdlib http.server)
+"""
+
+from __future__ import annotations
+
+import hmac
+import http.server
+import json
+import logging
+import os
+import time
+
+from aria import config
+from aria.channels import host
+from aria.channels.host import parse_allowed
+
+log = logging.getLogger(__name__)
+
+CHANNEL = "whatsapp"
+
+
+def _allowed() -> set[str]:
+    return set(parse_allowed("WHATSAPP_ALLOWED"))
+
+
+def _secret() -> str:
+    return os.environ.get("ARIA_WA_SECRET", "")
+
+
+_DEFAULT_TIMEOUT = 600
+
+
+def _turn_timeout() -> float:
+    """ARIA_WA_TIMEOUT: how long bridge.js waits for a reply (shared env var,
+    same default as the Node side)."""
+    raw = os.environ.get("ARIA_WA_TIMEOUT", "").strip()
+    try:
+        return float(raw) if raw else float(_DEFAULT_TIMEOUT)
+    except ValueError:
+        return float(_DEFAULT_TIMEOUT)
+
+
+def _strip_agent_prefix(reply: str) -> str:
+    """Strip a leading agent-name prefix ("Aria: ") only — never a colon that
+    legitimately appears in the reply (e.g. "Status: done")."""
+    prefix = f"{os.environ.get('AGENT_NAME', 'Aria')}: "
+    if reply.startswith(prefix):
+        return reply[len(prefix):].strip()
+    return reply
+
+
+class _Handler(http.server.BaseHTTPRequestHandler):
+
+    def log_message(self, fmt: str, *args: object) -> None:
+        log.info(fmt, *args)
+
+    def _reject(self, code: int, msg: str) -> None:
+        body = json.dumps({"error": msg}).encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _respond(self, data: dict) -> None:
+        body = json.dumps(data).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_POST(self) -> None:  # noqa: N802
+        if self.path != "/message":
+            self._reject(404, "not found")
+            return
+
+        # Auth via shared secret header — FAIL CLOSED: no secret configured
+        # means no requests are accepted (an unset secret used to disable auth).
+        secret = _secret()
+        if not secret:
+            self._reject(403, "bridge not configured: set ARIA_WA_SECRET")
+            return
+        if not hmac.compare_digest(self.headers.get("X-Aria-Secret", ""), secret):
+            self._reject(403, "forbidden")
+            return
+
+        length = int(self.headers.get("Content-Length", 0))
+        try:
+            payload = json.loads(self.rfile.read(length))
+        except json.JSONDecodeError:
+            self._reject(400, "invalid JSON")
+            return
+
+        sender = payload.get("from", "").strip()
+        text   = payload.get("text", "").strip()
+
+        if not sender or not text:
+            self._reject(400, "missing 'from' or 'text'")
+            return
+
+        # Allowlist check — FAIL CLOSED: an empty WHATSAPP_ALLOWED rejects every
+        # sender (matches Telegram). Previously an unset allowlist served anyone
+        # who messaged the linked number.
+        allowed = _allowed()
+        if sender not in allowed:
+            log.warning("Rejected WhatsApp message from %s (not in WHATSAPP_ALLOWED)", sender)
+            self._reject(403, "sender not allowed")
+            return
+
+        log.info("WhatsApp message from %s: %s", sender, text[:80])
+
+        # Handle /model commands directly without going through the agent
+        stripped = text.strip()
+        if stripped.lower() in ("/models", "/model"):
+            agent = host.get_agent(CHANNEL, sender)
+            lines = []
+            for p in agent.list_profiles():
+                active = " ✓" if p["active"] else ""
+                lines.append(f"{'*' + p['name'] + '*':14} {p['model']}{active}")
+            self._respond({"reply": "\n".join(lines)})
+            return
+
+        if stripped.lower().startswith("/model "):
+            profile_name = stripped[7:].strip()
+            agent = host.get_agent(CHANNEL, sender)
+            result = agent.switch_profile(profile_name)
+            self._respond({"reply": result})
+            return
+
+        # Run through the agent (blocking — bridge runs handler in a thread)
+        started   = time.monotonic()
+        responses = host.handle_message(CHANNEL, sender, text)
+        reply = "\n\n".join(r for r in responses if r.strip())
+
+        # Strip a leading agent-name prefix ("Aria: ") only — never a colon
+        # that legitimately appears in the reply (e.g. "Status: done").
+        reply = _strip_agent_prefix(reply)
+
+        # bridge.js gives up after ARIA_WA_TIMEOUT; a turn that outlived it has
+        # nobody listening on this socket, so push the reply out-of-band rather
+        # than lose it. The small margin covers time spent before handle().
+        if time.monotonic() - started >= _turn_timeout() - 5 and reply:
+            try:
+                from aria.channels.whatsapp import notify
+                notify.send(reply, to=sender)
+                log.info("Late reply for %s delivered via push", sender)
+            except Exception as exc:
+                log.error("Late reply push to %s failed: %s", sender, exc)
+            return
+
+        self._respond({"reply": reply})
+
+    def do_GET(self) -> None:  # noqa: N802
+        if self.path == "/health":
+            self._respond({"status": "ok"})
+        else:
+            self._reject(404, "not found")
+
+
+def main() -> None:
+    config.load()
+
+    from aria.setup import is_first_run, run as setup_run
+    if is_first_run():
+        setup_run()
+
+    logging.basicConfig(level=logging.INFO)
+
+    # Fail-closed config check — surface misconfiguration loudly at startup.
+    if not _secret():
+        log.warning("ARIA_WA_SECRET is not set — the bridge will REJECT all "
+                    "requests. Set it (and on the Node side) to enable WhatsApp.")
+    if not _allowed():
+        log.warning("WHATSAPP_ALLOWED is empty — every sender will be REJECTED. "
+                    "Set it to the allowed phone number(s).")
+
+    port = int(os.environ.get("ARIA_WA_PORT", 7532))
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", port), _Handler)
+
+    log.info("Aria WhatsApp bridge listening on http://127.0.0.1:%d", port)
+    log.info("Start the Node.js side: node ~/.aria/whatsapp/bridge.js")
+
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        log.info("Shutting down.")
+        server.shutdown()
+    finally:
+        host.shutdown()
+
+
+if __name__ == "__main__":
+    main()

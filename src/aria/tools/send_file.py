@@ -1,5 +1,5 @@
 """
-aria/tools/send_file.py — Send a file from disk to the user over Telegram.
+aria/tools/send_file.py — Send a file from disk to the user over a channel.
 
 Security: this tool hands file contents to the outside world, so it is exactly
 as dangerous as an exfiltration primitive if it resolves paths loosely. It does
@@ -8,9 +8,12 @@ so the read allow-list, the permanent block-list (~/.ssh, ~/.aria/.env, cloud
 credentials, /etc …) and the user-authorization flow all apply identically to
 reading a file and to sending one.
 
-Routing: replies in the chat the current turn belongs to (aria.context). With
-no active channel — supervisor tasks, cron, `aria --notify` — it falls back to
-the TELEGRAM_ALLOWED broadcast list.
+Routing (via the aria.channels registry): replies on the channel the current
+turn belongs to (aria.context), in that conversation. With no active channel —
+supervisor tasks, cron, `aria --notify` — it goes to channels.push_channel()
+(Telegram by default), which broadcasts to its allow-list. Only channels whose
+plugin sets supports_files can deliver files; others get a refusal naming the
+path so the model can tell the user where the file is.
 """
 
 from __future__ import annotations
@@ -18,8 +21,8 @@ from __future__ import annotations
 DEFINITION = {
     "name": "send_file",
     "description": (
-        "Send a file from disk to the user via Telegram as a document "
-        "attachment they can download. Use when the user asks you to send, "
+        "Send a file from disk to the user as a document attachment they can "
+        "download (on channels that support files, e.g. Telegram). Use when the user asks you to send, "
         "share, or deliver an actual file — a report, an export, a log, a "
         "generated document, a photo. The file must already exist: create it "
         "first with file_access or shell_run, then send it. For plain text "
@@ -45,6 +48,17 @@ DEFINITION = {
 }
 
 
+def _title(plugin) -> str:
+    """Display name of a channel: its `title` if set, else the first word of its
+    description when that is the name with its proper casing ("Telegram bot" →
+    "Telegram", "WhatsApp bridge" → "WhatsApp"), else the bare name."""
+    title = getattr(plugin, "title", "")
+    if title:
+        return str(title)
+    first = (plugin.description or "").split(" ", 1)[0]
+    return first if first.lower() == plugin.name else plugin.name
+
+
 def execute(args: dict) -> str:
     raw = (args.get("path") or "").strip()
     if not raw:
@@ -52,7 +66,7 @@ def execute(args: dict) -> str:
     caption = (args.get("caption") or "").strip()
 
     try:
-        from aria import config, context
+        from aria import channels, config, context
         config.load()
 
         from aria.tools import file_access
@@ -70,12 +84,15 @@ def execute(args: dict) -> str:
                     f"(e.g. with shell_run) and send the archive.")
 
         active = context.current()
-        if active and active.channel != "telegram":
-            return (f"[send_file] Sending files is only supported on Telegram, "
-                    f"not {active.channel}. The file is at {path}.")
+        plugin = channels.get(active.channel) if active else channels.push_channel()
+        target = active.channel if active else (plugin.name if plugin else "")
+        if plugin is None or not plugin.supports_files:
+            capable = [_title(p) for p in channels.discover().values() if p.supports_files]
+            where = ", ".join(capable) or "no channel"
+            return (f"[send_file] Sending files is only supported on {where}, "
+                    f"not {target or 'this channel'}. The file is at {path}.")
 
-        from aria.telegram_notify import send_document
-        name = send_document(path, caption=caption)
+        name = plugin.send_file(path, caption=caption)
         size = path.stat().st_size
         return f"[send_file] Sent {name} ({size / 1024:.0f} KB)."
 

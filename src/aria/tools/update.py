@@ -92,12 +92,70 @@ DEFINITION = {
     },
 }
 
+# Units every pre-plugin install may have. Always checked, so an existing
+# deployment restarts exactly what it did before; enabled channel plugins'
+# units are appended (see _service_names).
 _SERVICES = [
     "aria-telegram",
     "aria-supervisor",
     "aria-whatsapp",
     "aria-whatsapp-node",
 ]
+
+
+def _service_names() -> list[str]:
+    """The legacy unit names plus every enabled channel plugin's units —
+    deduplicated, order stable. A broken registry never blocks an update."""
+    names = list(_SERVICES)
+    try:
+        from aria import channels
+        for plugin in channels.enabled():
+            for spec in plugin.services():
+                if spec.unit not in names:
+                    names.append(spec.unit)
+    except Exception:
+        pass
+    return names
+
+
+def _refresh_channel_files(lines: list[str]) -> None:
+    """After an update, run every enabled channel plugin's install() hook with
+    the NEW code — in a fresh subprocess, since this (old) process may hold
+    stale aria.channels modules — so helper files that live outside the pip
+    package (e.g. WhatsApp's Node bridge.js) track the Python side. Notes are
+    appended to `lines`."""
+    code = ("import json, sys\n"
+            "from aria import config; config.load()\n"
+            "from aria.tools.update import _refresh_channel_files_inproc\n"
+            "out = []; _refresh_channel_files_inproc(out); print(json.dumps(out))\n")
+    try:
+        r = subprocess.run([sys.executable, "-c", code], capture_output=True,
+                           text=True, timeout=180, env=dict(os.environ))
+        lines.extend(json.loads(r.stdout.strip().splitlines()[-1]))
+        return
+    except Exception:
+        pass                    # fall back to refreshing in this process
+    _refresh_channel_files_inproc(lines)
+
+
+def _refresh_channel_files_inproc(lines: list[str]) -> None:
+    try:
+        from aria import channels
+        plugins = channels.enabled()
+    except Exception as exc:
+        lines.append(f"📲 Channel file refresh skipped: {exc}")
+        return
+    for plugin in plugins:
+        try:
+            notes = plugin.install()
+        except Exception as exc:
+            lines.append(f"📲 {plugin.name} refresh skipped: {exc}")
+            continue
+        for note in notes or []:
+            # Only real changes/problems: "already up to date" and hints are
+            # noise in an update report.
+            if isinstance(note, tuple) and note[0] in ("ok", "warn"):
+                lines.append(f"📲 {note[1]}")
 
 
 def _run(argv: list[str], cwd: Path | None = None, timeout: int = 120) -> tuple[int, str, str]:
@@ -159,7 +217,7 @@ def _validate_imports() -> tuple[bool, str]:
 
 def _active_services() -> list[str]:
     active = []
-    for name in _SERVICES:
+    for name in _service_names():
         _, out, _ = _run(["systemctl", "--user", "is-active", name])
         if out == "active":
             active.append(name)
@@ -249,24 +307,13 @@ def execute(args: dict) -> str:
         ])
     lines.append("  ✅ Imports clean.")
 
-    # ── 5b. Refresh the Node WhatsApp bridge if it's deployed ────────────────
-    # The bridge (bridge.js) lives outside the pip package, so pip install won't
-    # update it. If WhatsApp is set up, copy the just-reset version across so the
-    # Node side tracks the Python side; the aria-whatsapp-node restart below then
-    # picks it up. node_modules/ and the login state are never touched.
-    try:
-        from aria import whatsapp_deploy
-        if (whatsapp_deploy.dest_dir() / "bridge.js").exists():
-            res = whatsapp_deploy.deploy()
-            if res.get("copied"):
-                lines.append(f"📲 Refreshed WhatsApp bridge: {', '.join(res['copied'])}")
-                if res.get("package_changed"):
-                    lines.append("   ⚠ package.json changed — run `npm install` in "
-                                 "~/.aria/whatsapp (deps may be out of date).")
-            elif res.get("error"):
-                lines.append(f"📲 WhatsApp bridge NOT refreshed: {res['error']}")
-    except Exception as exc:
-        lines.append(f"📲 WhatsApp bridge refresh skipped: {exc}")
+    # ── 5b. Refresh channel helper files (e.g. the Node WhatsApp bridge) ─────
+    # Files like bridge.js live outside the pip package, so pip install won't
+    # update them. Each enabled channel's install() hook copies the just-reset
+    # version across so the helper process tracks the Python side; the restart
+    # below then picks it up (WhatsApp: node_modules/ and the login state are
+    # never touched).
+    _refresh_channel_files(lines)
 
     # ── 6. Restart only on green ─────────────────────────────────────────────
     if restart:
@@ -334,7 +381,7 @@ def rollback_main() -> None:
         _git(["reset", "--hard", prev], src)
         _pip_install(src)
         _append_log(f"ROLLED BACK to {prev[:9]} after post-update crash-loop")
-        for name in _SERVICES:
+        for name in _service_names():
             _run(["systemctl", "--user", "restart", name])
         log.info(f"aria-rollback: reverted to {prev[:9]} and restarted services.")
     finally:
