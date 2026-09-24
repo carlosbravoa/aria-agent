@@ -6,6 +6,7 @@ No network, no systemd, no real install side effects.
 
 from __future__ import annotations
 
+import os
 import subprocess
 
 import pytest
@@ -56,8 +57,19 @@ def test_pip_install_no_flag_when_not_externally_managed(monkeypatch, tmp_path):
     assert "--break-system-packages" not in captured["argv"]
 
 
-def test_validator_passes_on_current_good_install(minimal_env):
+def test_validator_passes_on_current_good_install(minimal_env, monkeypatch):
     # The installed package is healthy → the import-smoke gate must pass.
+    # minimal_env points HOME at a tmp dir, so a `pip install --user` layout
+    # (~/.local/…/site-packages) is invisible to the validator subprocess. Pin
+    # the real user base (computed at interpreter start, before HOME changed)
+    # and put this checkout's src/ first so the smoke test validates the code
+    # under test rather than whatever happens to be installed.
+    import site
+    from pathlib import Path
+    src = str(Path(__file__).resolve().parent.parent / "src")
+    monkeypatch.setenv("PYTHONUSERBASE", site.USER_BASE or "")
+    monkeypatch.setenv("PYTHONPATH",
+                       src + os.pathsep + os.environ.get("PYTHONPATH", ""))
     from aria.tools import update
     ok, detail = update._validate_imports()
     assert ok, f"validator should pass on good code: {detail}"
@@ -183,8 +195,22 @@ def test_rollback_is_idempotent_second_call_noops(minimal_env, monkeypatch, tmp_
 def test_service_unit_has_watchdog_directives():
     from aria import install
     u = install._service("Aria Telegram", "/bin/aria-telegram", "/home/u/.aria/.env")
-    assert "OnFailure=aria-rollback.service" in u
+    assert "OnFailure=aria-rollback@%n.service" in u
     assert "StartLimitBurst=5" in u and "StartLimitIntervalSec=300" in u
+    # network-online.target is invisible to a --user manager — never emitted.
+    assert "network-online" not in u
+
+
+def test_rollback_unit_recovers_the_failed_unit():
+    # A crash-loop from a transient cause (network down at boot) must not leave
+    # the service permanently 'failed': after the (marker-gated, no-op unless an
+    # update is pending) rollback step, the failed unit is reset and restarted.
+    from aria import install
+    u = install._rollback_service("/bin/aria-rollback", "/home/u/.aria/.env")
+    assert "ExecStart=-/bin/aria-rollback" in u        # rollback exit code never blocks recovery
+    assert "reset-failed %i" in u and "start %i" in u
+    assert "TimeoutStartSec=" in u
+    assert install._ROLLBACK_UNIT == "aria-rollback@.service"
 
 
 def test_rollback_unit_is_oneshot_and_not_enabled():

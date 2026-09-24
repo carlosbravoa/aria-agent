@@ -26,26 +26,52 @@ from pathlib import Path
 
 log = logging.getLogger(__name__)
 
-_BATCH_SIZE        = int(os.environ.get("ARIA_REFLECT_BATCH",         "10"))
-_SESSION_CHARS     = int(os.environ.get("ARIA_REFLECT_SESSION_CHARS",  "3000"))
-_MAX_PATTERN_LINES = int(os.environ.get("ARIA_REFLECT_MAX_LINES",      "40"))
-_MAX_OPS_LINES     = int(os.environ.get("ARIA_OPSMEM_MAX_LINES",       "40"))
-_MAX_CORE_LINES    = int(os.environ.get("ARIA_CORE_MAX_LINES",         "80"))
-# Friction phase: analyse memory/friction_log.md (high-friction turns flagged
-# by the agent harness) once one tool has this many events, or the log holds
-# twice as many events overall.
-_FRICTION_REFLECT_MIN = int(os.environ.get("ARIA_FRICTION_REFLECT_MIN", "3"))
+# Tuning knobs. Read at USE time via _cfg(), never at import: aria-reflect's
+# main() imports this module before config.load() applies ~/.aria/.env, so
+# import-time reads silently ignored every .env override.
+_DEFAULTS = {
+    "ARIA_REFLECT_BATCH":         10,
+    "ARIA_REFLECT_SESSION_CHARS": 3000,
+    "ARIA_REFLECT_MAX_LINES":     40,
+    "ARIA_OPSMEM_MAX_LINES":      40,
+    "ARIA_CORE_MAX_LINES":        80,
+    # Friction phase: analyse memory/friction_log.md (high-friction turns flagged
+    # by the agent harness) once one tool has this many events, or the log holds
+    # twice as many events overall.
+    "ARIA_FRICTION_REFLECT_MIN":  3,
+    # Sessions modified within this many minutes may still be receiving turns;
+    # they're left for a later pass (the watermark never skips past them).
+    "ARIA_REFLECT_SETTLE_MIN":    10,
+}
+
+
+def _cfg(name: str) -> int:
+    default = _DEFAULTS[name]
+    try:
+        return int(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        return default
+
+
+def _new_lines(snapshot: str | None, current: str | None) -> list[str]:
+    """Entry lines present in `current` but not in `snapshot` — i.e. what other
+    processes appended while a reflection LLM call was in flight."""
+    before = {l.strip() for l in (snapshot or "").splitlines()}
+    return [l for l in (current or "").splitlines()
+            if l.strip() and not l.strip().startswith(("#", "<!--"))
+            and l.strip() not in before]
 
 
 def _read_session(path: Path) -> str:
     text = path.read_text(encoding="utf-8", errors="replace")
-    if len(text) > _SESSION_CHARS:
+    cap = _cfg("ARIA_REFLECT_SESSION_CHARS")
+    if len(text) > cap:
         # Keep BOTH ends: the opening (what the session was about) and the close
         # (where corrections, outcomes, and "that was wrong, do X" live). Keeping
         # only the head — the old behaviour — meant reflection never saw the
         # conclusions of any long session.
-        head = _SESSION_CHARS * 2 // 3
-        tail = _SESSION_CHARS - head
+        head = cap * 2 // 3
+        tail = cap - head
         text = text[:head] + "\n… [middle truncated] …\n" + text[-tail:]
     return text
 
@@ -91,7 +117,7 @@ def _consolidation_prompt(new_observations: str, existing_patterns: str | None) 
         f"## New observations from recent sessions\n{new_observations}\n\n"
         "## Task\n"
         "Produce a single merged, pruned pattern list following these rules:\n"
-        f"1. Hard limit: {_MAX_PATTERN_LINES} bullet points total across all categories.\n"
+        f"1. Hard limit: {_cfg('ARIA_REFLECT_MAX_LINES')} bullet points total across all categories.\n"
         "2. Merge duplicates — if new observations confirm existing patterns, strengthen "
         "the existing entry rather than adding a new one.\n"
         "3. Prune weak signals — remove patterns that appeared only once and haven't "
@@ -124,7 +150,7 @@ def _ops_consolidation_prompt(current_ops: str, new_observations: str) -> str:
         f"{new_observations}\n\n"
         "## Task\n"
         "Produce a clean, deduplicated operational memory list following these rules:\n"
-        f"1. Hard limit: {_MAX_OPS_LINES} entries total.\n"
+        f"1. Hard limit: {_cfg('ARIA_OPSMEM_MAX_LINES')} entries total.\n"
         "2. Deduplicate — if two entries cover the same topic (e.g. both mention Jira project), "
         "keep only the most recent or most accurate one.\n"
         "3. Correct — if a recent session shows that an entry was wrong or has changed "
@@ -160,7 +186,7 @@ def _core_consolidation_prompt(current_core: str) -> str:
         "timezones), keep only the most recent/most specific one.\n"
         "3. Do NOT invent, infer, or drop any genuine distinct fact — this is a "
         "conservative dedup, not a summary. When unsure, keep the fact.\n"
-        f"4. Soft cap: aim for at most {_MAX_CORE_LINES} bullet points.\n\n"
+        f"4. Soft cap: aim for at most {_cfg('ARIA_CORE_MAX_LINES')} bullet points.\n\n"
         "Output only the bullet list — one fact per line, starting with '- '. "
         "No headings, no preamble, no explanation."
     )
@@ -180,12 +206,13 @@ def _friction_is_hot(text: str) -> bool:
     """Enough accumulated friction to be worth an LLM diagnosis: one tool with
     >= _FRICTION_REFLECT_MIN events, or twice that many events overall (turns
     without a dominant failing tool still count toward the total)."""
-    if _FRICTION_REFLECT_MIN <= 0 or not text:
+    threshold = _cfg("ARIA_FRICTION_REFLECT_MIN")
+    if threshold <= 0 or not text:
         return False
     total = len([l for l in text.splitlines() if l.startswith("- ")])
     counts = _friction_counts(text)
-    return (any(n >= _FRICTION_REFLECT_MIN for n in counts.values())
-            or total >= 2 * _FRICTION_REFLECT_MIN)
+    return (any(n >= threshold for n in counts.values())
+            or total >= 2 * threshold)
 
 
 def _friction_prompt(friction_log: str, ops: str) -> str:
@@ -228,7 +255,9 @@ def _phase_friction(ws, client, model: str, notify: bool) -> str:
     except Exception as exc:
         log.warning("Friction analysis failed: %s", exc)
         return ""            # keep the log — retry next pass
-    ws.clear_friction_log()  # consumed either way: no stale re-alerts
+    # Consumed either way (no stale re-alerts) — but only the entries that were
+    # actually analysed; events logged during the LLM call stay for next pass.
+    ws.clear_friction_log(friction_raw)
     if not diagnosis or diagnosis.upper().startswith("NONE"):
         return ", friction events reviewed (no systemic issue)"
     # Make the finding visible in BOTH directions: to the agent (ops memory is
@@ -310,7 +339,8 @@ def _run_locked(ws, notify: bool, *, base_url: str | None = None,
                 api_key: str | None = None, model: str | None = None) -> str:
     from aria.agent import _make_client
 
-    unanalysed = ws.unanalysed_sessions()
+    unanalysed = ws.unanalysed_sessions(
+        settle_seconds=max(0, _cfg("ARIA_REFLECT_SETTLE_MIN")) * 60)
     if not unanalysed:
         # No new sessions — but accumulated friction events alone are still
         # worth a diagnosis pass (the whole point is surfacing issues the
@@ -329,7 +359,8 @@ def _run_locked(ws, notify: bool, *, base_url: str | None = None,
         log.info(msg)
         return msg
 
-    log.info("Reflection: %d new sessions, batches of %d", len(unanalysed), _BATCH_SIZE)
+    batch_size = max(1, _cfg("ARIA_REFLECT_BATCH"))
+    log.info("Reflection: %d new sessions, batches of %d", len(unanalysed), batch_size)
 
     client = _make_client(
         base_url or os.environ["LLM_BASE_URL"],
@@ -339,11 +370,11 @@ def _run_locked(ws, notify: bool, *, base_url: str | None = None,
 
     # ── Phase 1: extract raw observations from each batch ────────────────────
     all_observations: list[str] = []
-    last_analysed: Path | None  = None
+    analysed: list[Path]        = []
     total_analysed              = 0
 
-    for i in range(0, len(unanalysed), _BATCH_SIZE):
-        batch    = unanalysed[i : i + _BATCH_SIZE]
+    for i in range(0, len(unanalysed), batch_size):
+        batch    = unanalysed[i : i + batch_size]
         sessions = [(p, _read_session(p)) for p in batch]
 
         log.info("Extracting batch %d–%d...", i + 1, i + len(batch))
@@ -358,7 +389,7 @@ def _run_locked(ws, notify: bool, *, base_url: str | None = None,
             log.error("Extraction failed for batch %d: %s", i, exc)
             break
 
-        last_analysed   = batch[-1]
+        analysed.extend(batch)
         total_analysed += len(batch)
 
     if not all_observations:
@@ -368,7 +399,7 @@ def _run_locked(ws, notify: bool, *, base_url: str | None = None,
     new_observations    = "\n\n".join(all_observations)
     existing_patterns   = ws.load_patterns()
 
-    log.info("Consolidating patterns (max %d lines)...", _MAX_PATTERN_LINES)
+    log.info("Consolidating patterns (max %d lines)...", _cfg("ARIA_REFLECT_MAX_LINES"))
     try:
         resp = client.chat.completions.create(
             model=model,
@@ -378,22 +409,30 @@ def _run_locked(ws, notify: bool, *, base_url: str | None = None,
             }],
             stream=False,
         )
-        consolidated = resp.choices[0].message.content.strip()
+        consolidated = (resp.choices[0].message.content or "").strip()
     except Exception as exc:
         log.error("Consolidation failed: %s", exc)
-        # Save raw observations rather than losing them
+        consolidated = ""
+    if not consolidated:
+        # Save raw observations rather than losing them (or blanking patterns.md)
         consolidated = new_observations
 
     ws.save_patterns(consolidated)
 
-    if last_analysed:
-        ws.update_watermark(last_analysed)
+    if analysed:
+        # Advances the watermark only across contiguous analysed sessions, so a
+        # still-active (unsettled) session in between is picked up next run.
+        ws.mark_sessions_analysed(analysed)
 
     line_count = len([l for l in consolidated.splitlines() if l.strip()])
 
     # ── Phase 3: consolidate operational_memory.md ────────────────────────────
     ops_status = ""
-    current_ops = ws.load_operational_memory()
+    ops_path = ws.root / "memory" / "operational_memory.md"
+    ops_snapshot = ops_path.read_text(encoding="utf-8") if ops_path.exists() else ""
+    # Derived from the same snapshot the merge-at-write compares against.
+    current_ops = "\n".join(l for l in ops_snapshot.strip().splitlines()
+                            if not l.startswith("#")).strip() or None
     if current_ops:
         log.info("Consolidating operational memory...")
         try:
@@ -405,14 +444,23 @@ def _run_locked(ws, notify: bool, *, base_url: str | None = None,
                 }],
                 stream=False,
             )
-            consolidated_ops = resp.choices[0].message.content.strip()
-            # Write back — reuse append_operational_memory by rewriting the file
-            ops_path = ws.root / "memory" / "operational_memory.md"
-            from aria.workspace import _secure_write
-            _secure_write(ops_path, "# Operational Memory\n" + consolidated_ops + "\n")
-            ops_lines = len([l for l in consolidated_ops.splitlines() if l.strip()])
-            ops_status = f", operational memory consolidated to {ops_lines} entries"
-            log.info("Operational memory consolidated to %d entries.", ops_lines)
+            consolidated_ops = (resp.choices[0].message.content or "").strip()
+            # Guard: an empty completion must never wipe operational memory
+            # down to a bare header (same guard as Phase 4).
+            if consolidated_ops:
+                from aria.workspace import _secure_write, file_lock
+                with file_lock(ops_path):
+                    # Re-read at write time: LEARN: entries appended by another
+                    # process during the LLM call are kept, not overwritten.
+                    current = ops_path.read_text(encoding="utf-8") if ops_path.exists() else ""
+                    added = _new_lines(ops_snapshot, current)
+                    merged = "\n".join([consolidated_ops] + added)
+                    _secure_write(ops_path, "# Operational Memory\n" + merged + "\n")
+                ops_lines = len([l for l in merged.splitlines() if l.strip()])
+                ops_status = f", operational memory consolidated to {ops_lines} entries"
+                log.info("Operational memory consolidated to %d entries.", ops_lines)
+            else:
+                log.warning("Operational memory consolidation returned nothing — left as-is.")
         except Exception as exc:
             log.warning("Operational memory consolidation failed: %s", exc)
     else:
@@ -420,7 +468,10 @@ def _run_locked(ws, notify: bool, *, base_url: str | None = None,
 
     # ── Phase 4: consolidate core memory (conservative dedup) ─────────────────
     core_status = ""
-    current_core = ws.load_core_memory()
+    core_path = ws.root / "memory" / "core.md"
+    core_snapshot = core_path.read_text(encoding="utf-8") if core_path.exists() else ""
+    current_core = "\n".join(l for l in core_snapshot.splitlines()
+                             if not l.strip().startswith("#")).strip() or None
     if current_core and not ws.core_is_empty():
         log.info("Consolidating core memory...")
         try:
@@ -432,11 +483,18 @@ def _run_locked(ws, notify: bool, *, base_url: str | None = None,
                 }],
                 stream=False,
             )
-            consolidated_core = resp.choices[0].message.content.strip()
+            consolidated_core = (resp.choices[0].message.content or "").strip()
             # Guard: only overwrite if we got a non-empty result back, so a
             # transient error or an empty completion never wipes permanent facts.
             if consolidated_core:
-                ws.save_core_memory(consolidated_core)
+                from aria.workspace import file_lock
+                with file_lock(core_path):
+                    # Re-read under the lock: facts remembered by another
+                    # process during the LLM call are appended, not lost.
+                    current = core_path.read_text(encoding="utf-8") if core_path.exists() else ""
+                    added = _new_lines(core_snapshot, current)
+                    consolidated_core = "\n".join([consolidated_core] + added)
+                    ws.save_core_memory(consolidated_core)   # re-entrant lock
                 core_lines = len([l for l in consolidated_core.splitlines() if l.strip()])
                 core_status = f", core memory consolidated to {core_lines} facts"
                 log.info("Core memory consolidated to %d facts.", core_lines)

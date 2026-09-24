@@ -183,6 +183,16 @@ AGENT_NAME=Aria
 # ── WhatsApp outbound push (new in 2.5) ──────────────────────────────
 # Port the Node bridge listens on for Python→WhatsApp pushes (notify tool)
 # ARIA_WA_PUSH_PORT=7533
+# Seconds the bridge waits for a reply before telling the user "still working"
+# (a later reply is pushed instead of lost)
+# ARIA_WA_TIMEOUT=600
+# Extra env var names passed to shell_run despite looking like secrets
+# ARIA_SHELL_ENV_ALLOW=
+# Minutes a session must be idle before reflection analyses it
+# ARIA_REFLECT_SETTLE_MIN=10
+# Non-public network ranges web_fetch/browser may reach (comma-separated CIDRs),
+# e.g. Tailscale or a fake-IP proxy: 100.64.0.0/10,198.18.0.0/15
+# ARIA_NET_ALLOW=
 """
 
 _BANNER = """
@@ -219,6 +229,30 @@ _INSTRUCTIONS = """
 """
 
 
+def write_private(path: Path, content: str) -> None:
+    """Atomically write `content` to `path` with 0600 perms from creation.
+
+    The temp file is created by mkstemp (0600) in the same directory, so there
+    is no window where secrets sit in a world-readable file, and a crash can't
+    leave a truncated .env behind. Shared by setup and aria-install."""
+    import os
+    import tempfile
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(content)
+            f.flush()
+            os.fsync(f.fileno())
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
 def is_first_run() -> bool:
     """Return True if no .env exists in any of the expected locations."""
     import os
@@ -226,8 +260,13 @@ def is_first_run() -> bool:
         return False
     if (Path.home() / ".aria" / ".env").exists():
         return False
-    if Path(".env").exists():
-        return False
+    # No ./.env (cwd) check: config.load() no longer reads it (see config.py).
+    # But say so, rather than silently ignoring a config that used to work.
+    if Path(".env").exists() and "LLM_BASE_URL" in Path(".env").read_text(
+            encoding="utf-8", errors="ignore"):
+        print("Note: ./.env in the current directory is no longer read "
+              "automatically. Move it to ~/.aria/.env, or run with "
+              "ARIA_ENV=./.env.")
     return True
 
 
@@ -238,13 +277,18 @@ def run() -> None:
     tools_dir  = aria_dir / "tools"
     ws_dir     = aria_dir / "workspace"
 
-    # Create directories
+    # Create directories. ~/.aria holds .env (API keys) and memory — owner-only.
     for d in (aria_dir, tools_dir, ws_dir):
         d.mkdir(parents=True, exist_ok=True)
+    try:
+        aria_dir.chmod(0o700)
+    except OSError:
+        pass
 
-    # Write .env only if it doesn't exist (safety check)
+    # Write .env only if it doesn't exist (safety check). Created 0600 so the
+    # keys it will hold are never world-readable, not even briefly.
     if not env_path.exists():
-        env_path.write_text(_ENV_TEMPLATE, encoding="utf-8")
+        write_private(env_path, _ENV_TEMPLATE)
 
     print(_BANNER)
     print(_INSTRUCTIONS.format(

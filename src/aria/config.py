@@ -2,9 +2,11 @@
 aria/config.py — Centralised configuration and path resolution.
 
 Search order for .env:
-  1. $ARIA_ENV  (explicit override)
+  1. $ARIA_ENV  (explicit override — point it at ./.env for dev work)
   2. ~/.aria/.env
-  3. ./.env     (cwd, for dev convenience)
+
+There is deliberately NO ./.env (cwd) fallback: running `aria` inside any
+project that has its own .env would silently pick up that project's LLM_* keys.
 """
 
 from __future__ import annotations
@@ -21,9 +23,6 @@ def _find_env() -> Path | None:
     home_env = Path.home() / ".aria" / ".env"
     if home_env.exists():
         return home_env
-    cwd_env = Path(".env")
-    if cwd_env.exists():
-        return cwd_env
     return None
 
 

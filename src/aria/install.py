@@ -87,36 +87,92 @@ def _backup_env(path: Path) -> Path | None:
     while backup.exists():
         backup = path.with_name(f"{path.name}.bak-{stamp}.{n}")
         n += 1
-    shutil.copy2(path, backup)          # copy2 preserves the 0600 mode
+    shutil.copy2(path, backup)
+    backup.chmod(0o600)                 # an old .env may have been 0644 — backups hold keys too
     return backup
+
+
+def _existing_env_lines(path: Path) -> dict[str, str]:
+    """Map KEY → the raw, verbatim `KEY=value` line of every active setting in
+    an existing .env (comments/blank lines skipped, `export ` prefix allowed).
+    Later duplicates win, matching python-dotenv."""
+    raw: dict[str, str] = {}
+    if not path.exists():
+        return raw
+    for line in path.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            continue
+        key = stripped.split("=", 1)[0].strip()
+        if key.startswith("export "):
+            key = key[len("export "):].strip()
+        if key:
+            raw[key] = stripped
+    return raw
 
 
 def _write_env(path: Path, values: dict[str, str]) -> Path | None:
     """Write values to .env, preserving template structure and comments. Backs
-    up any existing .env first; returns the backup path (or None if none)."""
-    from aria.setup import _ENV_TEMPLATE
+    up any existing .env first; returns the backup path (or None if none).
 
+    Only keys in `values` are managed by the wizard. Every other setting already
+    in the file (JIRA_*, IMAP_*, LLM_PROFILE*, ARIA_FILE_*_DIRS, custom keys…) is
+    kept verbatim — in its template slot if the template lists it, otherwise in
+    an "Other settings (preserved)" section — so re-running aria-install never
+    silently drops or comments out configuration it didn't ask about."""
+    from aria.setup import _ENV_TEMPLATE, write_private
+
+    existing = _existing_env_lines(path)
     template_lines = _ENV_TEMPLATE.splitlines()
     template_keys: set[str] = set()
     output: list[str] = []
 
+    import re
+    commented_re = re.compile(r"#\s*([A-Z][A-Z0-9_]*)=")
     for line in template_lines:
         stripped = line.strip()
+        m = commented_re.match(stripped)
+        if m and m.group(1) in existing and m.group(1) not in values \
+                and m.group(1) not in template_keys:
+            # Commented example of a key the user has set: show the real value
+            # in its documented slot instead of the placeholder.
+            template_keys.add(m.group(1))
+            output.append(existing[m.group(1)])
+            continue
         if not stripped or stripped.startswith("#") or "=" not in stripped:
             output.append(line)
             continue
         key = stripped.split("=")[0].strip()
+        if key in template_keys and key not in values:
+            output.append(f"# {key}=")      # already emitted from a commented slot
+            continue
         template_keys.add(key)
-        val = values.get(key, "").strip()
-        output.append(f"{key}={val}" if val else f"# {key}=")
+        if key in values:
+            val = values[key].strip()
+            output.append(f"{key}={val}" if val else f"# {key}=")
+        elif key in existing:
+            output.append(existing[key])
+        else:
+            output.append(f"# {key}=")
 
     for key, val in values.items():
         if key not in template_keys and val.strip():
             output.append(f"{key}={val}")
 
+    preserved = [ln for k, ln in existing.items()
+                 if k not in template_keys and k not in values]
+    if preserved:
+        output.append("")
+        output.append("# ── Other settings (preserved) ──────────────────────────────────")
+        output.extend(preserved)
+
     path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        path.parent.chmod(0o700)        # ~/.aria holds secrets + memory
+    except OSError:
+        pass
     backup = _backup_env(path)
-    path.write_text("\n".join(output) + "\n", encoding="utf-8")
+    write_private(path, "\n".join(output) + "\n")
     return backup
 
 
@@ -362,18 +418,28 @@ def _linger_enabled() -> bool:
 # ── Service templates ─────────────────────────────────────────────────────────
 
 def _service(description: str, exec_start: str, env_file: str,
-             after: str = "network-online.target", wants: str = "network-online.target",
-             requires: str = "") -> str:
-    req = f"Requires={requires}\n" if requires else ""
+             after: str = "", wants: str = "", requires: str = "") -> str:
+    # No network-online.target: a --user manager can't see the system target, so
+    # After=/Wants= on it were silent no-ops. Network-not-ready-at-boot is
+    # handled by the restart policy below instead.
+    deps = "".join(f"{k}={v}\n" for k, v in
+                   (("After", after), ("Wants", wants), ("Requires", requires)) if v)
     # PassEnvironment forwards the user's keychain/keyring session so tools
     # like gog can access stored OAuth tokens without extra config.
     # StartLimit* + OnFailure arm the self-update watchdog: if a service
     # crash-loops (5 starts in 5 min) it enters 'failed' and triggers
-    # aria-rollback.service, which reverts a bad update automatically.
+    # aria-rollback@<unit>.service, which reverts a bad update (only if an
+    # update is pending) and then restarts the failed unit after a pause — so a
+    # transient failure (network down at boot) is retried forever instead of
+    # leaving the service permanently 'failed'.
+    # Deliberately no RestartSteps/RestartMaxDelaySec backoff (systemd >= 254):
+    # growing delays would spread 5 starts past the 300s window, so a bad update
+    # would never trip the start limit and the rollback watchdog would never fire.
+    # The pause between burst cycles comes from the recovery unit instead.
     return (
-        f"[Unit]\nDescription={description}\nAfter={after}\nWants={wants}\n{req}"
+        f"[Unit]\nDescription={description}\n{deps}"
         "StartLimitIntervalSec=300\nStartLimitBurst=5\n"
-        "OnFailure=aria-rollback.service\n\n"
+        "OnFailure=aria-rollback@%n.service\n\n"
         f"[Service]\nExecStart={exec_start}\nRestart=on-failure\nRestartSec=10\n"
         f"EnvironmentFile={env_file}\n"
         "PassEnvironment=DBUS_SESSION_BUS_ADDRESS GNOME_KEYRING_CONTROL SSH_AUTH_SOCK\n"
@@ -381,12 +447,23 @@ def _service(description: str, exec_start: str, env_file: str,
     )
 
 
+_ROLLBACK_UNIT = "aria-rollback@.service"
+_RETRY_DELAY_SEC = 60
+
+
 def _rollback_service(rollback_bin: str, env_file: str) -> str:
-    """Oneshot unit triggered via OnFailure= to auto-rollback a bad update.
-    Not enabled — invoked on demand by systemd, not at boot."""
+    """Template oneshot triggered via OnFailure=aria-rollback@%n.service.
+    Not enabled — invoked on demand by systemd, not at boot. `%i` is the failed
+    unit. Step 1 runs aria-rollback, which reverts ONLY when an update marker
+    (~/.aria/update_state.json) is pending inside its confirm window and is a
+    no-op otherwise ('-' prefix: its exit code never blocks step 2). Step 2
+    waits, clears the start-limit and restarts the failed unit."""
     return (
-        "[Unit]\nDescription=Aria auto-rollback after a failed self-update\n\n"
-        f"[Service]\nType=oneshot\nExecStart={rollback_bin}\n"
+        "[Unit]\nDescription=Aria auto-rollback / recovery after %i failed\n\n"
+        f"[Service]\nType=oneshot\nExecStart=-{rollback_bin}\n"
+        f"ExecStart=/bin/sh -c 'sleep {_RETRY_DELAY_SEC}; "
+        "systemctl --user reset-failed %i; systemctl --user start %i'\n"
+        "TimeoutStartSec=900\n"            # rollback may pip-install; default 90s is too short
         f"EnvironmentFile={env_file}\n"
         "PassEnvironment=DBUS_SESSION_BUS_ADDRESS GNOME_KEYRING_CONTROL SSH_AUTH_SOCK\n"
     )
@@ -493,8 +570,7 @@ def install_services(features: set[str] | None = None, dry_run: bool = False) ->
             description = cfg["description"],
             exec_start  = cfg["exec"],
             env_file    = str(env_file),
-            after       = "aria-whatsapp.service" if requires else "network-online.target",
-            wants       = "" if requires else "network-online.target",
+            after       = "aria-whatsapp.service" if requires else "",
             requires    = requires,
         )
         path = systemd_dir / f"{name}.service"
@@ -507,12 +583,14 @@ def install_services(features: set[str] | None = None, dry_run: bool = False) ->
     # Auto-rollback watchdog unit (referenced by OnFailure= above).
     rollback_bin = _aria_bin("aria-rollback")
     if rollback_bin:
-        rb_path = systemd_dir / "aria-rollback.service"
+        rb_path = systemd_dir / _ROLLBACK_UNIT
         if dry_run:
             info(f"[dry-run] would write {rb_path}")
         else:
             rb_path.write_text(_rollback_service(rollback_bin, str(env_file)), encoding="utf-8")
-            ok("Written: aria-rollback.service (auto-rollback watchdog)")
+            # Pre-template installs used a plain aria-rollback.service.
+            (systemd_dir / "aria-rollback.service").unlink(missing_ok=True)
+            ok(f"Written: {_ROLLBACK_UNIT} (auto-rollback + restart watchdog)")
     else:
         warn("aria-rollback binary not found — auto-rollback disabled until you reinstall "
              "(pip install) the new version, then re-run aria-install.")
@@ -576,6 +654,11 @@ def install_services(features: set[str] | None = None, dry_run: bool = False) ->
 def uninstall() -> None:
     section("Uninstalling Aria services")
     names = ["aria-telegram", "aria-supervisor", "aria-whatsapp", "aria-whatsapp-node"]
+    for unit in (_ROLLBACK_UNIT, "aria-rollback.service"):
+        path = Path.home() / ".config" / "systemd" / "user" / unit
+        if path.exists():
+            path.unlink()
+            ok(f"Removed: {unit}")
     for name in names:
         subprocess.run(["systemctl", "--user", "disable", "--now", name], capture_output=True)
         path = Path.home() / ".config" / "systemd" / "user" / f"{name}.service"
