@@ -19,9 +19,10 @@ native function calling spec is marked implemented.
 
 ## 2. Tooling & packaging — ✅ done
 
-CI (`.github/workflows/ci.yml`) runs ruff and mypy, a pytest matrix on
-3.11–3.14, an import smoke test of every module, and `node --check` on the
-bridge. `.pre-commit-config.yaml` runs the same checks locally. Dependencies
+No hosted CI: the project is clone + `pip install`. The quality gate is
+local: `.pre-commit-config.yaml` runs ruff, mypy and an import smoke test on
+every commit (`pip install ".[dev]" && pre-commit install`), plus `pytest`.
+Dependencies
 have major-version upper bounds; `[dev]` includes ruff, mypy and pre-commit.
 `py.typed` was added, and `whatsapp/package-lock.json` is deployed (`npm ci`).
 
@@ -32,8 +33,6 @@ Follow-ups:
 - **Wider ruff rules** — low / low. Only bug-finding rules are on (F, B, UP,
   E4/7/9, W). Consider `I` (import sorting) and `SIM` once someone accepts the
   churn. `ruff format` is deliberately not used, to keep the aligned-`=` style.
-- **Dependabot / Renovate** — low / low. Bump the upper bounds and the npm
-  lockfile with CI as the gate.
 
 ## 3. Architecture / refactors
 
