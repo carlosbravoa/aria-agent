@@ -61,6 +61,26 @@ def _looks_like_error(result: str) -> bool:
 _PROFILE_STATE = Path.home() / ".aria" / ".last_profile"
 
 
+def _env_profiles() -> list[dict[str, str]]:
+    """Configured model profiles, in slot order: LLM_PROFILE1_* … LLM_PROFILE9_*
+    (a slot counts only if its MODEL is set). Unset BASE_URL / API_KEY inherit
+    the default LLM_* values; NAME defaults to "profile<i>", lower-cased."""
+    out = []
+    for i in range(1, 10):
+        model = os.environ.get(f"LLM_PROFILE{i}_MODEL", "")
+        if not model:
+            continue
+        out.append({
+            "name":     os.environ.get(f"LLM_PROFILE{i}_NAME", f"profile{i}").lower().strip(),
+            "model":    model,
+            "base_url": os.environ.get(f"LLM_PROFILE{i}_BASE_URL",
+                                       os.environ.get("LLM_BASE_URL", "")),
+            "api_key":  os.environ.get(f"LLM_PROFILE{i}_API_KEY",
+                                       os.environ.get("LLM_API_KEY", "local")),
+        })
+    return out
+
+
 def _profile_state_path(window_key: str) -> Path | None:
     """Where a /model switch in this conversation is saved. The terminal entry
     points (REPL, single-shot CLI, --notify) share the main file; each channel
@@ -225,6 +245,84 @@ def _message_tokens(msg: dict) -> int:
         fn = tc.get("function", {}) if isinstance(tc, dict) else {}
         total += _estimate_tokens(fn.get("arguments") or "") + 8
     return total
+
+
+class _TurnGuard:
+    """Per-turn loop guards for Agent._run_loop.
+
+    - exact-repeat detection (the seen-calls list),
+    - the same-tool thrash nudge (every _SAME_TOOL_NUDGE_EVERY calls),
+    - broken-tool escalation (every _TOOL_BROKEN_AFTER consecutive failures),
+    - the friction stats `Agent._flag_friction` reads (`stats`; its
+      calls_per_tool is shared by reference so the flag can report per-tool
+      call counts).
+
+    Thresholds are read from the module globals at call time (tests patch them).
+    """
+
+    def __init__(self) -> None:
+        self.seen_calls: list[str] = []
+        self.calls_per_tool: dict[str, int] = {}
+        self.stats: dict[str, Any] = {
+            "calls": 0, "errors": 0, "err_per_tool": {}, "consec": {},
+            "repeats": 0, "hard_stop": False, "calls_per_tool": self.calls_per_tool,
+        }
+
+    def repeat_count(self, call_sig: str) -> int:
+        """How many times this exact batch was already issued this turn. Records
+        the batch (and counts a repeat) as a side effect."""
+        repeats = self.seen_calls.count(call_sig)
+        self.seen_calls.append(call_sig)
+        if repeats >= 1:
+            self.stats["repeats"] += 1
+        return repeats
+
+    def record_result(self, name: str, result: object) -> str:
+        """Account for one tool result; return agent notes to append to it
+        ("" when none apply)."""
+        self.calls_per_tool[name] = self.calls_per_tool.get(name, 0) + 1
+        st = self.stats
+        # Friction accounting (layer 2 input): classify each result with the
+        # same heuristic the ✗ activity icon uses.
+        st["calls"] += 1
+        if _looks_like_error(str(result)):
+            st["errors"] += 1
+            st["err_per_tool"][name] = st["err_per_tool"].get(name, 0) + 1
+            st["consec"][name] = st["consec"].get(name, 0) + 1
+        else:
+            st["consec"][name] = 0
+        notes = ""
+        # Thrash nudge: the exact-repeat guard misses near-identical variants,
+        # so a stuck model can probe the same tool dozens of times. Every Nth
+        # call gets an agent-voiced note (outside the untrusted fence — it's
+        # ours, not tool output) to step back.
+        count = self.calls_per_tool[name]
+        if _SAME_TOOL_NUDGE_EVERY > 0 and count % _SAME_TOOL_NUDGE_EVERY == 0:
+            notes += (
+                f"\n[agent] That was call #{count} to `{name}` this turn "
+                "and the task is still unfinished. Stop probing with "
+                "small variations: consolidate what you have learned so "
+                "far, update your plan (plan tool), and either complete "
+                "the task with what you have or tell the user exactly "
+                "what is blocking you."
+            )
+        # Broken-tool escalation (layer 1): after N consecutive failures of the
+        # same tool, ask the diagnostic question the model never asks itself —
+        # is the TOOL broken, not the arguments? Models push through with
+        # workarounds by default; this makes stopping and reporting the
+        # legitimate move. Fires again at 2N, 3N…
+        consec = st["consec"][name]
+        if (_TOOL_BROKEN_AFTER > 0 and consec > 0
+                and consec % _TOOL_BROKEN_AFTER == 0):
+            notes += (
+                f"\n[agent] That's {consec} failed `{name}` calls in a "
+                "row. Consider that the TOOL or environment may be "
+                "broken — not your arguments. If the errors look alike, "
+                "STOP working around it: tell the user plainly what "
+                "appears broken (quote the error), and save a learn() "
+                "note so future sessions know about it."
+            )
+        return notes
 
 
 class Agent:
@@ -408,18 +506,13 @@ class Agent:
             "base_url": os.environ.get("LLM_BASE_URL", ""),
             "active":  self._active_profile == "default",
         }]
-        for i in range(1, 10):
-            model = os.environ.get(f"LLM_PROFILE{i}_MODEL", "")
-            if not model:
-                continue
-            name = os.environ.get(f"LLM_PROFILE{i}_NAME", f"profile{i}").lower().strip()
+        for prof in _env_profiles():
             profiles.append({
-                "key":     name,
-                "name":    name,
-                "model":   model,
-                "base_url": os.environ.get(f"LLM_PROFILE{i}_BASE_URL",
-                                            os.environ.get("LLM_BASE_URL", "")),
-                "active":  self._active_profile == name,
+                "key":     prof["name"],
+                "name":    prof["name"],
+                "model":   prof["model"],
+                "base_url": prof["base_url"],
+                "active":  self._active_profile == prof["name"],
             })
         return profiles
 
@@ -450,17 +543,9 @@ class Agent:
             self._save_profile("default")
             return f"Switched to default ({self.model})"
 
-        for i in range(1, 10):
-            model = os.environ.get(f"LLM_PROFILE{i}_MODEL", "")
-            if not model:
-                continue
-            profile_name = os.environ.get(f"LLM_PROFILE{i}_NAME",
-                                           f"profile{i}").lower().strip()
-            if profile_name == name:
-                base_url = os.environ.get(f"LLM_PROFILE{i}_BASE_URL",
-                                           os.environ.get("LLM_BASE_URL", ""))
-                api_key  = os.environ.get(f"LLM_PROFILE{i}_API_KEY",
-                                           os.environ.get("LLM_API_KEY", "local"))
+        for prof in _env_profiles():
+            if prof["name"] == name:
+                base_url, api_key, model = prof["base_url"], prof["api_key"], prof["model"]
                 self._base_url = base_url
                 self._api_key  = api_key
                 self.client = _make_client(base_url, api_key)
@@ -1070,13 +1155,12 @@ class Agent:
         API, executes the structured `tool_calls` the model returns, and feeds
         each result back as a `tool` message. Collects all clean text responses
         into self._responses; tool plumbing never appears there.
+
+        Shape: call model → (answer? deliver, stop) → repeat guard → run the
+        batch → append results (with guard notes) → trim. The per-turn guards
+        and friction stats live in _TurnGuard.
         """
-        seen_calls: list[str] = []
-        calls_per_tool: dict[str, int] = {}   # thrash guard (per turn)
-        # Friction stats for this turn (see _flag_friction). calls_per_tool is
-        # shared by reference so the flag can report per-tool call counts.
-        fr: dict[str, Any] = {"calls": 0, "errors": 0, "err_per_tool": {}, "consec": {},
-              "repeats": 0, "hard_stop": False, "calls_per_tool": calls_per_tool}
+        guard = _TurnGuard()
         # Higher loop limit for browser tasks — they need many sequential steps
         # (navigate, snapshot, click, type...).
         browser_task = any(
@@ -1099,7 +1183,7 @@ class Agent:
             if isinstance(message, str):
                 self._responses.append(message)
                 self._last_response = message
-                self._flag_friction(fr)
+                self._flag_friction(guard.stats)
                 return
 
             content    = (message.content or "").strip()
@@ -1114,139 +1198,27 @@ class Agent:
                 display = content or "(no response)"
                 self.ws.log_session(self.session_log, self.name, display)
                 self.history[-1]["content"] = display
-                self._responses.append(display)
-                self._last_response = display
-                self.ws.append_conversation_window("assistant", display, self.name)
-                self._render_answer(display)
-                self._stream(display)
-                self._flag_friction(fr)
+                self._deliver(display, persist=True)
+                self._flag_friction(guard.stats)
                 return
 
             # Content accompanying tool calls.
             if content:
                 self.ws.log_session(self.session_log, self.name, content)
                 if any(tc.function.name in deliver_tools for tc in tool_calls):
-                    self._responses.append(content)
-                    self._last_response = content
-                    self.ws.append_conversation_window("assistant", content, self.name)
-                    self._render_answer(content)
-                    self._stream(content)
+                    self._deliver(content, persist=True)
 
-            # Guard against the model re-issuing a call it already made. The
-            # signature is normalized (sorted JSON args) so a re-serialized call
-            # with reordered keys / different whitespace is still recognised as a
-            # repeat — otherwise it would slip through and execute twice (e.g. a
-            # second Jira ticket). On the FIRST repeat we don't kill the turn:
-            # we feed the model a corrective tool result (with the prior output)
-            # so it can adapt — report the success, change arguments, or try
-            # another tool. Only a SECOND repeat (model ignored the nudge and is
-            # genuinely stuck) hard-stops.
             call_sig = self._call_signature(tool_calls)
-            repeats  = seen_calls.count(call_sig)
+            repeats  = guard.repeat_count(call_sig)
             if repeats >= 1:
-                seen_calls.append(call_sig)
-                fr["repeats"] += 1
-                prior = self._last_result_for.get(call_sig, "")
-                if repeats >= 2:
-                    note = "(identical tool call repeated 3× — stopping)"
-                    if self._is_terminal:
-                        self._console().print(f"  [yellow]⚠ {note}[/yellow]")
-                    self.ws.log_session(self.session_log, self.name, note)
-                    nudge = ("[agent] You have now issued this exact call three "
-                             "times. Stop repeating it and reply to the user with "
-                             "what you have, or explain what is blocking you.")
-                    for tc in tool_calls:
-                        self.history.append({"role": "tool", "tool_call_id": tc.id,
-                                             "content": _wrap_untrusted(nudge)})
-                    # Don't leave channel users with "(no response)": if nothing
-                    # was delivered this turn, explain why it stopped.
-                    if not self._responses:
-                        stop = ("I kept hitting the same step and stopped to avoid "
-                                "looping. Could you rephrase or give me more detail?")
-                        self._responses.append(stop)
-                        self._last_response = stop
-                        self._stream(stop)
-                    fr["hard_stop"] = True
-                    self._flag_friction(fr)
+                if self._handle_repeat(repeats, call_sig, tool_calls, guard):
                     return
-                if self._is_terminal:
-                    self._console().print(
-                        "  [yellow]⚠ model repeated an identical call — feeding "
-                        "back the previous result instead of re-running[/yellow]")
-                nudge = ("[agent] You already issued this exact tool call earlier "
-                         "in this turn; it was NOT run again. Its previous result "
-                         f"was:\n{prior or '(no output captured)'}\n\nDo not repeat "
-                         "it verbatim — if it succeeded, tell the user; otherwise "
-                         "change the arguments (e.g. a longer `timeout`) or try a "
-                         "different approach.")
-                for tc in tool_calls:
-                    self.history.append({"role": "tool", "tool_call_id": tc.id,
-                                         "content": _wrap_untrusted(nudge)})
                 continue
-            seen_calls.append(call_sig)
 
-            # Execute each call and append one tool message per call — EVERY
-            # tool_call_id must get a reply or the next request is rejected.
-            # A batch runs concurrently only when it has >1 call and every tool
-            # in it is PARALLEL_SAFE; otherwise it runs sequentially in order.
-            indexed = list(enumerate(tool_calls, 1))
-            concurrent = (len(indexed) > 1 and
-                          all(tc.function.name in self._parallel_safe
-                              for _, tc in indexed))
-            if concurrent:
-                results = self._run_calls_concurrent(indexed)
-            else:
-                results = [self._run_one_call(tc, idx) for idx, tc in indexed]
-            for (_, tc), result in zip(indexed, results, strict=True):
-                name = tc.function.name
-                calls_per_tool[name] = calls_per_tool.get(name, 0) + 1
-                content = _wrap_untrusted(result)
-                # Friction accounting (layer 2 input): classify each result with
-                # the same heuristic the ✗ activity icon uses.
-                fr["calls"] += 1
-                if _looks_like_error(str(result)):
-                    fr["errors"] += 1
-                    fr["err_per_tool"][name] = fr["err_per_tool"].get(name, 0) + 1
-                    fr["consec"][name] = fr["consec"].get(name, 0) + 1
-                else:
-                    fr["consec"][name] = 0
-                # Thrash nudge: the exact-repeat guard misses near-identical
-                # variants, so a stuck model can probe the same tool dozens of
-                # times. Every Nth call gets an agent-voiced note (outside the
-                # untrusted fence — it's ours, not tool output) to step back.
-                count = calls_per_tool[name]
-                if _SAME_TOOL_NUDGE_EVERY > 0 and count % _SAME_TOOL_NUDGE_EVERY == 0:
-                    content += (
-                        f"\n[agent] That was call #{count} to `{name}` this turn "
-                        "and the task is still unfinished. Stop probing with "
-                        "small variations: consolidate what you have learned so "
-                        "far, update your plan (plan tool), and either complete "
-                        "the task with what you have or tell the user exactly "
-                        "what is blocking you."
-                    )
-                # Broken-tool escalation (layer 1): after N consecutive failures
-                # of the same tool, ask the diagnostic question the model never
-                # asks itself — is the TOOL broken, not the arguments? Models
-                # push through with workarounds by default; this makes stopping
-                # and reporting the legitimate move. Fires again at 2N, 3N…
-                consec = fr["consec"][name]
-                if (_TOOL_BROKEN_AFTER > 0 and consec > 0
-                        and consec % _TOOL_BROKEN_AFTER == 0):
-                    content += (
-                        f"\n[agent] That's {consec} failed `{name}` calls in a "
-                        "row. Consider that the TOOL or environment may be "
-                        "broken — not your arguments. If the errors look alike, "
-                        "STOP working around it: tell the user plainly what "
-                        "appears broken (quote the error), and save a learn() "
-                        "note so future sessions know about it."
-                    )
-                self.history.append({
-                    "role": "tool",
-                    "tool_call_id": tc.id,
-                    "content": content,
-                })
+            results = self._run_batch(tool_calls)
+            self._append_tool_results(tool_calls, results, guard)
             # Remember this batch's output so a later identical call can be
-            # answered from it (the nudge above) instead of being re-run.
+            # answered from it (the repeat nudge) instead of being re-run.
             self._last_result_for[call_sig] = "\n".join(
                 str(r)[:500] for r in results)
 
@@ -1263,13 +1235,93 @@ class Agent:
         limit_note = (f"I stopped after {loop_limit} steps without finishing — the "
                       "task may be too large or I got stuck. Tell me how to narrow "
                       "it down.")
-        self._responses.append(limit_note)
-        self._last_response = limit_note
-        self._stream(limit_note)
+        self._deliver(limit_note)
         if self._is_terminal:
             self._console().print(f"\n  [yellow]⚠ Hit loop limit ({loop_limit}).[/yellow]")
-        fr["hard_stop"] = True
-        self._flag_friction(fr)
+        guard.stats["hard_stop"] = True
+        self._flag_friction(guard.stats)
+
+    def _deliver(self, text: str, persist: bool = False) -> None:
+        """Record a user-facing response for this turn and stream it. `persist`
+        also writes it to the conversation window and renders it (answers);
+        loop-control notes (limit/stop messages) are delivered but not kept."""
+        self._responses.append(text)
+        self._last_response = text
+        if persist:
+            self.ws.append_conversation_window("assistant", text, self.name)
+            self._render_answer(text)
+        self._stream(text)
+
+    def _reply_all(self, tool_calls, note: str) -> None:
+        """Answer every tool_call_id in the batch with the same agent note —
+        EVERY id must get a reply or the next request is rejected."""
+        for tc in tool_calls:
+            self.history.append({"role": "tool", "tool_call_id": tc.id,
+                                 "content": _wrap_untrusted(note)})
+
+    def _handle_repeat(self, repeats: int, call_sig: str, tool_calls,
+                       guard: _TurnGuard) -> bool:
+        """The model re-issued a batch it already made this turn. The signature
+        is normalized (sorted JSON args) so a re-serialized call with reordered
+        keys / different whitespace is still recognised — otherwise it would
+        slip through and execute twice (e.g. a second Jira ticket). On the FIRST
+        repeat we feed back a corrective result (with the prior output) so the
+        model can adapt; a SECOND repeat (it ignored the nudge and is genuinely
+        stuck) hard-stops. Returns True when the turn must end."""
+        prior = self._last_result_for.get(call_sig, "")
+        if repeats >= 2:
+            note = "(identical tool call repeated 3× — stopping)"
+            if self._is_terminal:
+                self._console().print(f"  [yellow]⚠ {note}[/yellow]")
+            self.ws.log_session(self.session_log, self.name, note)
+            self._reply_all(tool_calls,
+                            "[agent] You have now issued this exact call three "
+                            "times. Stop repeating it and reply to the user with "
+                            "what you have, or explain what is blocking you.")
+            # Don't leave channel users with "(no response)": if nothing
+            # was delivered this turn, explain why it stopped.
+            if not self._responses:
+                self._deliver("I kept hitting the same step and stopped to avoid "
+                              "looping. Could you rephrase or give me more detail?")
+            guard.stats["hard_stop"] = True
+            self._flag_friction(guard.stats)
+            return True
+        if self._is_terminal:
+            self._console().print(
+                "  [yellow]⚠ model repeated an identical call — feeding "
+                "back the previous result instead of re-running[/yellow]")
+        self._reply_all(tool_calls,
+                        "[agent] You already issued this exact tool call earlier "
+                        "in this turn; it was NOT run again. Its previous result "
+                        f"was:\n{prior or '(no output captured)'}\n\nDo not repeat "
+                        "it verbatim — if it succeeded, tell the user; otherwise "
+                        "change the arguments (e.g. a longer `timeout`) or try a "
+                        "different approach.")
+        return False
+
+    def _run_batch(self, tool_calls) -> list[str]:
+        """Execute a batch of calls. It runs concurrently only when it has >1
+        call and every tool in it is PARALLEL_SAFE; otherwise sequentially in
+        order. Results are aligned with `tool_calls`."""
+        indexed = list(enumerate(tool_calls, 1))
+        concurrent = (len(indexed) > 1 and
+                      all(tc.function.name in self._parallel_safe
+                          for _, tc in indexed))
+        if concurrent:
+            return self._run_calls_concurrent(indexed)
+        return [self._run_one_call(tc, idx) for idx, tc in indexed]
+
+    def _append_tool_results(self, tool_calls, results, guard: _TurnGuard) -> None:
+        """One `tool` message per call (EVERY tool_call_id must get a reply),
+        with any guard notes appended outside the untrusted fence."""
+        for tc, result in zip(tool_calls, results, strict=True):
+            name = tc.function.name
+            content = _wrap_untrusted(result) + guard.record_result(name, result)
+            self.history.append({
+                "role": "tool",
+                "tool_call_id": tc.id,
+                "content": content,
+            })
 
     def _flag_friction(self, fr: dict) -> None:
         """Layer-2 friction flag: the harness — not the model — decides whether
