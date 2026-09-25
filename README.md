@@ -174,8 +174,8 @@ aria-install --uninstall  # remove all services
 ### Upgrading to 3.0
 
 3.0 adds channel plugins, attached/remote-control channels, `/stop`,
-approvals for risky actions, shared channel commands and WhatsApp push
-delivery, plus the fixes from the 2026 review (including recurring tasks that
+approvals for risky actions, shared channel commands, WhatsApp push
+delivery and a [Vicus](#vicus) channel, plus the fixes from the 2026 review (including recurring tasks that
 ran more than once). Existing Telegram/WhatsApp setups keep working without
 configuration changes.
 
