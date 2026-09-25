@@ -39,7 +39,7 @@ def test_discovered_as_builtin():
     assert p.builtin and p.source == "aria.channels.whatsapp"
     assert p.name == "whatsapp"
     assert p.description == "WhatsApp bridge  (aria-whatsapp, needs Node.js)"
-    assert p.supports_push and not p.supports_files
+    assert p.supports_push and p.supports_files    # 4.10: send_file works on WhatsApp
     keys = [f.key for f in p.config_fields]
     assert keys == ["ARIA_WA_PORT", "ARIA_WA_PUSH_PORT", "ARIA_WA_SECRET", "WHATSAPP_ALLOWED"]
     by_key = {f.key: f for f in p.config_fields}

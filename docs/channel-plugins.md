@@ -71,17 +71,38 @@ PLUGIN = MyChat()
 | `run()` | yes | Blocking receive loop. Call `host.handle_message()` for each message. |
 | `send(text, to=None)` | for push | Deliver text. Without it, `notify` explains that the channel can't push. |
 | `send_file(path, caption, to)` + `supports_files = True` | no | Enables the `send_file` tool on this channel. |
+| `send_approval(code, summary, to, expires_min)` | no | How approval requests look. The default is a text message answered with `yes <code>`. |
 | `config_fields` | no | Settings the installer prompts for. By default the channel counts as "configured" when all its `required` fields are set. |
 | `legacy_keys` | no | Env keys that auto-enable the channel when `ARIA_CHANNELS` is unset. |
 | `services()` | no | systemd units. Default: one `aria-channel-<name>` unit running `aria-channel <name>`. |
 | `install(dry_run)` | no | Pre-install hook, e.g. deploy helper files. Return notes to print. |
 | `start(stop_event)` + `supports_attached = True` | no | Lets the channel run in attached mode (see below). |
 
+### What every channel gets from the host
+
+- **Shared commands.** `/stop`, `/clear`, `/memory`, `/tools`, `/models`,
+  `/model <name>`, `/save <note>`, `/version`, `/help`.
+  `host.handle_message()` runs them without starting a turn. If your transport
+  processes messages concurrently, call `host.run_command()` directly, so that
+  `/stop` doesn't wait behind the running turn.
+- **Approvals.** When a turn on your channel needs approval for a risky
+  action, Aria calls `send_approval(code, summary, to)`. The default sends a
+  text asking the user to reply `yes <code>` / `no <code>`; `handle_message()`
+  or `host.answer_approval()` records the reply. Override `send_approval` for
+  buttons, as Telegram does.
+  - Handle approval answers **before** any per-chat lock or queue. The turn
+    waiting for the answer is holding them.
+  - A transport that handles one message at a time can't deliver the answer
+    while the turn waits. Set `answers_approvals = False` so approvals fail
+    fast instead of timing out.
+
 ### Host API (`aria.channels.host`)
 
 | Function | Purpose |
 |---|---|
 | `handle_message(channel, user_id, text, response_cb=None, activity_cb=None)` | Runs one agent turn and returns the list of replies. The callbacks stream replies and tool progress mid-turn. It blocks, so call it from a worker thread in async code. |
+| `run_command(channel, user_id, text)` | Run a shared slash command. Returns the reply text (light Markdown), or `None` if the text isn't a command. |
+| `answer_approval(channel, user_id, text)` | Handle a `yes 1234` / `no 1234` reply. Returns the reply, or `None`. |
 | `get_agent(channel, user_id)` | The live Agent, for your own commands such as `/clear` → `agent.clear_session()`. |
 | `shutdown()` | Close all sessions. Call it when `run()` exits. |
 | `parse_allowed(var)` | Parse a comma-separated allow-list env var. |
@@ -189,6 +210,7 @@ to the terminal.
 | *(unset)* | Legacy mode: every channel whose settings are present is enabled. For example, `TELEGRAM_TOKEN` enables Telegram and `WHATSAPP_ALLOWED` enables WhatsApp. Pre-plugin installs keep working unchanged. |
 | `ARIA_NOTIFY_CHANNEL=mychat` | Where pushes go outside a conversation. Default: `telegram` when enabled, otherwise the first enabled channel that can push. |
 | `ARIA_CHANNELS_DIR` | Plugin directory. Default `~/.aria/channels`. |
+| *(entry points)* | Installed packages can provide plugins through the `aria.channels` entry-point group: `[project.entry-points."aria.channels"] mychat = "aria_mychat"`. |
 | `ARIA_CHANNEL_MODE_<NAME>` | `service` (default), `attached`, or `control` (attached + remote control of the terminal session). |
 
 ## Commands

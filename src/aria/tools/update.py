@@ -281,6 +281,14 @@ def execute(args: dict) -> str:
                 f"that `git reset --hard` would DESTROY:\n{dirty}\n"
                 f"Commit or stash them in {src}, or re-run with force=true to "
                 "discard them.")
+    # Unattended (channel / remote control / task): the user approves first.
+    from aria import approval
+    n_commits = len(log_out.splitlines())
+    what = (f"update Aria {before_short} → {target_sha[:9]} ({n_commits} commit(s) "
+            f"from origin/{branch})" + (", then restart services" if restart else ""))
+    refusal = approval.check("update", what)
+    if refusal:
+        return "\n".join(lines + ["", refusal])
     rc, _, err = _git(["reset", "--hard", target_sha], src)
     if rc != 0:
         return f"[update] git reset failed:\n{err}"

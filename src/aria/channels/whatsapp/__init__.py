@@ -6,7 +6,8 @@ Two processes (unchanged from the pre-plugin layout):
                 from the Node side and runs them through the agent
   - Node        ~/.aria/whatsapp/bridge.js (whatsapp-web.js), deployed from the
                 repo's top-level whatsapp/ dir by deploy.py
-Outbound push (notify tool, supervisor) goes through notify.py → the Node
+Outbound — turn replies (one WhatsApp message per response), the notify tool,
+supervisor results and files (send_file) — goes through notify.py → the Node
 bridge's local push listener.
 
 Top level stays cheap: bridge/notify/deploy are imported inside the methods.
@@ -33,7 +34,7 @@ class WhatsAppChannel(ChannelPlugin):
     description = "WhatsApp bridge  (aria-whatsapp, needs Node.js)"
     setup_help = "Needs Node.js and ~/.aria/whatsapp/bridge.js — see README"
     legacy_keys = ("WHATSAPP_ALLOWED",)
-    supports_files = False
+    supports_files = True
     config_fields = (
         ConfigField("ARIA_WA_PORT", prompt="ARIA_WA_PORT", default="7532",
                     help="Port for Python↔Node.js bridge"),
@@ -52,6 +53,10 @@ class WhatsAppChannel(ChannelPlugin):
     def send(self, text: str, to: str | None = None) -> None:
         from aria.channels.whatsapp import notify
         notify.send(text, to=to)
+
+    def send_file(self, path: Path, caption: str = "", to: str | None = None) -> str:
+        from aria.channels.whatsapp import notify
+        return notify.send_file(path, caption=caption, to=to)
 
     def services(self) -> list[ServiceSpec]:
         bridge_js = Path.home() / ".aria" / "whatsapp" / "bridge.js"

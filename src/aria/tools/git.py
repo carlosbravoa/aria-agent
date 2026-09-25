@@ -15,6 +15,7 @@ import shutil
 import subprocess
 from pathlib import Path
 
+from aria import approval
 from aria.tools._env import build_env
 
 DEFINITION = {
@@ -96,6 +97,19 @@ def _bad_arg(value: str) -> bool:
     return bool(value) and str(value).lstrip().startswith("-")
 
 
+def _push_summary(root: Path) -> str:
+    """"push branch main to origin" — for the approval prompt."""
+    branch = _git(root, "rev-parse", "--abbrev-ref", "HEAD")
+    branch = "" if branch.startswith("[git") else branch
+    upstream = _git(root, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}")
+    if upstream.startswith("[git"):
+        remote = "its default remote"
+    else:
+        remote = upstream.split("/", 1)[0]
+    return (f"push branch {branch or '(unknown)'} to {remote} "
+            f"(repo {root.expanduser().resolve()})")
+
+
 def execute(args: dict) -> str:
     if not shutil.which("git"):
         return "[git] git is not installed."
@@ -165,6 +179,10 @@ def execute(args: dict) -> str:
         return _git(root, "commit", "-m", message)
 
     if action == "push":
+        if approval.required("git_push") and approval.unattended():
+            refusal = approval.check("git_push", _push_summary(root))
+            if refusal:
+                return refusal
         return _git(root, "push")
 
     if action == "pull":

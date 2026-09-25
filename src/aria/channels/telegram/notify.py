@@ -148,11 +148,14 @@ def _targets(chat_id: int | None) -> list[int]:
     return [current] if current else _chat_ids()
 
 
-def _post_message(url: str, chat_id: int, text: str, html_mode: bool) -> None:
+def _post_message(url: str, chat_id: int, text: str, html_mode: bool,
+                  reply_markup: dict | None = None) -> None:
     """POST one sendMessage. Raises urllib.error.HTTPError / URLError."""
     body: dict = {"chat_id": chat_id, "text": text}
     if html_mode:
         body["parse_mode"] = "HTML"
+    if reply_markup:
+        body["reply_markup"] = reply_markup
     req = urllib.request.Request(
         url,
         data=json.dumps(body).encode(),
@@ -213,6 +216,38 @@ def send(text: str, chat_id: int | None = None) -> None:
 
     if delivered:
         _record_feed(text)
+    if not delivered:
+        raise RuntimeError("; ".join(errors) or "Telegram send failed")
+
+
+APPROVAL_PREFIX = "aria-approve:"
+
+
+def send_approval(code: str, summary: str, chat_id: int | None = None,
+                  expires_min: int = 5) -> None:
+    """Ask for approval with ✅/❌ inline buttons (answered by the bot's
+    callback handler); the text also says how to answer by typing, for a
+    client that doesn't show buttons. Same targeting as send()."""
+    import html
+    token   = _token()
+    targets = _targets(chat_id)
+    url     = f"https://api.telegram.org/bot{token}/sendMessage"
+    text = (f"🔐 <b>Approval needed</b>\n{html.escape(summary)}\n\n"
+            f"<i>Expires in {expires_min} min · or reply</i> <code>yes {code}</code> / "
+            f"<code>no {code}</code>")
+    markup = {"inline_keyboard": [[
+        {"text": "✅ Approve", "callback_data": f"{APPROVAL_PREFIX}{code}:y"},
+        {"text": "❌ Deny",    "callback_data": f"{APPROVAL_PREFIX}{code}:n"},
+    ]]}
+    errors: list[str] = []
+    delivered = 0
+    for cid in targets:
+        try:
+            _post_message(url, cid, text, html_mode=True, reply_markup=markup)
+            delivered += 1
+        except (urllib.error.URLError, OSError) as e:
+            errors.append(f"chat {cid}: {e}")
+            log.error("Telegram approval request to chat %s failed: %s", cid, e)
     if not delivered:
         raise RuntimeError("; ".join(errors) or "Telegram send failed")
 

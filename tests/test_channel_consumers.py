@@ -222,16 +222,26 @@ def test_send_file_no_channel_uses_telegram(chan_env, tmp_path, monkeypatch, tg_
     assert tg_docs[0]["path"] == f and tg_docs[0]["caption"] == "c"
 
 
-def test_send_file_refused_on_whatsapp(chan_env, tmp_path, monkeypatch, tg_docs):
+def test_send_file_whatsapp_turn_stays_on_whatsapp(chan_env, tmp_path, monkeypatch, tg_docs):
+    """4.10: WhatsApp supports files now — a WhatsApp turn sends there (the
+    conversation's number comes from the turn context), never over Telegram."""
+    import aria.whatsapp_notify as wn
+    calls = []
+
+    def fake_send_file(path, caption="", to=None):
+        calls.append({"path": Path(path), "caption": caption, "to": to})
+        return Path(path).name
+
+    monkeypatch.setattr(wn, "send_file", fake_send_file)
     from aria.tools import send_file
     f = _readable(tmp_path, monkeypatch)
     tok = context.set_active("whatsapp", "346")
     try:
-        out = send_file.execute({"path": str(f)})
+        out = send_file.execute({"path": str(f), "caption": "c"})
     finally:
         context.reset(tok)
-    assert out == (f"[send_file] Sending files is only supported on Telegram, "
-                   f"not whatsapp. The file is at {f}.")
+    assert out.startswith("[send_file] Sent report.txt")
+    assert calls == [{"path": f, "caption": "c", "to": None}]
     assert not tg_docs
 
 

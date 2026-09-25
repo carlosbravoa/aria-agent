@@ -201,28 +201,36 @@ def _tg_update(chat_id):
     return upd, sent
 
 
-def test_telegram_cmd_model_list_and_switch(monkeypatch):
+def test_telegram_model_commands_use_the_shared_host_commands(monkeypatch):
+    """4.5: Telegram's /models and /model go through aria.channels.commands,
+    so every channel renders the same list (converted to HTML here)."""
     from aria import telegram_bot as tb
+    from aria.channels import host
     monkeypatch.setenv("TELEGRAM_ALLOWED", "42")
     agent = _FakeAgent()
-    monkeypatch.setattr(tb, "get_session", lambda ch, cid: agent)
+    monkeypatch.setattr(host, "get_agent", lambda ch, cid: agent)
 
-    upd, sent = _tg_update(42)
-    asyncio.run(tb.cmd_model(upd, SimpleNamespace(args=[])))  # type: ignore[arg-type]
+    def upd(chat_id, text):
+        u, sent = _tg_update(chat_id)
+        u.message.text = text
+        return u, sent
+
+    u, sent = upd(42, "/models")
+    asyncio.run(tb.on_command(u, SimpleNamespace(args=[])))  # type: ignore[arg-type]
     assert sent == [(
-        "<code>default     </code> m-default\n"
-        "<code>fast        </code> m-fast ✓\n"
+        "<code>default</code> m-default\n"
+        "<code>fast</code> m-fast ✓\n"
         "<code>averyveryverylongname</code> m-long",
         "HTML",
     )]
 
-    upd, sent = _tg_update(42)
-    asyncio.run(tb.cmd_model(upd, SimpleNamespace(args=["Fast", "x"])))  # type: ignore[arg-type]
+    u, sent = upd(42, "/model Fast x")
+    asyncio.run(tb.on_command(u, SimpleNamespace()))  # type: ignore[arg-type]
     assert agent.switched == ["Fast"]
     assert sent == [("Switched to &#x27;Fast&#x27;", "HTML")]  # _md_to_html escapes
 
-    upd, sent = _tg_update(99)  # not allowed → silent
-    asyncio.run(tb.cmd_model(upd, SimpleNamespace(args=[])))  # type: ignore[arg-type]
+    u, sent = upd(99, "/models")  # not allowed → silent
+    asyncio.run(tb.on_command(u, SimpleNamespace()))  # type: ignore[arg-type]
     assert sent == []
 
 
@@ -248,16 +256,18 @@ def _wa_post(monkeypatch, text):
 @pytest.mark.parametrize("cmd", ["/models", " /MODEL "])
 def test_whatsapp_model_list(monkeypatch, cmd):
     replies, _ = _wa_post(monkeypatch, cmd)
+    # 4.10: WhatsApp uses the shared aria.channels.commands (same list as
+    # every other channel), answered synchronously in the HTTP response.
     assert replies == [{"reply":
-        "*default*      m-default\n"
-        "*fast*         m-fast ✓\n"
-        "*averyveryverylongname* m-long"}]
+        "`default` m-default\n"
+        "`fast` m-fast ✓\n"
+        "`averyveryverylongname` m-long"}]
 
 
 def test_whatsapp_model_switch(monkeypatch):
     replies, agent = _wa_post(monkeypatch, "/Model   Fast  x ")
-    assert agent.switched == ["Fast  x"]
-    assert replies == [{"reply": "Switched to 'Fast  x'"}]
+    assert agent.switched == ["Fast"]          # shared command: first word
+    assert replies == [{"reply": "Switched to 'Fast'"}]
 
 
 # ── 4. importing aria.main has no side effects ──────────────────────────────

@@ -24,6 +24,7 @@ from __future__ import annotations
 import os
 import shlex
 
+from aria import approval
 from aria.tools import _gog
 
 _CLI = os.getenv("GMAIL_CLI", "gog")
@@ -113,6 +114,25 @@ def _run(cmd: str) -> str:
     )
 
 
+def _event_label(cal_id: str, event_id: str, ask: str) -> str:
+    """"'Standup' (id …)" for an approval prompt. The title lookup costs a gog
+    call, so it only happens when approval `ask` will actually be requested."""
+    if not (approval.required(ask) and approval.unattended()):
+        return f"id {event_id}"
+    import json
+    raw = _run(f"{_CLI} calendar get {cal_id} {shlex.quote(event_id)} --json")
+    title = ""
+    try:
+        data = json.loads(raw)
+        if isinstance(data, dict):
+            inner = data.get("event")
+            ev = inner if isinstance(inner, dict) else data
+            title = str(ev.get("summary") or "")
+    except ValueError:
+        pass
+    return f"'{title}' (id {event_id})" if title else f"id {event_id}"
+
+
 def execute(args: dict) -> str:
     action      = args["action"]
     cal_id      = shlex.quote(args.get("calendar_id", "primary"))
@@ -151,6 +171,10 @@ def execute(args: dict) -> str:
                 return "[calendar] 'summary' is required for create."
             if not start or not end:
                 return "[calendar] 'start' and 'end' are required for create."
+            refusal = approval.check("calendar_create",
+                                     f"create calendar event '{summary}' ({start} → {end})")
+            if refusal:
+                return refusal
             cmd = (
                 f"{_CLI} calendar create {cal_id}"
                 f" --summary {shlex.quote(summary)}"
@@ -168,6 +192,14 @@ def execute(args: dict) -> str:
         case "update":
             if not event_id:
                 return "[calendar] 'event_id' is required for update."
+            changes = ", ".join(f"{k}={v}" for k, v in (("title", summary), ("start", start),
+                                                         ("end", end)) if v)
+            refusal = approval.check(
+                "calendar_create",
+                f"update calendar event {_event_label(cal_id, event_id, ask='calendar_create')}"
+                + (f": {changes}" if changes else ""))
+            if refusal:
+                return refusal
             cmd = f"{_CLI} calendar update {cal_id} {shlex.quote(event_id)}"
             if summary:
                 cmd += f" --summary {shlex.quote(summary)}"
@@ -186,6 +218,10 @@ def execute(args: dict) -> str:
         case "delete":
             if not event_id:
                 return "[calendar] 'event_id' is required for delete."
+            refusal = approval.check(
+                "delete", f"delete calendar event {_event_label(cal_id, event_id, ask='delete')}")
+            if refusal:
+                return refusal
             return _run(f"{_CLI} calendar delete {cal_id} {shlex.quote(event_id)}")
 
         case "respond":

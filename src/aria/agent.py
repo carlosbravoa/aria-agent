@@ -23,6 +23,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import threading
 from datetime import datetime, UTC
 from pathlib import Path
 from typing import Any
@@ -404,6 +405,9 @@ class Agent:
         # call can be answered from cache instead of re-executed (see _run_loop).
         self._last_result_for: dict[str, str] = {}
         self._interrupted = False   # last chat() turn was cut short by Ctrl+C
+        # /stop from a channel: checked between steps of the running turn.
+        self._stop_requested = threading.Event()
+        self._busy = False
         # Optional channel hooks (set per-turn by chat_yield). _response_cb streams
         # each user-facing response the moment it's produced (instead of batching
         # them all to the end); _activity_cb reports per-tool progress for a live
@@ -704,14 +708,20 @@ class Agent:
 
     def chat(self, user_input: str) -> None:
         """Send a message; output goes to self._output callback."""
-        self._repair_history()
-        self.history.append({"role": "user", "content": user_input})
-        self.ws.log_session(self.session_log, "user", user_input)
-        self.ws.append_conversation_window("user", user_input, self.name)
-        self._maybe_compact()
-        self._trim_history()
+        # Busy from the first moment (compaction included) so /stop always
+        # finds the turn; the stop event also cancels a pending approval wait.
+        from aria import approval
         self._interrupted = False
+        self._stop_requested.clear()
+        self._busy = True
+        cancel_token = approval.bind_cancel(self._stop_requested)
         try:
+            self._repair_history()
+            self.history.append({"role": "user", "content": user_input})
+            self.ws.log_session(self.session_log, "user", user_input)
+            self.ws.append_conversation_window("user", user_input, self.name)
+            self._maybe_compact()
+            self._trim_history()
             self._run_loop()
         except KeyboardInterrupt:
             # Ctrl+C during a model call or tool execution. Strip any dangling
@@ -725,6 +735,19 @@ class Agent:
                 # escape with history half-stripped — _repair_history() heals
                 # whatever is left at the start of the next turn.
                 pass
+        finally:
+            self._busy = False
+            approval.unbind_cancel(cancel_token)
+
+    def request_stop(self) -> bool:
+        """Ask the running turn to stop after its current step (a model call
+        or tool already in flight finishes first). Thread-safe — channels call
+        it from /stop while the turn runs on another thread. Returns False
+        when nothing is running."""
+        if not self._busy:
+            return False
+        self._stop_requested.set()
+        return True
 
     def chat_mirrored(self, user_input: str, response_cb=None,
                       activity_cb=None) -> list[str]:
@@ -1199,6 +1222,11 @@ class Agent:
         deliver_tools = self._classify_side_effect_tools() | {"remember", "learn"}
 
         for _ in range(loop_limit):
+            if self._stop_requested.is_set():
+                self.ws.log_session(self.session_log, self.name, "(stopped by the user)")
+                self._deliver("⏹ Stopped.")
+                self._flag_friction(guard.stats)
+                return
             message = self._call_model()
 
             # Network/API errors come back as an [error] sentinel string — stop.
@@ -1331,7 +1359,14 @@ class Agent:
                           for _, tc in indexed))
         if concurrent:
             return self._run_calls_concurrent(indexed)
-        return [self._run_one_call(tc, idx) for idx, tc in indexed]
+        results = []
+        for idx, tc in indexed:
+            if self._stop_requested.is_set():
+                # Every tool_call_id still needs a reply for a well-formed history.
+                results.append("[agent] Not run — the user stopped this turn.")
+            else:
+                results.append(self._run_one_call(tc, idx))
+        return results
 
     def _append_tool_results(self, tool_calls, results, guard: _TurnGuard) -> None:
         """One `tool` message per call (EVERY tool_call_id must get a reply),
@@ -1682,9 +1717,18 @@ class Agent:
         activity line per call in order. Returns results aligned to `indexed`."""
         from concurrent.futures import ThreadPoolExecutor
 
+        import contextvars
+
+        # Each call runs in a copy of the TURN's context, taken here on the
+        # turn's thread (one per call — a Context can't be entered by two
+        # threads at once). Pool threads don't inherit ContextVars; without
+        # the channel context a batched `drive delete` would skip its approval
+        # and delivery tools would broadcast instead of replying here.
+        contexts = {idx: contextvars.copy_context() for idx, _ in indexed}
+
         def _work(item):
             idx, tc = item
-            return self._execute_call(tc, idx)
+            return contexts[idx].run(self._execute_call, tc, idx)
 
         max_workers = min(8, len(indexed))
         if self._is_terminal:

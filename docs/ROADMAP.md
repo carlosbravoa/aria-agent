@@ -92,28 +92,35 @@ installs work unchanged. Follow-ups:
   `ARIA_CHANNEL_MODE_<NAME>=control`: phone messages run in the terminal's own
   session, the prompt is interrupted with the typed text preserved, and local
   turns are mirrored.
-- **4.3** **Confirmations to the phone** — med / med. Remote-control turns use the
+- ✅ **4.3** **Confirmations to the phone** — med / med. Remote-control turns use the
+  ✅ Done: remote-control turns ask on the phone (via 4.9).
   unattended shell policy. They could instead ask on the phone (Telegram inline
   buttons), which ties in with the approval buttons (4.9).
 - **4.4** **WhatsApp attached mode** — low / med. It would spawn and supervise the Node
   bridge as a child process.
-- **4.5** **Shared slash commands in the host** — med / low. `/clear`, `/model`,
+- ✅ **4.5** **Shared slash commands in the host** — med / low. `/clear`, `/model`,
+  ✅ Done: `aria.channels.commands`, used by Telegram, WhatsApp and custom channels.
   `/memory` are still implemented separately in each channel. A host-level
   command handler would give custom channels these for free.
-- **4.6** **pip entry-point plugins** — low / low. An `aria.channels` entry-point group,
+- ✅ **4.6** **pip entry-point plugins** — low / low. An `aria.channels` entry-point group,
+  ✅ Done: `aria.channels` entry-point group.
   for sharing plugins as packages.
-- **4.7** **Telegram concurrency** — high / med. Updates are handled one at a time, so
+- ✅ **4.7** **Telegram concurrency** — high / med. Updates are handled one at a time, so
+  ✅ Done: `concurrent_updates` with an ordered per-chat lock; `/stop`, approvals and read-only commands skip the lock.
   one long turn blocks every other chat and command. Enable
   `concurrent_updates`, with one lock per chat so a single chat stays ordered.
-- **4.8** **`/stop` command** — high / med. Cancel a running turn from Telegram or the
+- ✅ **4.8** **`/stop` command** — high / med. Cancel a running turn from Telegram or the
+  ✅ Done: `Agent.request_stop()` stops after the current step; `/stop` on every channel.
   REPL. This needs a cancellation flag that the loop checks between tool calls.
-- **4.9** **Approval buttons for risky tools** — high / med. `shell_run` asks for
+- ✅ **4.9** **Approval buttons for risky tools** — high / med. `shell_run` asks for
+  ✅ Done: `aria.approval`, with buttons on Telegram and `yes 1234` everywhere. Asks for deletes, git push, update and refused shell commands on channel turns; scheduled tasks only ask with `ARIA_APPROVAL_TASKS=on`; `gmail_send` and `calendar_create` are opt-in.
   confirmation in the REPL, but channels and the supervisor reject risky
   commands outright. Other risky tools, such as gmail send, drive/calendar
   delete, git push and `update`, have no approval step at all.
   - Add Telegram inline-keyboard approval, reusing the shell confirm flow.
   - Show an "approval needed" notification for supervisor tasks.
-- **4.10** **WhatsApp push delivery** — med / med. Replies still use one synchronous
+- ✅ **4.10** **WhatsApp push delivery** — med / med. Replies still use one synchronous
+  ✅ Done: WhatsApp answers immediately, pushes each reply as its own message, keeps a FIFO queue per sender, and sends and receives files.
   HTTP call per turn; the fix pass only raised the timeout. Send them through
   the existing push path so long turns can't time out.
   - Add multi-message replies (Telegram already sends one message per

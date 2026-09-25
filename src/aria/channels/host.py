@@ -22,7 +22,8 @@ from collections.abc import Callable
 
 from aria.channel_util import parse_allowed, record_feed
 
-__all__ = ["handle_message", "get_agent", "shutdown", "parse_allowed", "record_feed"]
+__all__ = ["handle_message", "run_command", "answer_approval", "get_agent", "shutdown",
+           "parse_allowed", "record_feed"]
 
 
 def handle_message(channel: str, user_id: str, text: str,
@@ -34,7 +35,16 @@ def handle_message(channel: str, user_id: str, text: str,
     stream. Blocking — call it from a worker thread in async transports.
 
     When this channel controls the terminal session (`/remote control`), the
-    message runs there instead of in the channel's own session."""
+    message runs there instead of in the channel's own session.
+
+    Approval answers ("yes 1234") and shared slash commands (/stop, /clear,
+    /model …) are handled here and never start a turn."""
+    reply = answer_approval(channel, user_id, text)
+    if reply is not None:
+        return [reply]
+    reply = run_command(channel, user_id, text)
+    if reply is not None:
+        return [reply]
     from aria.channels import control
     if control.is_controlled(channel):
         return control.submit(channel, str(user_id), text,
@@ -42,6 +52,24 @@ def handle_message(channel: str, user_id: str, text: str,
     from aria import channel as _sessions
     return _sessions.handle(channel, str(user_id), text,
                             response_cb=response_cb, activity_cb=activity_cb)
+
+
+def answer_approval(channel: str, user_id: str, text: str) -> str | None:
+    """Handle a "yes 1234" / "no 1234" reply to a pending approval; None if the
+    text isn't one. Must be checked BEFORE any per-chat lock: the turn waiting
+    for the answer holds it."""
+    from aria import approval
+    return approval.try_answer_text(channel, str(user_id), text)
+
+
+def run_command(channel: str, user_id: str, text: str) -> str | None:
+    """Run a shared slash command (/stop /clear /memory /tools /model /models
+    /save /version /help) for this conversation; None if `text` isn't one.
+    /stop never waits: it only flags the running turn."""
+    from aria.channels import commands
+    if commands.parse(text) is None:
+        return None
+    return commands.run(get_agent(channel, user_id), text)
 
 
 def get_agent(channel: str, user_id: str):

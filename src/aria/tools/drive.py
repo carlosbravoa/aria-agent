@@ -26,6 +26,7 @@ import os
 import shlex
 import subprocess
 
+from aria import approval
 from aria.tools import _gog
 from aria.tools._env import build_env
 
@@ -108,6 +109,31 @@ def _int(value, default: int) -> int:
         return max(1, int(value))
     except (TypeError, ValueError):
         return default
+
+
+def _file_name(quoted_id: str) -> str:
+    """Best-effort Drive file name for an approval prompt ("" if unknown)."""
+    import json
+    raw = _run(f"{_CLI} drive get {quoted_id} --json")
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        return ""
+    if isinstance(data, dict):
+        inner = data.get("file")
+        name = (inner.get("name") if isinstance(inner, dict) else None) or data.get("name")
+        return str(name) if name else ""
+    return ""
+
+
+def _approve_delete(raw_id: str, quoted_id: str) -> str | None:
+    """Unattended deletes need the user's approval (aria.approval). The name
+    lookup costs a gog call, so it only happens when we will actually ask."""
+    if not (approval.required("delete") and approval.unattended()):
+        return None
+    name = _file_name(quoted_id)
+    what = f"Drive file '{name}' (id {raw_id})" if name else f"Drive file id {raw_id}"
+    return approval.check("delete", f"delete {what}")
 
 
 def execute(args: dict) -> str:
@@ -229,6 +255,9 @@ def execute(args: dict) -> str:
         case "delete":
             if not file_id:
                 return "[drive] 'file_id' is required for delete."
+            refusal = _approve_delete(args["file_id"], file_id)
+            if refusal:
+                return refusal
             return _run(f"{_CLI} drive delete {file_id}")
 
         case _:

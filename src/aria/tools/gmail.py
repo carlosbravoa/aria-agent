@@ -19,6 +19,7 @@ from __future__ import annotations
 import os
 import shlex
 
+from aria import approval
 from aria.tools import _gog
 
 _CLI = os.getenv("GMAIL_CLI", "gog")
@@ -134,6 +135,9 @@ def execute(args: dict) -> str:
             body    = args.get("body", "")
             if not (to and subject):
                 return "[gmail] 'to' and 'subject' are required for send."
+            refusal = approval.check("gmail_send", f"send email to {to}: {subject}")
+            if refusal:
+                return refusal
             return _run(
                 f"{_CLI} gmail send"
                 f" --to {shlex.quote(to)}"

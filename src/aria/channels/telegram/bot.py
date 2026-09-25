@@ -19,18 +19,17 @@ from telegram.constants import ChatAction
 from telegram.error import InvalidToken, RetryAfter
 from telegram.ext import (
     Application,
-    CommandHandler,
+    CallbackQueryHandler,
     ContextTypes,
     MessageHandler,
     filters,
 )
 from telegram.request import HTTPXRequest
 
-from aria import attachments, config, __version__
+from aria import attachments, config
 # Local names kept (get_session/handle) — tests and forks monkeypatch them.
-from aria.channels.host import get_agent as get_session
 from aria.channels.host import handle_message as handle
-from aria.channels.host import shutdown
+from aria.channels.host import answer_approval, run_command, shutdown
 from aria.channel_util import parse_allowed
 from aria.channels.telegram.notify import _split  # single shared implementation
 
@@ -66,84 +65,77 @@ async def _reply(update: Update, text: str, parse_html: bool = True) -> None:
 
 # ── Command handlers ──────────────────────────────────────────────────────────
 
-async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not _is_allowed(update):
-        await update.message.reply_text("Unauthorised.")  # type: ignore[union-attr]
+# ── Commands, ordering and approvals ─────────────────────────────────────────
+# Updates are processed concurrently (build_app: concurrent_updates) so one
+# long turn no longer blocks other chats, /stop, or approval buttons. Within a
+# chat, turns and history-changing commands still run in order via a per-chat
+# asyncio.Lock (FIFO). /stop, approval answers and read-only commands skip the
+# lock — they must work WHILE a turn runs.
+
+_chat_locks: dict[str, asyncio.Lock] = {}
+
+
+def _chat_lock(chat_id: str) -> asyncio.Lock:
+    lock = _chat_locks.get(chat_id)
+    if lock is None:
+        lock = _chat_locks[chat_id] = asyncio.Lock()
+    return lock
+
+
+async def on_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Every slash command goes through the shared host commands
+    (aria.channels.commands), so all channels behave the same."""
+    from aria.channels import commands
+    msg = update.message
+    if msg is None:
         return
-    agent = get_session(CHANNEL, str(update.effective_chat.id))  # type: ignore[union-attr]
-    await _reply(update,
-        f"👋 Hi, I'm **{agent.name}** v{__version__}.\n"
-        f"Commands: /memory /tools /clear /save /version /model [name] /models"
-    )
-
-
-async def cmd_memory(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    text = msg.text or ""
+    parsed = commands.parse(text)
     if not _is_allowed(update):
-        return
-    agent = get_session(CHANNEL, str(update.effective_chat.id))  # type: ignore[union-attr]
-    await _reply(update, agent.ws.load_memory() or "_Nothing stored yet._")
-
-
-async def cmd_tools(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not _is_allowed(update):
-        return
-    agent = get_session(CHANNEL, str(update.effective_chat.id))  # type: ignore[union-attr]
-    lines = []
-    for t in agent.tool_schemas:
-        fn = t["function"]
-        lines.append(f"• <b>{fn['name']}</b> — {fn['description'][:60]}")
-    await _reply(update, "\n".join(lines) or "No tools loaded.")
-
-
-async def cmd_clear(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not _is_allowed(update):
-        return
-    agent = get_session(CHANNEL, str(update.effective_chat.id))  # type: ignore[union-attr]
-    if hasattr(agent, "clear_session"):
-        agent.clear_session()   # also resets the persisted window + plan
-    else:
-        agent.history = list(agent._seed)
-    await _reply(update, "History cleared.")
-
-
-async def cmd_version(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not _is_allowed(update):
-        return
-    agent = get_session(CHANNEL, str(update.effective_chat.id))  # type: ignore[union-attr]
-    await _reply(update, f"{agent.name} v{__version__}")
-
-
-async def cmd_model(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle both /model and /models."""
-    if not _is_allowed(update):
+        if parsed and parsed[0] in ("start", "help"):
+            await msg.reply_text("Unauthorised.")
         return
     chat_id = str(update.effective_chat.id)  # type: ignore[union-attr]
-    agent   = get_session(CHANNEL, chat_id)
-    args    = context.args or []
-    if not args:
-        # List all profiles
-        lines = []
-        for p in agent.list_profiles():
-            active = " ✓" if p["active"] else ""
-            lines.append(f"<code>{p['name']:12}</code> {p['model']}{active}")
-        await update.message.reply_text(  # type: ignore[union-attr]
-            "\n".join(lines), parse_mode="HTML"
-        )
+    if parsed is None or parsed[0] not in commands.NAMES:
+        await _reply(update, f"Unknown command. {commands.HELP}")
+        return
+    loop = asyncio.get_running_loop()
+
+    def call() -> str | None:
+        return run_command(CHANNEL, chat_id, text)
+
+    if parsed[0] in commands.INSTANT:
+        reply = await loop.run_in_executor(None, call)
     else:
-        result = agent.switch_profile(args[0])
-        await _reply(update, result)
+        async with _chat_lock(chat_id):
+            reply = await loop.run_in_executor(None, call)
+    await _reply(update, reply or "Done.")
 
 
-async def cmd_save(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+# Pre-plugin handler names, kept so imports/monkeypatches of them still work.
+cmd_start = cmd_memory = cmd_tools = cmd_clear = cmd_version = on_command
+cmd_model = cmd_save = on_command
+
+
+async def on_approval_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """✅/❌ on an approval request (aria.approval)."""
+    from aria import approval
+    from aria.channels.telegram.notify import APPROVAL_PREFIX
+    query = update.callback_query
+    if query is None or not (query.data or "").startswith(APPROVAL_PREFIX):
+        return
     if not _is_allowed(update):
+        await query.answer("Unauthorised.")
         return
-    note = " ".join(context.args or [])
-    if not note:
-        await _reply(update, "Usage: /save <note>")
-        return
-    agent = get_session(CHANNEL, str(update.effective_chat.id))  # type: ignore[union-attr]
-    agent.ws.append_memory(note)
-    await _reply(update, f"Saved: {note}")
+    code, _, choice = query.data[len(APPROVAL_PREFIX):].partition(":")  # type: ignore[index]
+    chat_id = str(update.effective_chat.id)  # type: ignore[union-attr]
+    result = approval.answer(code, choice == "y", CHANNEL, chat_id)
+    await query.answer(result)
+    try:
+        original = getattr(query.message, "text_html", "") or ""
+        await query.edit_message_text(f"{original}\n\n<b>{result}</b>", parse_mode="HTML")
+    except Exception:
+        pass          # message too old / already edited — the answer is recorded
 
 
 # ── Live progress bridge (sync agent loop ↔ async bot) ────────────────────────
@@ -295,21 +287,22 @@ async def _run_turn(update: Update, context: ContextTypes.DEFAULT_TYPE,
     Shared by text messages and attachments so both get streaming, the typing
     heartbeat, and the tool trail.
     """
-    loop     = asyncio.get_running_loop()
-    progress = _Progress(context.bot, chat_id, loop)
-    progress.start()
-    try:
-        responses = await loop.run_in_executor(
-            None,
-            lambda: handle(CHANNEL, chat_id, user_text,
-                           response_cb=progress.response,
-                           activity_cb=progress.activity),
-        )
-    except Exception as exc:
-        log.error("handle() raised exception for chat %s: %s", chat_id, exc, exc_info=True)
-        responses = [f"Sorry, something went wrong: {exc}"]
-    finally:
-        await progress.stop()
+    loop = asyncio.get_running_loop()
+    async with _chat_lock(chat_id):          # one turn at a time per chat, in order
+        progress = _Progress(context.bot, chat_id, loop)
+        progress.start()
+        try:
+            responses = await loop.run_in_executor(
+                None,
+                lambda: handle(CHANNEL, chat_id, user_text,
+                               response_cb=progress.response,
+                               activity_cb=progress.activity),
+            )
+        except Exception as exc:
+            log.error("handle() raised exception for chat %s: %s", chat_id, exc, exc_info=True)
+            responses = [f"Sorry, something went wrong: {exc}"]
+        finally:
+            await progress.stop()
 
     # Responses were already streamed via progress.response as they were produced.
     # Only fall back to a direct send if nothing was streamed (e.g. a hard error
@@ -332,6 +325,13 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
     chat_id   = str(update.effective_chat.id)  # type: ignore[union-attr]
     user_text = update.message.text or ""  # type: ignore[union-attr]
+
+    # "yes 1234" answering an approval: handled before the chat lock — the
+    # turn waiting for this answer is holding it.
+    answered = answer_approval(CHANNEL, chat_id, user_text)
+    if answered is not None:
+        await _reply(update, answered)
+        return
 
     # If the user replied to a bot message, prepend the original text
     # so the agent understands what they're responding to.
@@ -519,21 +519,29 @@ def _token() -> str:
     return token
 
 
+async def _set_command_menu(app: Application) -> None:
+    """Show the shared commands in Telegram's "/" menu (best effort)."""
+    try:
+        await app.bot.set_my_commands([
+            ("stop", "Stop the running reply"), ("clear", "Forget this conversation"),
+            ("models", "List model profiles"), ("model", "Switch model: /model <name>"),
+            ("memory", "Show long-term memory"), ("tools", "List tools"),
+            ("save", "Save a note: /save <note>"), ("version", "Version"),
+            ("help", "Help"),
+        ])
+    except Exception as exc:
+        log.info("Couldn't set the command menu: %s", exc)
+
+
 def build_app(token: str, watchdog: _StallWatchdog | None = None) -> Application:
     """The bot application with every handler registered (service and
     attached mode share it)."""
-    builder = Application.builder().token(token)
+    builder = Application.builder().token(token).concurrent_updates(True)
     if watchdog is not None:
         builder = builder.get_updates_request(_WatchdogRequest(watchdog))
-    app = builder.build()
-    app.add_handler(CommandHandler("start",  cmd_start))
-    app.add_handler(CommandHandler("memory", cmd_memory))
-    app.add_handler(CommandHandler("tools",  cmd_tools))
-    app.add_handler(CommandHandler("clear",  cmd_clear))
-    app.add_handler(CommandHandler("version", cmd_version))
-    app.add_handler(CommandHandler("model",  cmd_model))
-    app.add_handler(CommandHandler("models", cmd_model))   # alias
-    app.add_handler(CommandHandler("save",   cmd_save, has_args=True))
+    app = builder.post_init(_set_command_menu).build()
+    app.add_handler(MessageHandler(filters.COMMAND, on_command))
+    app.add_handler(CallbackQueryHandler(on_approval_button))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_message))
     # Explicit media filter rather than filters.ATTACHMENT, which also matches
     # locations, contacts, polls and dice — none of which are files.

@@ -98,8 +98,13 @@ def test_sends_to_the_active_chat(minimal_env, sent):
     assert context.current() is None
 
 
-def test_refuses_to_cross_channels(minimal_env, sent):
-    """A WhatsApp turn must not silently deliver over Telegram."""
+def test_does_not_cross_channels(minimal_env, sent, monkeypatch):
+    """A WhatsApp turn must not silently deliver over Telegram — since 4.10 it
+    delivers over WhatsApp itself."""
+    import aria.whatsapp_notify as wn
+    wa = []
+    monkeypatch.setattr(wn, "send_file",
+                        lambda path, caption="", to=None: wa.append((str(path), to)) or "report.pdf")
     p = _workspace_file(minimal_env)
     token = context.set_active("whatsapp", "34600000000")
     try:
@@ -107,7 +112,8 @@ def test_refuses_to_cross_channels(minimal_env, sent):
     finally:
         context.reset(token)
     assert not sent
-    assert "only supported on Telegram" in out
+    assert wa == [(str(p), None)]
+    assert out.startswith("[send_file] Sent report.pdf")
 
 
 def test_current_chat_id_prefers_active_turn(minimal_env, monkeypatch):

@@ -137,6 +137,19 @@ AGENT_NAME=Aria
 # WhatsApp is service-only.
 # ARIA_CHANNEL_MODE_TELEGRAM=attached
 
+# ── Approvals (risky actions when nobody is at the terminal) ─────────
+# On a channel turn or in remote control, risky actions ask you first —
+# Telegram shows ✅/❌ buttons, any channel accepts "yes 1234"/"no 1234"; /stop
+# cancels the wait. Shell commands the unattended policy would refuse are
+# asked for too ("shell"). Scheduled tasks keep the old behaviour unless
+# ARIA_APPROVAL_TASKS=on (then they ask the push channel and wait).
+# ARIA_APPROVALS=on                         # off = old behaviour (never ask)
+# ARIA_APPROVAL_REQUIRED=delete,git_push,update,shell   # + gmail_send, calendar_create; or none
+# ARIA_APPROVAL_TASKS=off
+# ARIA_APPROVAL_TIMEOUT=300                 # seconds; no answer = denied
+# Largest WhatsApp attachment accepted/sent (MB)
+# ARIA_WA_MAX_MB=16
+
 # ── Inbound attachments ──────────────────────────────────────────────
 # Files sent over a channel are saved under <workspace>/inbox/ and pruned:
 # first anything older than KEEP_DAYS, then oldest-first past MAX_MB.

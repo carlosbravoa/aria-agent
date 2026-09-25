@@ -16,8 +16,9 @@ Implementation note: a ContextVar is per-thread, and the agent loop runs in a
 pooled worker thread, so the value must be reset when the turn ends or a later
 turn reusing that thread could observe a stale channel. `set_active` returns a
 token for exactly that; always reset it in a `finally`. Tools marked
-PARALLEL_SAFE execute in a separate pool that does not inherit this context —
-they are read-only remote tools that never deliver, so it does not apply.
+PARALLEL_SAFE execute in a separate pool; the agent runs each call in a copy
+of the turn's context there (a pool thread would not inherit it), so approvals
+and delivery routing work for batched calls too.
 """
 
 from __future__ import annotations

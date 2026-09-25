@@ -53,6 +53,11 @@ class TelegramChannel(ChannelPlugin):
         from aria.channels.telegram import notify
         notify.send(text, chat_id=self._chat_id(to))
 
+    def send_approval(self, code: str, summary: str, to: str | None = None,
+                      expires_min: int = 5) -> None:
+        from aria.channels.telegram import notify
+        notify.send_approval(code, summary, chat_id=self._chat_id(to), expires_min=expires_min)
+
     def send_file(self, path: Path, caption: str = "", to: str | None = None) -> str:
         from aria.channels.telegram import notify
         return notify.send_document(path, caption=caption, chat_id=self._chat_id(to))

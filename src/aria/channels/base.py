@@ -95,6 +95,11 @@ class ChannelPlugin:
     legacy_keys: tuple[str, ...] = ()
     supports_files: bool = False
     supports_attached: bool = False
+    # Can this channel deliver a user's reply WHILE a turn for them is running
+    # (needed to answer an approval mid-turn)? Set False for a transport that
+    # handles one message at a time — approvals then fail fast instead of
+    # waiting for an answer that can't arrive.
+    answers_approvals: bool = True
     override: bool = False       # a user plugin must set this to replace a built-in
     overrides: ChannelPlugin | None = None   # the built-in it replaced (set by the registry)
     builtin: bool = False        # set by the registry
@@ -142,6 +147,15 @@ class ChannelPlugin:
         `to` is None. Raise RuntimeError with a human-readable reason on
         failure (it is shown to the model/user)."""
         raise NotImplementedError(f"channel '{self.name}' cannot push messages")
+
+    def send_approval(self, code: str, summary: str, to: str | None = None,
+                      expires_min: int = 5) -> None:
+        """Ask the user to approve a risky action (aria.approval). The default
+        is a text message answered by replying "yes <code>" / "no <code>" —
+        the host intercepts those replies. Override for nicer UI (Telegram
+        uses inline buttons)."""
+        self.send(f"🔐 Approval needed:\n{summary}\n\nReply `yes {code}` to approve or "
+                  f"`no {code}` to deny (expires in {expires_min} min).", to=to)
 
     def send_file(self, path: Path, caption: str = "", to: str | None = None) -> str:
         """Deliver a file; return the name it was sent as."""

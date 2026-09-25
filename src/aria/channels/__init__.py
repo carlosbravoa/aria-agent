@@ -1,11 +1,17 @@
 """
 aria/channels — Channel plugin registry.
 
-Discovery (later sources override earlier ones by name, with a warning):
+Discovery, in order (a name is taken by the first source that defines it; a
+later plugin may replace a BUILT-IN only with `override = True`):
   1. built-ins: subpackages/modules of this package (telegram, whatsapp)
-  2. user plugins: *.py files in ~/.aria/channels/ ($ARIA_CHANNELS_DIR);
-     files starting with "_" are skipped. A broken file is skipped with a
-     warning — it never takes the other channels down.
+  2. installed packages: entry points in the "aria.channels" group, e.g. in
+     a plugin's pyproject.toml:
+         [project.entry-points."aria.channels"]
+         matrix = "aria_matrix"            # module exposing PLUGIN / Plugin
+  3. user plugins: *.py files in ~/.aria/channels/ ($ARIA_CHANNELS_DIR);
+     files starting with "_" are skipped.
+A plugin that fails to load is skipped with a warning — it never takes the
+other channels down.
 
 Enablement:
   ARIA_CHANNELS=telegram,whatsapp,mine   explicit list (written by aria-install)
@@ -62,7 +68,15 @@ def channels_dir() -> Path:
 
 
 def _plugin_from_module(mod, source: str, builtin: bool) -> ChannelPlugin | None:
-    obj = getattr(mod, "PLUGIN", None)
+    """A plugin from a module (PLUGIN instance or Plugin class) — or, for
+    entry points, the loaded object itself (an instance or a subclass)."""
+    obj: ChannelPlugin | None
+    if isinstance(mod, type) and issubclass(mod, ChannelPlugin):
+        obj = mod()
+    elif isinstance(mod, ChannelPlugin):
+        obj = mod
+    else:
+        obj = getattr(mod, "PLUGIN", None)
     if obj is None:
         cls = getattr(mod, "Plugin", None)
         if isinstance(cls, type) and issubclass(cls, ChannelPlugin):
@@ -92,6 +106,38 @@ def _discover() -> dict[str, ChannelPlugin]:
         if plugin:
             found[plugin.name] = plugin
 
+    def _add(plugin: ChannelPlugin, source: str) -> None:
+        prior = found.get(plugin.name)
+        if prior is not None:
+            if not (prior.builtin and plugin.override):
+                log.warning("Channel plugin %s: name '%s' is already taken%s — skipped",
+                            source, plugin.name,
+                            " (set override = True to replace the built-in)"
+                            if prior.builtin else "")
+                return
+            plugin.overrides = prior
+            log.warning("Channel plugin %s replaces the built-in '%s'", source, plugin.name)
+        found[plugin.name] = plugin
+
+    from importlib.metadata import entry_points
+    try:
+        eps = list(entry_points(group="aria.channels"))
+    except Exception as exc:                  # broken package metadata
+        log.warning("Couldn't read aria.channels entry points: %s", exc)
+        eps = []
+    for ep in eps:
+        source = f"entry point {ep.name} ({ep.value})"
+        try:
+            loaded = ep.load()
+        except Exception as exc:
+            log.warning("Channel plugin %s failed to load: %s", source, exc)
+            continue
+        plugin = _plugin_from_module(loaded, source, builtin=False)
+        if plugin is None:
+            log.warning("%s defines no ChannelPlugin — skipped", source)
+            continue
+        _add(plugin, source)
+
     user_dir = channels_dir()
     if user_dir.is_dir():
         for path in sorted(user_dir.glob("*.py")):
@@ -113,17 +159,7 @@ def _discover() -> dict[str, ChannelPlugin]:
             if plugin is None:
                 log.warning("%s defines no ChannelPlugin (PLUGIN or Plugin) — skipped", path)
                 continue
-            prior = found.get(plugin.name)
-            if prior is not None:
-                if not (prior.builtin and plugin.override):
-                    log.warning("Channel plugin %s: name '%s' is already taken%s — skipped",
-                                path, plugin.name,
-                                " (set override = True to replace the built-in)"
-                                if prior.builtin else "")
-                    continue
-                plugin.overrides = prior
-                log.warning("Channel plugin %s replaces the built-in '%s'", path, plugin.name)
-            found[plugin.name] = plugin
+            _add(plugin, str(path))
     return found
 
 

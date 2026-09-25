@@ -189,6 +189,27 @@ After `git pull && pip install .`:
 - **`web_fetch`/`browser` block every non-public address range.** On Tailscale
   (100.64.0.0/10) or a fake-IP proxy such as Clash/sing-box (198.18.0.0/15),
   allow the range with `ARIA_NET_ALLOW`.
+- **Channel commands are shared.** Telegram and WhatsApp (and custom
+  channels) now have the same commands: `/stop` (new), `/clear`, `/memory`,
+  `/tools`, `/models`, `/model <name>`, `/save`, `/version`, `/help`. Lists are
+  formatted the same way on every channel.
+- **Risky actions ask first when you chat from a channel.** On a channel turn
+  or in remote control, deletes (Drive, Calendar, files), `git push`,
+  self-update, and shell commands the unattended policy used to refuse ask
+  for approval: ✅/❌ buttons on Telegram, or reply `yes 1234`. `/stop` cancels
+  the wait.
+  - **Scheduled tasks are unchanged** unless you set `ARIA_APPROVAL_TASKS=on`.
+    Then they ask on the push channel and wait up to `ARIA_APPROVAL_TIMEOUT`
+    (300 s); no answer means denied.
+  - `ARIA_APPROVALS=off` restores the old behaviour everywhere.
+  - `ARIA_APPROVAL_REQUIRED` picks the actions; `gmail_send` and
+    `calendar_create` are opt-in.
+- **WhatsApp replies arrive as separate messages as they're produced**, with
+  no per-turn timeout. You can now send and receive files over WhatsApp. The
+  updater redeploys the new `bridge.js` (then run `npm ci` if it says so); until
+  then, the old bridge shows "⏳ On it…" and the replies still arrive.
+- **Telegram handles chats concurrently.** A long reply no longer blocks other
+  chats, `/stop` or approval buttons.
 - **Channels are plugins now; nothing to change.** An existing `.env` with
   `TELEGRAM_TOKEN` and/or `WHATSAPP_ALLOWED` keeps both channels enabled.
   `aria-telegram` / `aria-whatsapp` and their systemd units are unchanged. The

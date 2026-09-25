@@ -11,6 +11,10 @@ Safety policy (applies to BOTH command and script content):
       off            → no shell at all outside the REPL
       full           → destructive + secret-path rejected, ordinary cmds allowed
                        (legacy blacklist behaviour)
+    On a channel turn / remote control / scheduled task (aria.approval), a
+    command refused under safe/full (not allowlisted, or destructive) is sent
+    to the user for approval instead of being refused outright — unless
+    ARIA_APPROVALS=off, ARIA_SHELL_UNATTENDED=off, or it hits a secret path.
   Destructive detection scans every sub-command (split on ; && || | $() ),
   so chaining like `echo ok && rm -rf ~` is caught. Wrapper prefixes (sudo,
   env, nohup, time, xargs, …) are peeled off before matching, `bash -c '…'`
@@ -63,8 +67,9 @@ DEFINITION = {
         "script anyway).\n"
         "Destructive ops (rm, dd, mv, kill, …) and commands touching secret paths "
         "(~/.ssh, cloud credentials) need confirmation in the interactive REPL and "
-        "are refused in unattended channel/supervisor contexts, where by default "
-        "only read-only commands (ls, cat, grep, git status, …) are allowed."
+        "need the user's approval in unattended channel/supervisor contexts, where "
+        "by default only read-only commands (ls, cat, grep, git status, …) run "
+        "without asking."
     ),
     "parameters": {
         "type": "object",
@@ -483,7 +488,7 @@ def _check_safe_unattended(payload: str) -> str | None:
     return None
 
 
-def _gate(payload: str) -> str | None:
+def _gate(payload: str, summary: str = "") -> str | None:
     """
     Apply the shell safety policy to a command or script BEFORE it runs.
     Returns a rejection string to abort, or None to proceed.
@@ -496,13 +501,44 @@ def _gate(payload: str) -> str | None:
                destructive AND secret-path always rejected
         full → destructive rejected; secret-path allowed; ordinary commands
                allowed (legacy blacklist behavior)
+      When nobody is at a terminal (approval.unattended(): channel turn,
+      remote control, scheduled task) and ARIA_APPROVALS is on, a refused
+      non-allowlisted or destructive command is sent to the user for approval
+      (`summary`, default "run: <payload>") instead — approved → it runs;
+      denied/expired → the refusal plus the reason. Never asked: shell off,
+      secret-path hits under 'safe'.
     """
+    refusal, approvable = _gate_policy(payload)
+    if refusal is None or not approvable:
+        return refusal
+    # Nobody at a terminal (channel turn / remote control / scheduled task):
+    # ask the user where they are instead of refusing outright.
+    from aria import approval
+    if not (approval.required("shell") and approval.should_ask()):
+        return refusal
+    ok, why = approval.request(summary or f"run: {payload}")
+    return None if ok else f"{refusal} (approval: {why})"
+
+
+def _script_summary(script: str, interpreter: str) -> str:
+    """Short human-readable approval summary for script mode."""
+    lines = [ln for ln in script.splitlines() if ln.strip()]
+    head = "\n".join(lines[:5])
+    more = f"\n… (+{len(lines) - 5} more lines)" if len(lines) > 5 else ""
+    return f"run {interpreter} script:\n{head}{more}"
+
+
+def _gate_policy(payload: str) -> tuple[str | None, bool]:
+    """The shell policy proper (see _gate). Returns (refusal or None,
+    approvable): approvable refusals may be overridden by the user approving
+    remotely; hard ones (shell off, secret paths under 'safe', a TTY
+    cancellation) never are."""
     interactive = _is_interactive()
     policy      = _unattended_policy()
 
     if not interactive and policy == "off":
         return ("[shell_run] Shell is disabled outside the interactive REPL "
-                "(ARIA_SHELL_UNATTENDED=off).")
+                "(ARIA_SHELL_UNATTENDED=off)."), False
 
     reasons: list[str] = []
     dest = _is_destructive(payload)
@@ -513,23 +549,30 @@ def _gate(payload: str) -> str | None:
 
     if not reasons:
         if interactive or policy == "full":
-            return None  # ordinary command — allowed
+            return None, False  # ordinary command — allowed
         # Non-interactive 'safe': only the read-only allowlist runs.
-        return _check_safe_unattended(payload)
+        hit = _check_safe_unattended(payload)
+        return hit, True
 
     if interactive:
         # A command the user previously approved with "always" runs without a
         # repeat prompt (learnable trust). Everything else still confirms.
         if _is_allowlisted(payload):
-            return None
-        return None if _confirm(payload, "; ".join(reasons)) else "[shell_run] Cancelled by user."
+            return None, False
+        if _confirm(payload, "; ".join(reasons)):
+            return None, False
+        return "[shell_run] Cancelled by user.", False
 
     # Non-interactive + risky: destructive is always refused; secret-path is
     # refused under 'safe' but permitted under 'full'.
     if dest or policy == "safe":
-        return (f"[shell_run] Refused — {'; '.join(reasons)} — in non-interactive mode "
-                f"(ARIA_SHELL_UNATTENDED={policy}). Run it yourself in a terminal if intended.")
-    return None
+        refusal = (f"[shell_run] Refused — {'; '.join(reasons)} — in non-interactive mode "
+                   f"(ARIA_SHELL_UNATTENDED={policy}). Run it yourself in a terminal if intended.")
+        # A destructive command may be approved by the user; a secret-path hit
+        # that the policy refuses ('safe') never is.
+        secret_refused = policy == "safe" and _touches_secret(payload)
+        return refusal, not secret_refused
+    return None, False
 
 
 # Interpreters allowed for the script field — no shell metacharacters possible
@@ -609,7 +652,7 @@ def execute(args: dict) -> str:
         interp_bin = interp_argv[0]
         # Safety policy applies to script content too — script mode used to skip
         # every check, so a destructive script ran unguarded in any context.
-        gate = _gate(script_content)
+        gate = _gate(script_content, _script_summary(script_content, interpreter))
         if gate:
             return gate
         suffix = ".py" if "python" in interp_bin else ".sh"

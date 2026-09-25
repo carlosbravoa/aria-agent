@@ -22,7 +22,7 @@ DEFINITION = {
     "name": "send_file",
     "description": (
         "Send a file from disk to the user as a document attachment they can "
-        "download (on channels that support files, e.g. Telegram). Use when the user asks you to send, "
+        "download (on channels that support files: Telegram, WhatsApp). Use when the user asks you to send, "
         "share, or deliver an actual file — a report, an export, a log, a "
         "generated document, a photo. The file must already exist: create it "
         "first with file_access or shell_run, then send it. For plain text "

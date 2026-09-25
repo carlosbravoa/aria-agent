@@ -228,19 +228,18 @@ def test_telegram_clear_uses_clear_session(minimal_env, monkeypatch):
     async def fake_reply(update, text, parse_html=True):
         replies.append(text)
 
+    from aria.channels import host
     monkeypatch.setattr(tb, "_is_allowed", lambda u: True)
-    monkeypatch.setattr(tb, "get_session", lambda c, u: agent)
+    monkeypatch.setattr(host, "get_agent", lambda c, u: agent)
     monkeypatch.setattr(tb, "_reply", fake_reply)
-    update = SimpleNamespace(effective_chat=SimpleNamespace(id=1))
+    update = SimpleNamespace(effective_chat=SimpleNamespace(id=1),
+                             message=SimpleNamespace(text="/clear"))
     asyncio.run(tb.cmd_clear(update, None))
     assert agent.cleared and replies == ["History cleared."]
 
 
 # ── whatsapp ──────────────────────────────────────────────────────────────────
 
-def test_whatsapp_timeout_env(monkeypatch):
-    from aria import whatsapp_bridge as wb
-    monkeypatch.delenv("ARIA_WA_TIMEOUT", raising=False)
-    assert wb._turn_timeout() == 600
-    monkeypatch.setenv("ARIA_WA_TIMEOUT", "900")
-    assert wb._turn_timeout() == 900
+# (test_whatsapp_timeout_env removed in 4.10: the Python bridge no longer waits
+# for a turn, so ARIA_WA_TIMEOUT is only read by bridge.js — see
+# tests/test_whatsapp_push.py.)

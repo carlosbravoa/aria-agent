@@ -711,6 +711,11 @@ def execute(args: dict) -> str:
             ws = _workspace()
             if path in (ws, ws / "memory"):
                 return f"[file_access] Refused — cannot delete {path} itself."
+            from aria import approval
+            kind = "directory (recursively)" if path.is_dir() else "file"
+            refusal = approval.check("delete", f"delete {kind} {path}")
+            if refusal:
+                return refusal
             if path.is_dir():
                 import shutil
                 shutil.rmtree(path)

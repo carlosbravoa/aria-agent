@@ -198,3 +198,40 @@ def test_update_refresh_uses_new_code_in_subprocess(chdir_, monkeypatch):
     lines: list[str] = []
     update._refresh_channel_files(lines)
     assert lines == ["📲 Run: npm ci"]
+
+
+def test_pip_entry_point_plugins(chdir_, monkeypatch):
+    """4.6: plugins installed as packages register under the aria.channels
+    entry-point group (module, class or instance); broken ones are skipped."""
+    import types
+    from importlib import metadata
+    import aria.channels as ch
+    from aria.channels import ChannelPlugin
+
+    mod = types.ModuleType("aria_pipchan")
+
+    class PipChan(ChannelPlugin):
+        name = "pipchan"
+        def send(self, text, to=None): pass
+    mod.PLUGIN = PipChan()
+    sys_modules = __import__("sys").modules
+    sys_modules["aria_pipchan"] = mod
+
+    class ClassChan(ChannelPlugin):
+        name = "classchan"
+    mod.ClassChan = ClassChan
+
+    eps = [metadata.EntryPoint("pipchan", "aria_pipchan", "aria.channels"),
+           metadata.EntryPoint("classchan", "aria_pipchan:ClassChan", "aria.channels"),
+           metadata.EntryPoint("broken", "no_such_module_xyz", "aria.channels")]
+    monkeypatch.setattr(metadata, "entry_points",
+                        lambda group=None: eps if group == "aria.channels" else [])
+    ch.reset_cache()
+    found = ch.discover()
+    assert {"pipchan", "classchan"} <= set(found) and "broken" not in found
+    assert found["pipchan"].source.startswith("entry point pipchan")
+    # a drop-in with a taken (non-built-in) name doesn't silently replace it
+    (chdir_ / "pipchan.py").write_text(FAKE.format(name="pipchan"))
+    ch.reset_cache()
+    assert ch.get("pipchan").source.startswith("entry point")
+    sys_modules.pop("aria_pipchan", None)
