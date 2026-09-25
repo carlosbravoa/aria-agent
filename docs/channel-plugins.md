@@ -75,6 +75,7 @@ PLUGIN = MyChat()
 | `legacy_keys` | no | Env keys that auto-enable the channel when `ARIA_CHANNELS` is unset. |
 | `services()` | no | systemd units. Default: one `aria-channel-<name>` unit running `aria-channel <name>`. |
 | `install(dry_run)` | no | Pre-install hook, e.g. deploy helper files. Return notes to print. |
+| `start(stop_event)` + `supports_attached = True` | no | Lets the channel run in attached mode (see below). |
 
 ### Host API (`aria.channels.host`)
 
@@ -101,6 +102,46 @@ PLUGIN = MyChat()
   writes when you deselect them all. An empty value would fall back to legacy
   auto-enable.
 
+## Attached mode: online only while Aria is open
+
+By default a channel runs as a **service**, a background systemd unit that's
+always online. A channel can instead run **attached**: it starts inside the
+`aria` CLI when you open it and goes offline when you quit. Nothing runs in the
+background and the system configuration isn't modified.
+
+```ini
+ARIA_CHANNEL_MODE_TELEGRAM=attached     # or answer "yes" in aria-install
+```
+
+```text
+$ aria
+  📱 telegram attached — messages reach Aria while this window is open
+  You › /remote            # status
+  You › /remote off        # go offline without quitting
+  You › /remote on         # back online (works in service mode too, if no service is running)
+```
+
+- **Telegram supports attached mode. WhatsApp is service-only**, because it
+  needs its separate Node process.
+- **Conversations from the phone get their own session**, as with the
+  service. They share long-term memory with the REPL. They also take the
+  unattended tool policy, so `shell_run` never prompts your terminal on behalf
+  of a remote message.
+- **Messages sent while Aria is closed are dropped on start.** Stale requests
+  never run unexpectedly.
+- **Only one receiver at a time.** A per-channel run lock
+  (`~/.aria/run/<name>.lock`) keeps the CLI and a service from both polling.
+  - If a service is running, the CLI doesn't attach and tells you so.
+  - A service started while the CLI is attached waits and takes over when you
+    quit.
+  - Switching a channel to attached in `aria-install` removes its old unit.
+- **Logs go to `~/.aria/logs/attached.log`**, with secrets redacted, never to
+  the terminal.
+
+Plugin side: set `supports_attached = True` and implement `start(stop)`, a
+receive loop that runs in a background thread and returns once `stop` is set.
+It must not install signal handlers or exit the process.
+
 ## Configuration
 
 | Setting | Meaning |
@@ -109,6 +150,7 @@ PLUGIN = MyChat()
 | *(unset)* | Legacy mode: every channel whose settings are present is enabled. For example, `TELEGRAM_TOKEN` enables Telegram and `WHATSAPP_ALLOWED` enables WhatsApp. Pre-plugin installs keep working unchanged. |
 | `ARIA_NOTIFY_CHANNEL=mychat` | Where pushes go outside a conversation. Default: `telegram` when enabled, otherwise the first enabled channel that can push. |
 | `ARIA_CHANNELS_DIR` | Plugin directory. Default `~/.aria/channels`. |
+| `ARIA_CHANNEL_MODE_<NAME>` | `service` (default) or `attached`. |
 
 ## Commands
 

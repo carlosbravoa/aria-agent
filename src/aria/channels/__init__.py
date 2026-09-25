@@ -13,6 +13,12 @@ Enablement:
           (TELEGRAM_TOKEN → telegram, WHATSAPP_ALLOWED → whatsapp), so
           deployments from before plugins keep working with no change.
 
+Run mode (per channel, ARIA_CHANNEL_MODE_<NAME>):
+  service   (default) a background systemd unit, always online
+  attached  runs inside the `aria` CLI only while it's open — nothing in the
+            background (plugin must set supports_attached). A per-channel run
+            lock (runlock.py) guarantees the CLI and a service never both poll.
+
 Push target outside a conversation (supervisor results, reflection notices,
 `aria --notify`, the notify tool from the REPL):
   ARIA_NOTIFY_CHANNEL=<name>   explicit
@@ -36,6 +42,7 @@ from aria.channels.base import ChannelPlugin, ConfigField, Note, ServiceSpec, va
 __all__ = [
     "ChannelPlugin", "ConfigField", "Note", "ServiceSpec",
     "discover", "enabled", "get", "push_channel", "push", "channels_dir", "reset_cache",
+    "attached_channels", "service_channels",
 ]
 
 log = logging.getLogger(__name__)
@@ -165,6 +172,28 @@ def enabled() -> list[ChannelPlugin]:
             _warned.add(n)
             log.warning("ARIA_CHANNELS lists unknown channel %r — ignored", n)
     return out
+
+
+def attached_channels() -> list[ChannelPlugin]:
+    """Enabled channels configured to run inside the `aria` CLI."""
+    out = []
+    for p in enabled():
+        if p.mode != "attached":
+            continue
+        if not p.supports_attached:
+            if p.name not in _warned:
+                _warned.add(p.name)
+                log.warning("Channel %r can't run attached (ARIA_CHANNEL_MODE) — "
+                            "run it as a service instead", p.name)
+            continue
+        out.append(p)
+    return out
+
+
+def service_channels() -> list[ChannelPlugin]:
+    """Enabled channels that run as background services (get systemd units)."""
+    return [p for p in enabled()
+            if not (p.mode == "attached" and p.supports_attached)]
 
 
 def push_channel() -> ChannelPlugin | None:

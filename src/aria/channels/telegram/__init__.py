@@ -25,16 +25,20 @@ class TelegramChannel(ChannelPlugin):
     # What the installer used to infer the feature from (pre-plugin installs).
     legacy_keys = ("TELEGRAM_TOKEN",)
     config_fields = (
-        ConfigField(key="TELEGRAM_TOKEN", secret=True, required=True,
-                    ),
+        ConfigField(key="TELEGRAM_TOKEN", secret=True, required=True),
         ConfigField(key="TELEGRAM_ALLOWED", required=True,
                     help="Comma-separated chat IDs allowed to use the bot"),
     )
     supports_files = True
+    supports_attached = True
 
     def run(self) -> None:
         from aria.channels.telegram import bot
         bot.main()
+
+    def start(self, stop) -> None:
+        from aria.channels.telegram import bot
+        bot.run_attached(stop)
 
     @staticmethod
     def _chat_id(to: str | None) -> int | None:

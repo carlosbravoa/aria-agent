@@ -287,6 +287,12 @@ def _configure_channel(plugin, e, dry_run: bool) -> dict[str, str]:
     for f in plugin.config_fields:
         out[f.key] = _ask(f.prompt or f.key, e(f.key) or f.default,
                           secret=f.secret, required=f.required, hint=f.help)
+    if plugin.supports_attached:
+        from aria.channels.base import mode_key
+        attached = _ask_bool(
+            f"  Run {_title(plugin)} only while `aria` is open (attached mode, no "
+            f"background service)?", default=(plugin.mode == "attached"))
+        out[mode_key(plugin.name)] = "attached" if attached else "service"
     for note in _run_install_hook(plugin, dry_run):
         _print_note(note)
     return out
@@ -583,9 +589,31 @@ def _collect_services(features: set[str] | None,
         # Make sure helper files are present/current before wiring the units
         # (a services-only rerun skips the config step that also runs this).
         _run_install_hook(plugin, dry_run)
+        if plugin.mode == "attached" and plugin.supports_attached:
+            info(f"• {name}: attached mode — no background service "
+                 f"(online while `aria` is open; /remote in the REPL)")
+            _retire_units([s.unit for s in specs], dry_run)
+            continue
         for spec in specs:
             _add_spec(services, spec)
     return services, features
+
+
+def _retire_units(units: list[str], dry_run: bool) -> None:
+    """A channel switched to attached mode must not keep a background unit
+    polling the same account — stop, disable and remove it."""
+    systemd_dir = Path.home() / ".config" / "systemd" / "user"
+    for unit in units:
+        path = systemd_dir / f"{unit}.service"
+        if not path.exists():
+            continue
+        if dry_run:
+            info(f"[dry-run] would disable and remove {path.name} (attached mode)")
+            continue
+        subprocess.run(["systemctl", "--user", "disable", "--now", unit],
+                       capture_output=True)
+        path.unlink(missing_ok=True)
+        ok(f"Removed {path.name} — the channel now runs attached to `aria`")
 
 
 def _add_spec(services: dict[str, dict], spec) -> None:

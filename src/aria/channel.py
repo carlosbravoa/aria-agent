@@ -164,11 +164,15 @@ def handle(channel: str, user_id: str, text: str,
     raise RuntimeError(f"could not obtain a live session for {channel}/{user_id}")
 
 
-def shutdown() -> None:
-    """Summarise all active sessions on clean process exit."""
+def shutdown(channel: str | None = None) -> None:
+    """Close active sessions on clean exit — all of them, or only `channel`'s."""
     with _registry_lock:
-        sessions = list(_sessions.values())
-        _sessions.clear()
+        if channel is None:
+            sessions = list(_sessions.values())
+            _sessions.clear()
+        else:
+            keys = [k for k in _sessions if k[0] == channel]
+            sessions = [_sessions.pop(k) for k in keys]
     for session in sessions:
         session.cancel()
         with session._lock:

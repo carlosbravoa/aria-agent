@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import os
 import re
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -79,6 +80,9 @@ class ChannelPlugin:
                     unset (backwards compatibility for pre-plugin installs).
       services()    systemd units; default: one `aria-channel <name>` unit.
       install()     pre-install hook (deploy helper files, check binaries).
+      start()       set supports_attached = True and implement it to let the
+                    channel run inside the `aria` CLI process (attached mode:
+                    online only while Aria is open, no background service).
     """
 
     # Plain class attributes (not a dataclass: a generated __init__ would
@@ -90,6 +94,7 @@ class ChannelPlugin:
     config_fields: tuple[ConfigField, ...] = ()
     legacy_keys: tuple[str, ...] = ()
     supports_files: bool = False
+    supports_attached: bool = False
     override: bool = False       # a user plugin must set this to replace a built-in
     overrides: ChannelPlugin | None = None   # the built-in it replaced (set by the registry)
     builtin: bool = False        # set by the registry
@@ -102,6 +107,20 @@ class ChannelPlugin:
 
     def run(self) -> None:
         raise NotImplementedError(f"channel '{self.name}' has no run()")
+
+    def start(self, stop: threading.Event) -> None:
+        """Attached mode: the receive loop, run in a background thread of the
+        `aria` process. Must return promptly once `stop` is set, must not
+        install signal handlers or exit the process, and should log instead of
+        printing (the terminal belongs to the REPL)."""
+        raise NotImplementedError(f"channel '{self.name}' cannot run attached")
+
+    @property
+    def mode(self) -> str:
+        """"service" (default: a background systemd unit) or "attached" (runs
+        inside the `aria` CLI while it's open), from ARIA_CHANNEL_MODE_<NAME>."""
+        raw = os.environ.get(mode_key(self.name), "").strip().lower()
+        return "attached" if raw == "attached" else "service"
 
     def is_configured(self) -> bool:
         """True when the settings this channel needs are present. Used for the
@@ -149,6 +168,11 @@ class ChannelPlugin:
         """Pre-install hook (also run after a self-update). Return notes for
         the installer — see `Note`."""
         return []
+
+
+def mode_key(name: str) -> str:
+    """The env var selecting a channel's run mode: ARIA_CHANNEL_MODE_<NAME>."""
+    return "ARIA_CHANNEL_MODE_" + re.sub(r"[^A-Z0-9]", "_", name.upper())
 
 
 def validate_name(name: str) -> bool:

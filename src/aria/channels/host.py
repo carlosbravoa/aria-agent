@@ -44,7 +44,9 @@ def get_agent(channel: str, user_id: str):
     return _sessions.get_session(channel, str(user_id))
 
 
-def shutdown() -> None:
-    """Close every open session cleanly (call on process exit)."""
+def shutdown(channel: str | None = None) -> None:
+    """Close open sessions cleanly (call when run() exits). With `channel`,
+    only that channel's sessions — other channels in the same process
+    (attached mode) keep theirs."""
     from aria import channel as _sessions
-    _sessions.shutdown()
+    _sessions.shutdown(channel)

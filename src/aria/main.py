@@ -87,7 +87,7 @@ def _startup() -> None:
 _COMMANDS = [
     "/help", "/memory", "/tools", "/clear", "/compact", "/retry", "/copy",
     "/save ", "/markdown ", "/version", "/cost", "/usage", "/trust", "/models",
-    "/model ", "/discard", "/quit", "/exit",
+    "/model ", "/discard", "/remote", "/quit", "/exit",
 ]
 
 
@@ -227,6 +227,7 @@ _HELP_TEXT = """
 [cmd]/cost[/]        Show session token usage
 [cmd]/usage[/]       Show lifetime token usage (all sessions, by model/channel)
 [cmd]/trust[/] [meta][clear][/]  Show/clear auto-approved shell commands
+[cmd]/remote[/] [meta][on|off] [channel][/]  Channels attached to this session (online while Aria is open)
 [cmd]/version[/]     Show version
 [cmd]/quit[/]        Exit  [meta](or Ctrl+D)[/]
 
@@ -349,10 +350,97 @@ def _prompt(session) -> str:
     return input(f"  {CYAN_BOLD}You ›{RESET} ").strip()
 
 
+# ── Attached channels ─────────────────────────────────────────────────────────
+# A channel in attached mode (ARIA_CHANNEL_MODE_<NAME>=attached) runs inside
+# this process while the REPL is open — nothing in the background.
+
+def _start_attached_channels() -> None:
+    try:
+        from aria import channels
+        from aria.channels import attached
+        plugins = channels.attached_channels()
+    except Exception as exc:
+        console.print(f"  [error]Attached channels unavailable: {exc}[/]")
+        return
+    for p in plugins:
+        ok, msg = attached.start(p)
+        console.print(f"  [{'success' if ok else 'meta'}]📱 {msg}[/]")
+
+
+def _stop_attached_channels() -> None:
+    try:
+        from aria.channels import attached
+    except Exception:
+        return
+    for name, _ in attached.status():
+        console.print(f"  [meta]📱 {attached.stop(name, timeout=5)}[/]")
+
+
+def _remote_command(rest: str) -> None:
+    """/remote                     status
+    /remote on|off [channel]    attach/detach (channel optional when only one fits)"""
+    from aria import channels
+    from aria.channels import attached
+    args = rest.split()
+    action = args[0].lower() if args else ""
+    running = dict(attached.status())
+    capable = [p for p in channels.discover().values()
+               if p.supports_attached and p.is_configured()]
+
+    if action not in ("on", "off"):
+        if action:
+            console.print("  [error]Usage: /remote [on|off] [channel][/]")
+            return
+        if not capable and not running:
+            console.print("  [meta]No configured channel can run attached "
+                          "(e.g. set TELEGRAM_TOKEN and TELEGRAM_ALLOWED).[/]")
+            return
+        for p in capable:
+            state = running.get(p.name, "offline")
+            console.print(f"  [cmd]{p.name:10}[/] [meta]{state}  (mode: {p.mode})[/]")
+        console.print(f"  [meta]Logs: {attached.log_path()}[/]")
+        return
+
+    if len(args) > 1:
+        name = args[1].lower()
+    else:
+        pool = list(running) if action == "off" else [p.name for p in capable]
+        if len(pool) != 1:
+            console.print(f"  [error]Which channel? /remote {action} <name>"
+                          f"{' — ' + ', '.join(pool) if pool else ''}[/]")
+            return
+        name = pool[0]
+
+    if action == "off":
+        console.print(f"  [meta]📱 {attached.stop(name)}[/]")
+        return
+    plugin = channels.get(name)
+    if plugin is None or not plugin.is_configured():
+        console.print(f"  [error]{name}: unknown or not configured[/]")
+        return
+    ok, msg = attached.start(plugin)
+    console.print(f"  [{'success' if ok else 'error'}]📱 {msg}[/]")
+
+
 def repl(agent: Agent) -> None:
     session = _make_prompt_session(agent)
     _print_banner(agent)
+    _start_attached_channels()
+    try:
+        _repl_loop(agent, session)
+    finally:
+        _stop_attached_channels()
 
+    # Summarise and save session on exit — always, even after errors
+    console.print("  [meta]Saving conversation window...[/]", end=" ")
+    try:
+        agent.close()
+        console.print("[success]done.[/]")
+    except Exception:
+        console.print("[meta]skipped.[/]")
+
+
+def _repl_loop(agent: Agent, session) -> None:
     while True:
         try:
             user = _prompt(session)
@@ -512,6 +600,9 @@ def repl(agent: Agent) -> None:
             state = "on" if agent.markdown_enabled else "off"
             console.print(f"  [success]Markdown rendering {state}.[/]")
 
+        elif cmd == "/remote":
+            _remote_command(rest)
+
         elif cmd.startswith("/"):
             console.print(f"  [error]Unknown command: {cmd}[/]  Type /help for commands.")
 
@@ -524,14 +615,6 @@ def repl(agent: Agent) -> None:
             except Exception as exc:
                 console.print(f"\n  [error]⚠ Unexpected error: {exc}[/]")
                 console.print("  [meta]Session is intact — you can keep chatting.[/]")
-
-    # Summarise and save session on exit — always, even after errors
-    console.print("  [meta]Saving conversation window...[/]", end=" ")
-    try:
-        agent.close()
-        console.print("[success]done.[/]")
-    except Exception:
-        console.print("[meta]skipped.[/]")
 
 
 def main() -> None:

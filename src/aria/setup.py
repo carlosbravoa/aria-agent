@@ -130,6 +130,10 @@ AGENT_NAME=Aria
 # ARIA_NOTIFY_CHANNEL=telegram
 # Directory of user channel plugins (*.py drop-ins, see docs/channel-plugins.md)
 # ARIA_CHANNELS_DIR=~/.aria/channels
+# Run mode per channel: service (default — a background systemd unit, always
+# online) or attached (online only while the `aria` CLI is open; toggle with
+# /remote). Telegram supports attached mode; WhatsApp is service-only.
+# ARIA_CHANNEL_MODE_TELEGRAM=attached
 
 # ── Inbound attachments ──────────────────────────────────────────────
 # Files sent over a channel are saved under <workspace>/inbox/ and pruned:

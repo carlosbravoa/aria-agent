@@ -16,7 +16,7 @@ import time
 
 from telegram import Update
 from telegram.constants import ChatAction
-from telegram.error import RetryAfter
+from telegram.error import InvalidToken, RetryAfter
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -508,29 +508,23 @@ class _WatchdogRequest(HTTPXRequest):
         return result
 
 
-# ── Entry point ───────────────────────────────────────────────────────────────
+# ── Entry points ─────────────────────────────────────────────────────────────
 
-def main() -> None:
-    config.load()
-
-    from aria.setup import is_first_run, run as setup_run
-    if is_first_run():
-        setup_run()
-
+def _token() -> str:
     token = os.environ.get("TELEGRAM_TOKEN", "")
     if not token:
         raise SystemExit(
             "TELEGRAM_TOKEN not set.\nAdd it to ~/.aria/.env:\n  TELEGRAM_TOKEN=<token>"
         )
+    return token
 
-    logging.basicConfig(level=logging.INFO)
 
-    builder  = Application.builder().token(token)
-    watchdog = None
-    stall    = _stall_seconds()
-    if stall > 0:
-        watchdog = _StallWatchdog(stall)
-        builder  = builder.get_updates_request(_WatchdogRequest(watchdog))
+def build_app(token: str, watchdog: _StallWatchdog | None = None) -> Application:
+    """The bot application with every handler registered (service and
+    attached mode share it)."""
+    builder = Application.builder().token(token)
+    if watchdog is not None:
+        builder = builder.get_updates_request(_WatchdogRequest(watchdog))
     app = builder.build()
     app.add_handler(CommandHandler("start",  cmd_start))
     app.add_handler(CommandHandler("memory", cmd_memory))
@@ -548,6 +542,30 @@ def main() -> None:
         | filters.VOICE | filters.VIDEO_NOTE | filters.ANIMATION,
         on_media,
     ))
+    return app
+
+
+def main() -> None:
+    """Service mode (aria-telegram / aria-channel telegram)."""
+    config.load()
+
+    from aria.setup import is_first_run, run as setup_run
+    if is_first_run():
+        setup_run()
+
+    token = _token()
+    logging.basicConfig(level=logging.INFO)
+
+    # One receiver per token: if an attached `aria` session owns the channel,
+    # wait for it to exit rather than crash-looping on a polling conflict.
+    from aria.channels.runlock import hold_for_service
+    lock = hold_for_service(CHANNEL, log)
+
+    watchdog = None
+    stall    = _stall_seconds()
+    if stall > 0:
+        watchdog = _StallWatchdog(stall)
+    app = build_app(token, watchdog)
 
     log.info("Telegram bot starting...")
     if watchdog is not None:
@@ -560,6 +578,55 @@ def main() -> None:
         app.run_polling(drop_pending_updates=True, bootstrap_retries=-1)
     finally:
         shutdown()
+        lock.release()
+
+
+def run_attached(stop: threading.Event) -> None:
+    """Attached mode: poll inside the `aria` CLI process until `stop` is set.
+
+    Differences from the service: runs in a worker thread with its own event
+    loop and no signal handlers (the REPL owns Ctrl+C), and no stall watchdog
+    (it exits the process so systemd can restart it — here that would kill the
+    REPL). Messages sent while Aria was closed are dropped on start, as in the
+    service, so stale requests never run unexpectedly."""
+    import asyncio
+
+    token = _token()
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    app = build_app(token)
+
+    finished = threading.Event()
+
+    def _stop_when_asked() -> None:
+        # Wake on stop, or quietly exit if polling already ended by itself
+        # (e.g. a rejected token) — its loop is closed by then, and an
+        # exception printed from this thread would garble the REPL prompt.
+        while not stop.wait(0.5):
+            if finished.is_set():
+                return
+        try:
+            # stop_running() stops a running app, or makes a still-
+            # bootstrapping one return right after bootstrap; it must run on
+            # the app's loop.
+            loop.call_soon_threadsafe(app.stop_running)
+        except RuntimeError:
+            pass                                  # loop already closed
+
+    threading.Thread(target=_stop_when_asked, daemon=True,
+                     name="tg-attached-stop").start()
+    log.info("Telegram attached to the aria CLI")
+    try:
+        app.run_polling(drop_pending_updates=True, bootstrap_retries=-1,
+                        stop_signals=None, close_loop=True)
+    except InvalidToken:
+        # The library's message embeds the token; keep it out of /remote
+        # status and the log.
+        raise RuntimeError("TELEGRAM_TOKEN was rejected by Telegram — check it "
+                           "in ~/.aria/.env") from None
+    finally:
+        finished.set()
+    log.info("Telegram detached")
 
 
 if __name__ == "__main__":

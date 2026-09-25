@@ -84,6 +84,18 @@ Follow-ups:
 ✅ **Channel plugins** are done. Telegram and WhatsApp are built-in plugins;
 custom channels go in `~/.aria/channels/` (`docs/channel-plugins.md`). Legacy
 installs work unchanged. Follow-ups:
+- ✅ **Attached mode (A)** — done. `ARIA_CHANNEL_MODE_<NAME>=attached` runs a
+  channel inside the `aria` CLI only while it's open, with `/remote on|off`. A
+  run lock prevents double polling. Telegram supports it.
+- **Remote control of the REPL session (B)** — med / med. Phone messages would
+  drive the terminal's own conversation (same history, plan and cwd) instead of
+  a separate session. Needs:
+  - an async prompt with `patch_stdout`,
+  - a turn queue shared by keyboard and channel,
+  - mirrored output,
+  - confirmations routed to the channel.
+- **WhatsApp attached mode** — low / med. It would spawn and supervise the Node
+  bridge as a child process.
 - **Shared slash commands in the host** — med / low. `/clear`, `/model`,
   `/memory` are still implemented separately in each channel. A host-level
   command handler would give custom channels these for free.
