@@ -776,7 +776,8 @@ def _mirror_to_channels(text: str) -> None:
             if plugin is None or not plugin.supports_push:
                 continue
             try:
-                plugin.send(text, to=user)
+                from aria.channels.output import convert
+                plugin.send(convert(text, plugin.output), to=user)
             except Exception:
                 pass          # best effort — the terminal is the primary surface
 

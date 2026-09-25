@@ -71,6 +71,7 @@ PLUGIN = MyChat()
 | `run()` | yes | Blocking receive loop. Call `host.handle_message()` for each message. |
 | `send(text, to=None)` | for push | Deliver text. Without it, `notify` explains that the channel can't push. |
 | `send_file(path, caption, to)` + `supports_files = True` | no | Enables the `send_file` tool on this channel. |
+| `output = ChannelFormat(...)` | no | What your channel can show: `markdown="commonmark" \| "basic" \| "whatsapp" \| "plain"`, `tables`, `headings`, `long_reply_chars`, `surface`. The default is basic Markdown, no tables or headings, 3000 characters. |
 | `send_approval(code, summary, to, expires_min)` | no | How approval requests look. The default is a text message answered with `yes <code>`. |
 | `config_fields` | no | Settings the installer prompts for. By default the channel counts as "configured" when all its `required` fields are set. |
 | `legacy_keys` | no | Env keys that auto-enable the channel when `ARIA_CHANNELS` is unset. |
@@ -95,6 +96,33 @@ PLUGIN = MyChat()
   - A transport that handles one message at a time can't deliver the answer
     while the turn waits. Set `answers_approvals = False` so approvals fail
     fast instead of timing out.
+
+### Output: fitting replies to your channel
+
+A terminal renders anything; a chat app renders a small subset, usually on a
+phone. Declare what yours can show with `output = ChannelFormat(...)` and Aria
+handles both sides:
+
+1. **The model is told, on every turn,** where its reply will be read and what
+   that surface shows ("You are replying on Mychat, a chat app on a phone.
+   It shows bold, italic, code and lists. It does NOT show tables or
+   headings…"). This includes remote-control turns from the phone and
+   scheduled tasks whose result is pushed to you.
+2. **Whatever still doesn't fit is converted before your channel sees it:**
+   - Tables become bullet lists ("• **Alice** — Age: 30, City: Madrid").
+   - Headings become bold.
+   - Markdown becomes your dialect (`whatsapp`: `*bold*`, `_italic_`;
+     `plain`: stripped).
+   - A reply longer than `long_reply_chars` goes out as its first part, with
+     the full text attached as a `.md` file, if you support `send_file`.
+
+   Code blocks are never touched.
+
+| Built-in | `output` |
+|---|---|
+| Telegram | `basic`, no tables or headings, 3500 characters |
+| WhatsApp | `whatsapp`, no tables or headings, 3000 characters |
+| Vicus | `commonmark` with tables and headings, 6000 characters |
 
 ### Host API (`aria.channels.host`)
 

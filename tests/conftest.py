@@ -25,7 +25,7 @@ os.environ.setdefault("ARIA_ENV", str(_SRC.parent / "tests" / ".pytest_env"))
 
 
 @pytest.fixture
-def minimal_env(tmp_path, monkeypatch):
+def minimal_env(tmp_path, monkeypatch, request):
     """Isolated environment: tmp workspace + HOME, dummy LLM config, no
     background reflection, no real .env / profile state leaking in."""
     ws    = tmp_path / "workspace"
@@ -44,6 +44,14 @@ def minimal_env(tmp_path, monkeypatch):
     monkeypatch.setenv("LLM_MODEL", "test-model")
     monkeypatch.setenv("AGENT_NAME", "Aria")
     monkeypatch.setenv("ARIA_REFLECT_EVERY", "0")  # no background reflect thread
+    # A private, SHORT runtime dir: sockets of a real running Aria (e.g. the
+    # Vicus push socket) live in the real XDG_RUNTIME_DIR and a test must never
+    # reach them. Short because unix socket paths are capped at ~108 bytes.
+    import tempfile
+    rundir = tempfile.mkdtemp(prefix="ar", dir="/tmp")
+    monkeypatch.setenv("XDG_RUNTIME_DIR", rundir)
+    import shutil
+    request.addfinalizer(lambda: shutil.rmtree(rundir, ignore_errors=True))
     # Module-level paths computed from the REAL home at import time — redirect
     # them too, or tests write to the developer's ~/.aria.
     import aria.agent

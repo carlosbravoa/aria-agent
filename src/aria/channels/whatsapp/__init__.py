@@ -19,6 +19,7 @@ import shutil
 from pathlib import Path
 
 from aria.channels.base import ChannelPlugin, ConfigField, Note, ServiceSpec
+from aria.channels.output import ChannelFormat
 
 
 def _node_bin() -> str:
@@ -34,6 +35,9 @@ class WhatsAppChannel(ChannelPlugin):
     description = "WhatsApp bridge  (aria-whatsapp, needs Node.js)"
     setup_help = "Needs Node.js and ~/.aria/whatsapp/bridge.js — see README"
     legacy_keys = ("WHATSAPP_ALLOWED",)
+    # WhatsApp's own markup (*bold*, _italic_, ~strike~, ```mono```); no
+    # tables or headings.
+    output = ChannelFormat(markdown="whatsapp", long_reply_chars=3000)
     supports_files = True
     config_fields = (
         ConfigField("ARIA_WA_PORT", prompt="ARIA_WA_PORT", default="7532",

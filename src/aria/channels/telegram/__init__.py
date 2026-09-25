@@ -14,6 +14,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from aria.channels.base import ChannelPlugin, ConfigField, ServiceSpec
+from aria.channels.output import ChannelFormat
 
 
 class TelegramChannel(ChannelPlugin):
@@ -31,6 +32,9 @@ class TelegramChannel(ChannelPlugin):
     )
     supports_files = True
     supports_attached = True
+    # Telegram HTML: bold/italic/code/pre — no tables, no headings. A message
+    # holds 4096 characters; longer answers go out as a summary + a file.
+    output = ChannelFormat(markdown="basic", long_reply_chars=3500)
 
     def run(self) -> None:
         from aria.channels.telegram import bot

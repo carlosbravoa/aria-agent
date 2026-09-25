@@ -93,7 +93,8 @@ def execute(args: dict) -> str:
 
         # to=None: the plugin resolves the active conversation itself, or
         # broadcasts to its allow-list outside a channel.
-        plugin.send(message, to=None)
+        from aria.channels.output import convert
+        plugin.send(convert(message, plugin.output), to=None)
         return "[notify] Message sent."
     except RuntimeError as e:
         return f"[notify error] {e}"

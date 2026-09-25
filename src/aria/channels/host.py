@@ -45,13 +45,51 @@ def handle_message(channel: str, user_id: str, text: str,
     reply = run_command(channel, user_id, text)
     if reply is not None:
         return [reply]
+    # Replies are fitted to what this channel can show (tables, headings,
+    # dialect, length) before the channel sees them — streamed and returned.
+    fit = _fitter(channel, str(user_id))
+    cb = (lambda t: response_cb(fit(t))) if response_cb else None
     from aria.channels import control
     if control.is_controlled(channel):
-        return control.submit(channel, str(user_id), text,
-                              response_cb=response_cb, activity_cb=activity_cb)
-    from aria import channel as _sessions
-    return _sessions.handle(channel, str(user_id), text,
-                            response_cb=response_cb, activity_cb=activity_cb)
+        replies = control.submit(channel, str(user_id), text,
+                                 response_cb=cb, activity_cb=activity_cb)
+    else:
+        from aria import channel as _sessions
+        replies = _sessions.handle(channel, str(user_id), text,
+                                   response_cb=cb, activity_cb=activity_cb)
+    return [fit(r) for r in replies]
+
+
+def _fitter(channel: str, user_id: str) -> Callable[[str], str]:
+    """Per-turn converter. Memoised, so a reply that is both streamed and
+    returned (channels use the list as a fallback) sends its file once."""
+    import logging
+    from aria import channels
+    from aria.channels import output
+    plugin = channels.get(channel)
+    fmt = output.fmt_for(channel)
+    can_attach = bool(plugin is not None and plugin.supports_files)
+    done: dict[str, str] = {}
+
+    def fit(text: str) -> str:
+        if text in done:
+            return done[text]
+        msg, full = output.adapt(text, fmt, can_attach)
+        if full is not None and plugin is not None:
+            path = None
+            try:
+                path = output.write_attachment(full, channel)
+                plugin.send_file(path, caption="Full reply", to=user_id)
+            except Exception as exc:
+                logging.getLogger(__name__).warning(
+                    "Couldn't attach the full reply on %s: %s", channel, exc)
+                msg = output.convert(text, fmt)       # send it whole instead
+            finally:
+                if path is not None:                  # send_file has finished the upload
+                    path.unlink(missing_ok=True)
+        done[text] = msg
+        return msg
+    return fit
 
 
 def answer_approval(channel: str, user_id: str, text: str) -> str | None:

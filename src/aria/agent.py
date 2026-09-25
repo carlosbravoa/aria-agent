@@ -1427,6 +1427,28 @@ class Agent:
 
     # ── Native model call + tool execution ────────────────────────────────────
 
+    def _surface_note(self) -> str:
+        """Where this turn's reply will be read, when it isn't this terminal:
+        a channel turn (incl. remote control from the phone), or a scheduled
+        task whose result is pushed. Per turn, not in the system prompt, so a
+        remote-controlled session switches between phone and terminal rules.
+        Rides in the trailing context message, outside the cached prefix."""
+        try:
+            from aria import context
+            from aria.channels import output
+            cur = context.current()
+            if cur is not None:
+                return output.surface_note(cur.channel, output.fmt_for(cur.channel))
+            if os.environ.get("ARIA_TASK_ID"):
+                from aria import channels
+                push = channels.push_channel()
+                if push is not None:
+                    return (output.surface_note(push.name, push.output)
+                            + " (This is a scheduled task: your answer is pushed there.)")
+        except Exception:
+            pass
+        return ""
+
     def _wire_schemas(self) -> list[dict]:
         """Tool schemas in `tools=` shape, with internal keys (`_module`,
         registry bookkeeping) stripped so only `{type, function}` reaches the
@@ -1448,6 +1470,9 @@ class Agent:
         # conversation every minute). Endpoints without a system role
         # (LLM_SYSTEM_MESSAGES=no) get the prompt + context as a leading user turn.
         ctx_block = f"## Context\n{time_ctx}\nVersion: {__version__}"
+        surface = self._surface_note()
+        if surface:
+            ctx_block += "\n\n" + surface
         # Active-plan follow-through: the plan tool persists to disk, so showing
         # the live plan on EVERY request lets the agent re-orient and continue a
         # multi-step task even after an error, a compaction, or a restart wiped

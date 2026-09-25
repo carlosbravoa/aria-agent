@@ -25,6 +25,9 @@ import threading
 from dataclasses import dataclass
 from pathlib import Path
 
+from aria.channels.output import DEFAULT as DEFAULT_FORMAT
+from aria.channels.output import ChannelFormat
+
 _NAME_RE = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
 
 
@@ -100,6 +103,9 @@ class ChannelPlugin:
     # handles one message at a time — approvals then fail fast instead of
     # waiting for an answer that can't arrive.
     answers_approvals: bool = True
+    # What the channel can show (aria.channels.output): drives the per-turn
+    # "reply surface" note to the model and the conversion at delivery.
+    output: ChannelFormat = DEFAULT_FORMAT
     override: bool = False       # a user plugin must set this to replace a built-in
     overrides: ChannelPlugin | None = None   # the built-in it replaced (set by the registry)
     builtin: bool = False        # set by the registry

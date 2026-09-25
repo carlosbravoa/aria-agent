@@ -99,6 +99,10 @@ installs work unchanged. Follow-ups:
 - ✅ **4.13** **One `/channel` command** — done: plain-words status, `on`
   (this window) / `on --always` (background) / `off` / `control` / `release` /
   `setup`, with automatic handoffs (a paused service resumes when Aria quits).
+- ✅ **4.14** **Replies fit the channel** — done: a per-turn "reply surface" note
+  (channel turns, remote-control phone turns, pushed task results), and conversion
+  at delivery (tables → lists, headings → bold, per-channel dialect, long replies →
+  head + `.md` file). Channels declare `output = ChannelFormat(...)`.
 - **4.4** **WhatsApp attached mode** — low / med. It would spawn and supervise the Node
   bridge as a child process.
 - ✅ **4.5** **Shared slash commands in the host** — med / low. `/clear`, `/model`,

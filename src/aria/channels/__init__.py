@@ -262,5 +262,6 @@ def push(text: str, to: str | None = None, channel: str | None = None) -> str:
             "or enable a channel (ARIA_CHANNELS)")
     if not plugin.supports_push:
         raise RuntimeError(f"channel '{plugin.name}' cannot push messages")
-    plugin.send(text, to=to)
+    from aria.channels.output import convert
+    plugin.send(convert(text, plugin.output), to=to)
     return plugin.name

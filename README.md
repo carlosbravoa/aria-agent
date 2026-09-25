@@ -605,6 +605,14 @@ The commands cooperate instead of refusing:
   WhatsApp is one.
 - **Leaving the window gives a paused service back at once.**
 
+**Replies fit the channel.** On a channel, the model is told where its reply
+will be read and what that app can show, so a phone gets short chat messages
+rather than terminal output. Anything that still doesn't fit is converted:
+- Tables become lists on Telegram and WhatsApp. Vicus shows them as tables.
+- Headings become bold.
+- A very long answer arrives as a short message with the full text attached
+  as a file.
+
 `--always` writes the same systemd unit `aria-install` would. Without systemd
 the channel runs as a detached process, logging to `~/.aria/logs/`. `/remote`
 still works as an alias.

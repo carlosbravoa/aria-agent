@@ -31,6 +31,7 @@ import os
 from pathlib import Path
 
 from aria.channels.base import ChannelPlugin, ConfigField, Note
+from aria.channels.output import ChannelFormat
 
 
 class VicusChannel(ChannelPlugin):
@@ -54,6 +55,10 @@ class VicusChannel(ChannelPlugin):
     )
     supports_files = True
     supports_attached = True
+    # Vicus renders CommonMark + tables; only very long replies become files.
+    output = ChannelFormat(markdown="commonmark", tables=True, headings=True,
+                           long_reply_chars=6000,
+                           surface="an encrypted messenger, often on a phone")
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────
 
