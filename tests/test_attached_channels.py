@@ -248,16 +248,15 @@ def repl_out(monkeypatch):
 
 
 def test_remote_command(env, repl_out):
+    """/remote is now an alias of /channel (full coverage in test_channel_ux)."""
     from aria import main
     main._remote_command("")
     assert "fake" in repl_out.getvalue() and "offline" in repl_out.getvalue()
-    main._remote_command("on")                     # only one capable → no name needed
-    assert "attached" in repl_out.getvalue()
+    main._remote_command("on")                     # only one candidate → no name needed
+    assert "fake is online in this window" in repl_out.getvalue()
     assert _wait(lambda: "start" in _events())
-    main._remote_command("")
-    assert "online" in repl_out.getvalue()
     main._remote_command("off fake")
-    assert "offline" in repl_out.getvalue().splitlines()[-1]
+    assert "fake is offline in this window" in repl_out.getvalue()
     main._remote_command("sideways")
     assert "Usage" in repl_out.getvalue()
 

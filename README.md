@@ -575,20 +575,39 @@ aria-install                                             # select it, configure,
 | `ARIA_CHANNELS=telegram,webhook` | Enabled channels. Unset → every configured channel (legacy behaviour). |
 | `ARIA_NOTIFY_CHANNEL=webhook` | Where pushes go outside a conversation. Default: Telegram, when enabled. |
 | `ARIA_CHANNELS_DIR` | Plugin directory. Default `~/.aria/channels`. |
-| `ARIA_CHANNEL_MODE_TELEGRAM=attached` | Telegram is online only while the `aria` CLI is open, with no background service (`/remote` in the REPL). |
-| `ARIA_CHANNEL_MODE_TELEGRAM=control` | The same, and your phone drives the terminal's own session (remote control). Toggle it with `/remote control` / `/remote release`. |
+| `ARIA_CHANNEL_MODE_TELEGRAM=attached` | Telegram is online only while the `aria` CLI is open, with no background service. |
+| `ARIA_CHANNEL_MODE_TELEGRAM=control` | The same, and your phone drives the terminal's own session (remote control). Toggle it with `/channel control` / `/channel release`. |
 
-**Managing channels from inside Aria.** In the REPL, `/channel` lists every
-channel with its background service state:
-- `/channel start <name>` deploys its files, writes the same systemd unit
-  `aria-install` would, and enables and starts it. It also adds the channel to
-  `ARIA_CHANNELS` when that list is set.
-- `/channel stop <name>` disables and stops it.
-- `/channel restart <name>` and `/channel logs <name>` do what they say.
+**Managing channels from inside Aria.** One command, in plain words:
 
-Without systemd the channel runs as a detached process, logging to
-`~/.aria/logs/`. To have a channel online only while the window is open, use
-`/remote on <name>` instead.
+```text
+  You › /channel
+  telegram   not set up (missing TELEGRAM_TOKEN)  → /channel setup telegram
+  vicus      online in the background
+  whatsapp   offline
+
+  You › /channel setup telegram      # asks for the settings, saves them to .env
+  You › /channel on vicus            # online in this window (offline when you quit)
+  You › /channel on vicus --always   # online in the background (survives quitting, reboots)
+  You › /channel control vicus       # your phone drives this session
+  You › /channel release vicus       # phone chats get their own session again
+  You › /channel off vicus           # offline everywhere
+  You › /channel restart|logs vicus  # the background service
+```
+
+The commands cooperate instead of refusing:
+- **This window takes over from the background.** `/channel on` or
+  `/channel control` pauses a channel's background service, and the service
+  comes back when you quit.
+- **The background takes over from this window.** `--always` on a channel
+  that's in this window hands it straight to the service.
+- **A channel that can't run in a window runs in the background instead.**
+  WhatsApp is one.
+- **Leaving the window gives a paused service back at once.**
+
+`--always` writes the same systemd unit `aria-install` would. Without systemd
+the channel runs as a detached process, logging to `~/.aria/logs/`. `/remote`
+still works as an alias.
 
 Full guide: [`docs/channel-plugins.md`](docs/channel-plugins.md).
 

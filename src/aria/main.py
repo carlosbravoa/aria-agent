@@ -227,8 +227,7 @@ _HELP_TEXT = """
 [cmd]/cost[/]        Show session token usage
 [cmd]/usage[/]       Show lifetime token usage (all sessions, by model/channel)
 [cmd]/trust[/] [meta][clear][/]  Show/clear auto-approved shell commands
-[cmd]/remote[/] [meta][on|off|control|release] [channel][/]  Channels online while Aria is open; [cmd]control[/] = drive this session from the phone
-[cmd]/channel[/] [meta][start|stop|restart|logs] <name>[/]  Channel background services (list with no arguments)
+[cmd]/channel[/]      Channels: [meta]on <name> [--always] · off · control · release · setup · restart · logs[/]
 [cmd]/version[/]     Show version
 [cmd]/quit[/]        Exit  [meta](or Ctrl+D)[/]
 
@@ -397,140 +396,334 @@ def _prompt(session, waker: _Waker | None = None) -> str:
     return input(f"  {CYAN_BOLD}You ›{RESET} ").strip()
 
 
-# ── Attached channels ─────────────────────────────────────────────────────────
-# A channel in attached mode (ARIA_CHANNEL_MODE_<NAME>=attached) runs inside
-# this process while the REPL is open — nothing in the background.
+# ── Channels in the REPL (/channel, alias /remote) ────────────────────────────
+# One command for "is this channel online, and where":
+#   in the background  a service (systemd unit, or a detached process)
+#   in this window     attached to this REPL, offline when it quits
+#   controls session   attached, and the phone drives this very session
+# Commands cooperate instead of refusing: bringing a channel into this window
+# while its service runs PAUSES the service and resumes it when Aria quits.
+
+_paused: set[str] = set()      # services this session paused; resumed on exit
+
+
+def _channel_state(p, here: dict, ctl: dict) -> str:
+    """One plain-words line for a channel."""
+    from aria.channels import services
+    missing = services.missing_settings(p.name)
+    if missing:
+        return f"not set up (missing {', '.join(missing)})  → /channel setup {p.name}"
+    if p.name in here:
+        where = "online in this window"
+        if not here[p.name].startswith("online"):
+            where = f"stopped in this window: {here[p.name]}"
+        if p.name in ctl:
+            where += " · controls this session"
+        if p.name in _paused:
+            where += " · background service resumes when you quit"
+        return where
+    try:
+        if services.running_in_background(p.name):
+            return "online in the background"
+    except Exception:
+        pass
+    from aria.channels.runlock import RunLock
+    probe = RunLock(p.name)
+    if not probe.acquire(blocking=False):
+        return "online in another aria window"
+    probe.release()
+    return "offline"
+
+
+def _say(lines, style: str = "meta") -> None:
+    from rich.markup import escape
+    for line in lines:
+        s = "error" if line.startswith("⚠") else style
+        console.print(f"  [{s}]{escape(line)}[/]")
+
 
 def _start_attached_channels() -> None:
+    """Channels configured as attached/control come online with the window."""
     try:
         from aria import channels
-        from aria.channels import attached
         plugins = channels.attached_channels()
     except Exception as exc:
         console.print(f"  [error]Attached channels unavailable: {exc}[/]")
         return
     for p in plugins:
-        ok, msg = attached.start(p)
-        console.print(f"  [{'success' if ok else 'meta'}]📱 {msg}[/]")
-        if ok and p.mode == "control":
-            _take_control(p.name)
+        _channel_on(p.name, control=(p.mode == "control"), quiet_prefix="📱 ")
 
 
 def _stop_attached_channels() -> None:
+    """On quit: take attached channels offline, then give paused services back."""
     try:
-        from aria.channels import attached
+        from aria.channels import attached, services
     except Exception:
         return
     for name, _ in attached.status():
         console.print(f"  [meta]📱 {attached.stop(name, timeout=5)}[/]")
+    for name in sorted(_paused):
+        try:
+            services.resume(name)
+            console.print(f"  [meta]📱 {name} is back online in the background[/]")
+        except Exception as exc:
+            console.print(f"  [error]📱 couldn't restart {name}'s background service: {exc}[/]")
+    _paused.clear()
 
 
-def _remote_command(rest: str) -> None:
-    """/remote                     status
-    /remote on|off [channel]    attach/detach (channel optional when only one fits)"""
+def _channel_names() -> list[str]:
     from aria import channels
-    from aria.channels import attached
-    args = rest.split()
-    action = args[0].lower() if args else ""
-    running = dict(attached.status())
-    capable = [p for p in channels.discover().values()
-               if p.supports_attached and p.is_configured()]
+    return sorted(channels.discover())
 
-    if action not in ("on", "off", "control", "release"):
-        if action:
-            console.print("  [error]Usage: /remote [on|off|control|release] [channel][/]")
-            return
-        if not capable and not running:
-            console.print("  [meta]No configured channel can run attached "
-                          "(e.g. set TELEGRAM_TOKEN and TELEGRAM_ALLOWED).[/]")
-            return
-        from aria.channels import control
-        ctl = control.controlled()
-        for p in capable:
-            state = running.get(p.name, "offline")
-            if p.name in ctl:
-                state += ", controls this session"
-            console.print(f"  [cmd]{p.name:10}[/] [meta]{state}  (mode: {p.mode})[/]")
-        console.print(f"  [meta]Logs: {attached.log_path()}[/]")
-        return
 
-    if len(args) > 1:
-        name = args[1].lower()
-    else:
-        pool = (list(running) if action in ("off", "release")
-                else [p.name for p in capable])
-        if len(pool) != 1:
-            console.print(f"  [error]Which channel? /remote {action} <name>"
-                          f"{' — ' + ', '.join(pool) if pool else ''}[/]")
-            return
-        name = pool[0]
+def _pick_channel(args: list[str], action: str, pool: list[str]) -> str | None:
+    """The channel named in `args`, or the only sensible one; None (after
+    saying so) when it's ambiguous."""
+    if args:
+        name = args[0].lower()
+        if name not in _channel_names():
+            console.print(f"  [error]No channel '{name}' "
+                          f"(available: {', '.join(_channel_names())})[/]")
+            return None
+        return name
+    if len(pool) == 1:
+        return pool[0]
+    console.print(f"  [error]Which channel? /channel {action} <name>"
+                  f"{' — ' + ', '.join(pool) if pool else ''}[/]")
+    return None
 
-    from aria.channels import control
-    if action in ("off", "release"):
+
+def _channel_on(name: str, control: bool = False, quiet_prefix: str = "") -> bool:
+    """Bring `name` online in this window (moving it from the background if
+    needed); with `control`, the phone drives this session. True on success."""
+    from aria import channels
+    from aria.channels import attached, services
+    p = channels.get(name)
+    if p is None:
+        return False
+    missing = services.missing_settings(name)
+    if missing:
+        console.print(f"  [error]{quiet_prefix}{name} isn't set up yet (missing "
+                      f"{', '.join(missing)}). Run /channel setup {name}.[/]")
+        return False
+    if not p.supports_attached:
+        console.print(f"  [meta]{name} can't run inside this window — starting it in "
+                      f"the background instead.[/]")
+        return _channel_always(name)
+    here = dict(attached.status())
+    if name not in here or not here[name].startswith("online"):
+        paused = False
+        try:
+            paused = services.running_in_background(name) and services.pause(name)
+        except Exception as exc:
+            console.print(f"  [error]Couldn't pause {name}'s background service: {exc}[/]")
+            return False
+        if paused:
+            _paused.add(name)
+        ok, msg = attached.start(p)
+        if not ok:
+            if paused:                                  # give it back
+                services.resume(name)
+                _paused.discard(name)
+            if "already online" in msg:
+                msg = (f"{name} is online in another aria window — quit that one "
+                       f"first, or use it there.")
+            console.print(f"  [error]{quiet_prefix}{msg}[/]")
+            return False
+        note = (" (moved from the background; it goes back there when you quit)"
+                if paused else "")
+        console.print(f"  [success]{quiet_prefix}{name} is online in this window{note}[/]")
+    if control:
+        _take_control(name)
+    return True
+
+
+def _channel_always(name: str) -> bool:
+    """Online in the background (a service that survives quitting and reboots)."""
+    from aria.channels import attached, control, services
+    here = dict(attached.status())
+    if name in here:                  # hand over: this window lets go, the service takes it
         if name in control.controlled():
             control.disable(name)
-            console.print(f"  [meta]📱 {name} no longer controls this session "
-                          f"(its chats get their own session again)[/]")
-        if action == "off":
-            console.print(f"  [meta]📱 {attached.stop(name)}[/]")
-        return
-    plugin = channels.get(name)
-    if plugin is None or not plugin.is_configured():
-        console.print(f"  [error]{name}: unknown or not configured[/]")
-        return
-    if name not in running:
-        ok, msg = attached.start(plugin)
-        console.print(f"  [{'success' if ok else 'error'}]📱 {msg}[/]")
-        if not ok:
+        attached.stop(name, timeout=5)
+    _paused.discard(name)
+    try:
+        with console.status(f"[meta]Starting {name} in the background…[/]", spinner="dots"):
+            lines = services.start(name)
+    except services.ChannelServiceError as exc:
+        console.print(f"  [error]{exc}[/]")
+        return False
+    _say(lines)
+    console.print(f"  [success]{name} is online in the background[/]")
+    return True
+
+
+def _channel_off(name: str, everywhere: bool = True) -> None:
+    from aria.channels import attached, control, services
+    if name in control.controlled():
+        control.disable(name)
+    if name in dict(attached.status()):
+        attached.stop(name, timeout=5)
+    if not everywhere:
+        if name in _paused:           # leaving this window: hand it straight back
+            _paused.discard(name)
+            try:
+                services.resume(name)
+                console.print(f"  [meta]{name} left this window and is back online "
+                              f"in the background[/]")
+            except Exception as exc:
+                console.print(f"  [error]{name} left this window, but its background "
+                              f"service didn't restart: {exc}[/]")
             return
-    if action == "control":
-        _take_control(name)
+        console.print(f"  [meta]{name} is offline in this window[/]")
+        return
+    _paused.discard(name)
+    try:
+        lines = services.stop(name)
+    except services.ChannelServiceError as exc:
+        console.print(f"  [error]{exc}[/]")
+        return
+    if not lines[0].endswith("nothing to stop.") and "isn't running" not in lines[0]:
+        _say(lines)
+    console.print(f"  [meta]{name} is offline[/]")
+
+
+def _channel_setup(name: str) -> None:
+    """Ask for the channel's settings (Enter keeps the current value) and save
+    them to .env."""
+    from aria import channels
+    from aria.channels import services
+    p = channels.get(name)
+    if p is None:
+        return
+    console.rule(f"[meta]{p.display_name} setup[/]")
+    for line in (p.setup_help or "").splitlines():
+        console.print(f"  [meta]{line}[/]")
+    values: dict[str, str] = {}
+    try:
+        for f in p.config_fields:
+            current = os.environ.get(f.key, "") or f.default
+            shown = ("•••• (set)" if current else "") if f.secret else current
+            if f.help:
+                console.print(f"  [meta]{f.help}[/]")
+            label = f"  {f.prompt or f.key}" + (f" [{shown}]" if shown else "") + ": "
+            answer = console.input(label, password=f.secret).strip()
+            if answer:
+                values[f.key] = answer
+            elif current and not os.environ.get(f.key):
+                values[f.key] = current                 # accept the default
+            elif f.required and not current:
+                console.print(f"  [error]{f.key} is required — setup cancelled.[/]")
+                return
+    except (KeyboardInterrupt, EOFError):
+        console.print("\n  [meta]Setup cancelled — nothing saved.[/]")
+        return
+    if values:
+        env = services.update_env(values)
+        console.print(f"  [success]Saved {len(values)} setting(s) to {env}[/]")
+    notes = [t if isinstance(t, str) else (("⚠ " if t[0] == "warn" else "") + t[1])
+             for t in (p.install(dry_run=False) or [])]
+    _say([n for n in notes if n.strip()])
+    console.print(f"  [meta]Next: /channel on {name} (this window) or "
+                  f"/channel on {name} --always (background)[/]")
+
+
+_CHANNEL_USAGE = ("/channel [on|off|control|release|setup|restart|logs] <name>  "
+                  "·  /channel on <name> --always = background")
 
 
 def _channel_command(rest: str) -> None:
-    """/channel                         every channel and its background service
-    /channel start|stop|restart <name>  manage the service (systemd, else a detached process)
-    /channel logs <name>              its recent log"""
-    from rich.markup import escape
-    from aria.channels import attached, services
+    """/channel                      every channel, in plain words
+    /channel on <name> [--always]  online in this window, or in the background
+    /channel off <name>            offline everywhere
+    /channel control <name>        your phone drives this session
+    /channel release <name>        phone chats get their own session again
+    /channel setup <name>          ask for the settings and save them
+    /channel restart|logs <name>   the background service"""
+    from aria import channels
+    from aria.channels import attached, control, services
     args = rest.split()
+    always = "--always" in args
+    args = [a for a in args if a != "--always"]
     action = args[0].lower() if args else ""
+    args = args[1:]
     here = dict(attached.status())
+    ctl = control.controlled()
 
     if action in ("", "list", "status"):
-        rows = services.status()
-        if not rows:
-            console.print("  [meta]No channels found.[/]")
-            return
-        for p, state in rows:
-            configured = "" if p.is_configured() else "  (not configured)"
-            extra = f", attached here: {here[p.name]}" if p.name in here else ""
-            console.print(f"  [cmd]{p.name:10}[/] [meta]service: {state}  (mode: {p.mode})"
-                          f"{extra}{configured}[/]")
-        console.print("  [meta]/channel start|stop|restart|logs <name> · "
-                      "/remote on <name> to run one only while this window is open[/]")
-        return
-    if action not in ("start", "stop", "restart", "logs") or len(args) < 2:
-        console.print("  [error]Usage: /channel [start|stop|restart|logs] <name>[/]")
+        for p in (channels.discover()[n] for n in _channel_names()):
+            console.print(f"  [cmd]{p.name:10}[/] [meta]{_channel_state(p, here, ctl)}[/]")
+        from rich.markup import escape
+        console.print(f"  [meta]{escape(_CHANNEL_USAGE)}[/]")
         return
 
-    name = args[1].lower()
+    configured = [n for n in _channel_names() if not services.missing_settings(n)]
+    if action == "on":
+        pool = [n for n in configured if n not in here]
+        name = _pick_channel(args, action, pool)
+        if name:
+            (_channel_always if always else _channel_on)(name)
+    elif action == "control":
+        pool = [n for n in configured
+                if (cp := channels.get(n)) is not None and cp.supports_attached]
+        name = _pick_channel(args, action, pool)
+        if name:
+            _channel_on(name, control=True)
+    elif action == "release":
+        name = _pick_channel(args, action, sorted(ctl))
+        if name:
+            if name in ctl:
+                control.disable(name)
+                console.print(f"  [meta]{name} no longer controls this session (its "
+                              f"chats get their own session again; still online)[/]")
+            else:
+                console.print(f"  [meta]{name} isn't controlling this session.[/]")
+    elif action == "off":
+        pool = sorted(set(here) | {n for n in configured if _safe_bg(n)})
+        name = _pick_channel(args, action, pool)
+        if name:
+            _channel_off(name)
+    elif action == "setup":
+        name = _pick_channel(args, action,
+                             [n for n in _channel_names() if n not in configured])
+        if name:
+            _channel_setup(name)
+    elif action in ("restart", "logs"):
+        name = _pick_channel(args, action, [n for n in configured if _safe_bg(n)])
+        if name:
+            try:
+                if action == "logs":
+                    from rich.markup import escape
+                    console.print(escape(services.logs(name)))
+                else:
+                    _say(services.restart(name))
+            except services.ChannelServiceError as exc:
+                console.print(f"  [error]{exc}[/]")
+    else:
+        from rich.markup import escape
+        console.print(f"  [error]Usage: {escape(_CHANNEL_USAGE)}[/]")
+
+
+def _safe_bg(name: str) -> bool:
+    from aria.channels import services
     try:
-        if action == "logs":
-            console.print(escape(services.logs(name)))
-            return
-        fn = {"start": services.start, "stop": services.stop, "restart": services.restart}[action]
-        with console.status(f"[meta]{action.capitalize()}ing {name}…[/]", spinner="dots"):
-            lines = fn(name)
-    except services.ChannelServiceError as exc:
-        console.print(f"  [error]{escape(str(exc))}[/]")
+        return services.running_in_background(name)
+    except Exception:
+        return False
+
+
+def _remote_command(rest: str) -> None:
+    """/remote — the pre-3.0 spelling, kept as an alias of /channel. `off`
+    here only takes the channel out of THIS window (as it always did)."""
+    args = rest.split()
+    if args and args[0].lower() == "off":
+        from aria.channels import attached
+        here = sorted(dict(attached.status()))
+        name = _pick_channel(args[1:], "off", here)
+        if name:
+            _channel_off(name, everywhere=False)
         return
-    for line in lines:
-        style = "error" if line.startswith("⚠") else "meta"
-        console.print(f"  [{style}]{escape(line)}[/]")
-    if action in ("start", "restart") and name in here:
-        console.print(f"  [meta]{name} is attached to this session right now; the service "
-                      f"takes over when you /remote off {name} or quit.[/]")
+    _channel_command(rest)
 
 
 def _take_control(name: str) -> None:

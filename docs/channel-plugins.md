@@ -136,10 +136,10 @@ ARIA_CHANNEL_MODE_TELEGRAM=attached     # or answer "yes" in aria-install
 
 ```text
 $ aria
-  📱 telegram attached — messages reach Aria while this window is open
-  You › /remote            # status
-  You › /remote off        # go offline without quitting
-  You › /remote on         # back online (works in service mode too, if no service is running)
+  📱 telegram is online in this window
+  You › /channel                 # status of every channel
+  You › /channel off telegram    # offline
+  You › /channel on telegram     # back online in this window (pauses its service if one runs)
 ```
 
 - **Telegram supports attached mode. WhatsApp is service-only**, because it
@@ -174,9 +174,9 @@ the terminal left off.
 ARIA_CHANNEL_MODE_TELEGRAM=control      # attached + controls the session at startup
 ```
 ```text
-  You › /remote control     # hand the session to the phone (attaches if needed)
-  You › /remote release     # phone chats get their own session again (stays online)
-  You › /remote off         # release and go offline
+  You › /channel control telegram   # hand the session to the phone (brings it online if needed)
+  You › /channel release telegram   # phone chats get their own session again (stays online)
+  You › /channel off telegram       # release and go offline
 ```
 
 - **A phone message interrupts the prompt without losing what you were
@@ -218,9 +218,9 @@ to the terminal.
 ```bash
 aria-channel --list        # discovered channels, which are enabled, push default
 # in the aria REPL:
-/channel                   # every channel + its background service state
-/channel start <name>      # write its unit (as aria-install does), enable + start
-/channel stop <name>       # disable + stop     (also: restart, logs)
+/channel                   # every channel, in plain words
+/channel on <name> [--always]   # this window, or the background (service)
+/channel off <name>        # offline everywhere   (also: control, release, setup, restart, logs)
 aria-channel <name>        # run one channel (what its systemd unit executes)
 aria --notify --channel mychat "query"   # push a single-shot answer via a channel
 ```

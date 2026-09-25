@@ -116,6 +116,75 @@ def _resolved(spec: ServiceSpec) -> tuple[str | None, list[str]]:
     return exe, list(spec.exec_start[1:])
 
 
+def update_env(values: dict[str, str]) -> Path:
+    """Set keys in the .env (replacing existing lines, appending new ones),
+    written atomically at 0600, and apply them to this process."""
+    env = _env_file()
+    try:
+        lines = env.read_text(encoding="utf-8").splitlines()
+    except FileNotFoundError:
+        lines = []
+    pending = dict(values)
+    out = []
+    for line in lines:
+        key = line.split("=", 1)[0].strip() if "=" in line and not line.lstrip().startswith("#") else None
+        if key in pending:
+            out.append(f"{key}={pending.pop(key)}")
+        else:
+            out.append(line)
+    out.extend(f"{k}={v}" for k, v in pending.items())
+    from aria.setup import write_private
+    env.parent.mkdir(parents=True, exist_ok=True)
+    write_private(env, "\n".join(out) + "\n")
+    os.environ.update(values)
+    from aria import channels
+    channels.reset_cache()
+    return env
+
+
+def missing_settings(name: str) -> list[str]:
+    return _missing_settings(_plugin(name))
+
+
+def running_in_background(name: str) -> bool:
+    p = _plugin(name)
+    unit = p.services()[0].unit
+    if _systemd():
+        return _unit_state(unit) == "active"
+    return _pid(unit) is not None
+
+
+def pause(name: str) -> bool:
+    """Stop the background service for now WITHOUT disabling it (it still
+    starts at login). Returns True if something was running."""
+    p = _plugin(name)
+    units = [s.unit for s in p.services()]
+    if _systemd():
+        active = [u for u in units if _unit_state(u) == "active"]
+        if active:
+            _systemctl("stop", *reversed(active))
+        return bool(active)
+    was = False
+    for unit in reversed(units):
+        pid = _pid(unit)
+        if pid:
+            os.kill(pid, signal.SIGTERM)
+            (_run_dir() / f"{unit}.pid").unlink(missing_ok=True)
+            was = True
+    return was
+
+
+def resume(name: str) -> list[str]:
+    """Start a paused background service again."""
+    p = _plugin(name)
+    if _systemd():
+        units = [s.unit for s in p.services() if (_unit_dir() / f"{s.unit}.service").exists()]
+        if units:
+            _systemctl("start", *units)
+        return [f"{u}: {_unit_state(u)}" for u in units]
+    return start(name)
+
+
 def _ensure_listed(name: str) -> str | None:
     """With an explicit ARIA_CHANNELS, add `name` to it (in .env and here) so
     the rest of Aria — the updater, push routing — treats it as enabled."""
@@ -126,26 +195,10 @@ def _ensure_listed(name: str) -> str | None:
     if name in names:
         return None
     names.append(name)
-    value = ",".join(names)
-    env = _env_file()
     try:
-        lines = env.read_text(encoding="utf-8").splitlines()
+        env = update_env({"ARIA_CHANNELS": ",".join(names)})
     except OSError:
-        return f"Couldn't update ARIA_CHANNELS in {env} — add {name} yourself."
-    out, done = [], False
-    for line in lines:
-        if line.strip().startswith("ARIA_CHANNELS="):
-            out.append(f"ARIA_CHANNELS={value}")
-            done = True
-        else:
-            out.append(line)
-    if not done:
-        out.append(f"ARIA_CHANNELS={value}")
-    from aria.setup import write_private
-    write_private(env, "\n".join(out) + "\n")
-    os.environ["ARIA_CHANNELS"] = value
-    from aria import channels
-    channels.reset_cache()
+        return f"Couldn't update ARIA_CHANNELS — add {name} to it yourself."
     return f"Added {name} to ARIA_CHANNELS in {env}."
 
 

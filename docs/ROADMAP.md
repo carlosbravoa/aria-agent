@@ -86,9 +86,9 @@ Follow-ups:
 custom channels go in `~/.aria/channels/` (`docs/channel-plugins.md`). Legacy
 installs work unchanged. Follow-ups:
 - ✅ **4.1** **Attached mode (A)** — done. `ARIA_CHANNEL_MODE_<NAME>=attached` runs a
-  channel inside the `aria` CLI only while it's open, with `/remote on|off`. A
+  channel inside the `aria` CLI only while it's open, with `/channel on|off` (`/remote` alias). A
   run lock prevents double polling. Telegram supports it.
-- ✅ **4.2** **Remote control of the REPL session (B)** — done. `/remote control` or
+- ✅ **4.2** **Remote control of the REPL session (B)** — done. `/channel control` or
   `ARIA_CHANNEL_MODE_<NAME>=control`: phone messages run in the terminal's own
   session, the prompt is interrupted with the typed text preserved, and local
   turns are mirrored.
@@ -96,6 +96,9 @@ installs work unchanged. Follow-ups:
   ✅ Done: remote-control turns ask on the phone (via 4.9).
   unattended shell policy. They could instead ask on the phone (Telegram inline
   buttons), which ties in with the approval buttons (4.9).
+- ✅ **4.13** **One `/channel` command** — done: plain-words status, `on`
+  (this window) / `on --always` (background) / `off` / `control` / `release` /
+  `setup`, with automatic handoffs (a paused service resumes when Aria quits).
 - **4.4** **WhatsApp attached mode** — low / med. It would spawn and supervise the Node
   bridge as a child process.
 - ✅ **4.5** **Shared slash commands in the host** — med / low. `/clear`, `/model`,

@@ -132,8 +132,8 @@ AGENT_NAME=Aria
 # ARIA_CHANNELS_DIR=~/.aria/channels
 # Run mode per channel: service (default — a background systemd unit, always
 # online), attached (online only while the `aria` CLI is open; toggle with
-# /remote) or control (attached, and your phone drives the terminal's own
-# session — /remote control|release). Telegram supports attached/control;
+# /channel on) or control (attached, and your phone drives the terminal's own
+# session — /channel control|release). Telegram supports attached/control;
 # WhatsApp is service-only.
 # ARIA_CHANNEL_MODE_TELEGRAM=attached
 
