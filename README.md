@@ -34,7 +34,7 @@ The result is an agent that will impress you with how useful it can be while rem
 1. [Requirements](#requirements)
 2. [Quickstart — CLI only](#quickstart--cli-only)
 3. [Quickstart — with services](#quickstart--with-services)
-   - [Upgrading to this version](#upgrading-to-this-version)
+   - [Upgrading to 3.0](#upgrading-to-30)
 4. [Configure](#configure)
 5. [Model profiles](#model-profiles)
 6. [CLI commands](#cli-commands)
@@ -171,7 +171,13 @@ aria-install --dry-run    # preview changes without applying
 aria-install --uninstall  # remove all services
 ```
 
-### Upgrading to this version
+### Upgrading to 3.0
+
+3.0 adds channel plugins, attached/remote-control channels, `/stop`,
+approvals for risky actions, shared channel commands and WhatsApp push
+delivery, plus the fixes from the 2026 review (including recurring tasks that
+ran more than once). Existing Telegram/WhatsApp setups keep working without
+configuration changes.
 
 After `git pull && pip install .`:
 
