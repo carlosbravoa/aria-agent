@@ -87,7 +87,7 @@ def _startup() -> None:
 _COMMANDS = [
     "/help", "/memory", "/tools", "/clear", "/compact", "/retry", "/copy",
     "/save ", "/markdown ", "/version", "/cost", "/usage", "/trust", "/models",
-    "/model ", "/discard", "/remote", "/quit", "/exit",
+    "/model ", "/discard", "/remote", "/channel ", "/quit", "/exit",
 ]
 
 
@@ -228,6 +228,7 @@ _HELP_TEXT = """
 [cmd]/usage[/]       Show lifetime token usage (all sessions, by model/channel)
 [cmd]/trust[/] [meta][clear][/]  Show/clear auto-approved shell commands
 [cmd]/remote[/] [meta][on|off|control|release] [channel][/]  Channels online while Aria is open; [cmd]control[/] = drive this session from the phone
+[cmd]/channel[/] [meta][start|stop|restart|logs] <name>[/]  Channel background services (list with no arguments)
 [cmd]/version[/]     Show version
 [cmd]/quit[/]        Exit  [meta](or Ctrl+D)[/]
 
@@ -484,6 +485,52 @@ def _remote_command(rest: str) -> None:
             return
     if action == "control":
         _take_control(name)
+
+
+def _channel_command(rest: str) -> None:
+    """/channel                         every channel and its background service
+    /channel start|stop|restart <name>  manage the service (systemd, else a detached process)
+    /channel logs <name>              its recent log"""
+    from rich.markup import escape
+    from aria.channels import attached, services
+    args = rest.split()
+    action = args[0].lower() if args else ""
+    here = dict(attached.status())
+
+    if action in ("", "list", "status"):
+        rows = services.status()
+        if not rows:
+            console.print("  [meta]No channels found.[/]")
+            return
+        for p, state in rows:
+            configured = "" if p.is_configured() else "  (not configured)"
+            extra = f", attached here: {here[p.name]}" if p.name in here else ""
+            console.print(f"  [cmd]{p.name:10}[/] [meta]service: {state}  (mode: {p.mode})"
+                          f"{extra}{configured}[/]")
+        console.print("  [meta]/channel start|stop|restart|logs <name> · "
+                      "/remote on <name> to run one only while this window is open[/]")
+        return
+    if action not in ("start", "stop", "restart", "logs") or len(args) < 2:
+        console.print("  [error]Usage: /channel [start|stop|restart|logs] <name>[/]")
+        return
+
+    name = args[1].lower()
+    try:
+        if action == "logs":
+            console.print(escape(services.logs(name)))
+            return
+        fn = {"start": services.start, "stop": services.stop, "restart": services.restart}[action]
+        with console.status(f"[meta]{action.capitalize()}ing {name}…[/]", spinner="dots"):
+            lines = fn(name)
+    except services.ChannelServiceError as exc:
+        console.print(f"  [error]{escape(str(exc))}[/]")
+        return
+    for line in lines:
+        style = "error" if line.startswith("⚠") else "meta"
+        console.print(f"  [{style}]{escape(line)}[/]")
+    if action in ("start", "restart") and name in here:
+        console.print(f"  [meta]{name} is attached to this session right now; the service "
+                      f"takes over when you /remote off {name} or quit.[/]")
 
 
 def _take_control(name: str) -> None:
@@ -743,6 +790,9 @@ def _repl_loop(agent: Agent, session, waker: _Waker | None = None) -> None:
 
         elif cmd == "/remote":
             _remote_command(rest)
+
+        elif cmd in ("/channel", "/channels"):
+            _channel_command(rest)
 
         elif cmd.startswith("/"):
             console.print(f"  [error]Unknown command: {cmd}[/]  Type /help for commands.")

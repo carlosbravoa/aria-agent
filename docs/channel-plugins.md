@@ -217,6 +217,10 @@ to the terminal.
 
 ```bash
 aria-channel --list        # discovered channels, which are enabled, push default
+# in the aria REPL:
+/channel                   # every channel + its background service state
+/channel start <name>      # write its unit (as aria-install does), enable + start
+/channel stop <name>       # disable + stop     (also: restart, logs)
 aria-channel <name>        # run one channel (what its systemd unit executes)
 aria --notify --channel mychat "query"   # push a single-shot answer via a channel
 ```

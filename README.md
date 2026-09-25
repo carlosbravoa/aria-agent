@@ -578,6 +578,18 @@ aria-install                                             # select it, configure,
 | `ARIA_CHANNEL_MODE_TELEGRAM=attached` | Telegram is online only while the `aria` CLI is open, with no background service (`/remote` in the REPL). |
 | `ARIA_CHANNEL_MODE_TELEGRAM=control` | The same, and your phone drives the terminal's own session (remote control). Toggle it with `/remote control` / `/remote release`. |
 
+**Managing channels from inside Aria.** In the REPL, `/channel` lists every
+channel with its background service state:
+- `/channel start <name>` deploys its files, writes the same systemd unit
+  `aria-install` would, and enables and starts it. It also adds the channel to
+  `ARIA_CHANNELS` when that list is set.
+- `/channel stop <name>` disables and stops it.
+- `/channel restart <name>` and `/channel logs <name>` do what they say.
+
+Without systemd the channel runs as a detached process, logging to
+`~/.aria/logs/`. To have a channel online only while the window is open, use
+`/remote on <name>` instead.
+
 Full guide: [`docs/channel-plugins.md`](docs/channel-plugins.md).
 
 ---
