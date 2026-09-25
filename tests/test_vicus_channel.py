@@ -244,3 +244,26 @@ def test_the_real_bridge_protocol_tests_pass():
     r = subprocess.run([node, "--test", "vicus/test/"], cwd=root, capture_output=True,
                        text=True, timeout=120)
     assert r.returncode == 0, r.stdout[-2000:] + r.stderr[-2000:]
+
+
+def test_service_stops_gracefully_on_sigterm(vicus, monkeypatch, tmp_path):
+    """systemd's stop signal ends the service through its cleanup path: the
+    sidecar is told to shut down (it saves its state) and the socket goes."""
+    import os
+    import signal
+    import subprocess
+    code = (
+        "import sys; sys.path.insert(0, %r)\n"
+        "from aria.channels.vicus import runner\n"
+        "runner._bridge_argv = lambda: [sys.executable, %r]\n"
+        "from aria.channels.vicus import PLUGIN\n"
+        "PLUGIN.run()\n" % (str(Path(__file__).parents[1] / "src"), str(FAKE)))
+    env = dict(os.environ)
+    proc = subprocess.Popen([sys.executable, "-c", code], env=env)
+    sock = vicus.runner.socket_path()
+    assert _wait(lambda: sock.exists(), 15)
+    time.sleep(0.5)
+    proc.send_signal(signal.SIGTERM)
+    assert proc.wait(15) == 0
+    assert not sock.exists()
+    assert any(c["type"] == "shutdown" for c in vicus.commands())

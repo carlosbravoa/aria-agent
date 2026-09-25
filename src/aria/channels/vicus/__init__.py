@@ -58,9 +58,16 @@ class VicusChannel(ChannelPlugin):
     # ── Lifecycle ─────────────────────────────────────────────────────────────
 
     def run(self) -> None:
+        import signal
         import threading
         from aria.channels.vicus import runner
-        runner.serve(threading.Event(), service=True)
+        stop = threading.Event()
+        # systemd stops the unit with SIGTERM: stop gracefully (the bridge
+        # saves its state, sessions close, the push socket is removed) rather
+        # than dying mid-cleanup.
+        if threading.current_thread() is threading.main_thread():
+            signal.signal(signal.SIGTERM, lambda *_: stop.set())
+        runner.serve(stop, service=True)
 
     def start(self, stop) -> None:
         from aria.channels.vicus import runner
