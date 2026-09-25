@@ -131,8 +131,10 @@ AGENT_NAME=Aria
 # Directory of user channel plugins (*.py drop-ins, see docs/channel-plugins.md)
 # ARIA_CHANNELS_DIR=~/.aria/channels
 # Run mode per channel: service (default — a background systemd unit, always
-# online) or attached (online only while the `aria` CLI is open; toggle with
-# /remote). Telegram supports attached mode; WhatsApp is service-only.
+# online), attached (online only while the `aria` CLI is open; toggle with
+# /remote) or control (attached, and your phone drives the terminal's own
+# session — /remote control|release). Telegram supports attached/control;
+# WhatsApp is service-only.
 # ARIA_CHANNEL_MODE_TELEGRAM=attached
 
 # ── Inbound attachments ──────────────────────────────────────────────

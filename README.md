@@ -530,6 +530,7 @@ aria-install                                             # select it, configure,
 | `ARIA_NOTIFY_CHANNEL=webhook` | Where pushes go outside a conversation. Default: Telegram, when enabled. |
 | `ARIA_CHANNELS_DIR` | Plugin directory. Default `~/.aria/channels`. |
 | `ARIA_CHANNEL_MODE_TELEGRAM=attached` | Telegram is online only while the `aria` CLI is open, with no background service (`/remote` in the REPL). |
+| `ARIA_CHANNEL_MODE_TELEGRAM=control` | The same, and your phone drives the terminal's own session (remote control). Toggle it with `/remote control` / `/remote release`. |
 
 Full guide: [`docs/channel-plugins.md`](docs/channel-plugins.md).
 

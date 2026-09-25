@@ -87,13 +87,13 @@ installs work unchanged. Follow-ups:
 - ✅ **Attached mode (A)** — done. `ARIA_CHANNEL_MODE_<NAME>=attached` runs a
   channel inside the `aria` CLI only while it's open, with `/remote on|off`. A
   run lock prevents double polling. Telegram supports it.
-- **Remote control of the REPL session (B)** — med / med. Phone messages would
-  drive the terminal's own conversation (same history, plan and cwd) instead of
-  a separate session. Needs:
-  - an async prompt with `patch_stdout`,
-  - a turn queue shared by keyboard and channel,
-  - mirrored output,
-  - confirmations routed to the channel.
+- ✅ **Remote control of the REPL session (B)** — done. `/remote control` or
+  `ARIA_CHANNEL_MODE_<NAME>=control`: phone messages run in the terminal's own
+  session, the prompt is interrupted with the typed text preserved, and local
+  turns are mirrored.
+- **Confirmations to the phone** — med / med. Remote-control turns use the
+  unattended shell policy. They could instead ask on the phone (Telegram inline
+  buttons), which ties in with the approval-buttons item above.
 - **WhatsApp attached mode** — low / med. It would spawn and supervise the Node
   bridge as a child process.
 - **Shared slash commands in the host** — med / low. `/clear`, `/model`,

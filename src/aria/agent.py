@@ -403,6 +403,7 @@ class Agent:
         # Maps a normalized tool-call signature → its last result, so a repeated
         # call can be answered from cache instead of re-executed (see _run_loop).
         self._last_result_for: dict[str, str] = {}
+        self._interrupted = False   # last chat() turn was cut short by Ctrl+C
         # Optional channel hooks (set per-turn by chat_yield). _response_cb streams
         # each user-facing response the moment it's produced (instead of batching
         # them all to the end); _activity_cb reports per-tool progress for a live
@@ -709,12 +710,14 @@ class Agent:
         self.ws.append_conversation_window("user", user_input, self.name)
         self._maybe_compact()
         self._trim_history()
+        self._interrupted = False
         try:
             self._run_loop()
         except KeyboardInterrupt:
             # Ctrl+C during a model call or tool execution. Strip any dangling
             # tool_calls so the next request stays well-formed and the session
             # remains usable for redirection.
+            self._interrupted = True
             try:
                 self._finalize_interrupt()
             except KeyboardInterrupt:
@@ -722,6 +725,25 @@ class Agent:
                 # escape with history half-stripped — _repair_history() heals
                 # whatever is left at the start of the next turn.
                 pass
+
+    def chat_mirrored(self, user_input: str, response_cb=None,
+                      activity_cb=None) -> list[str]:
+        """A normal chat() turn — terminal rendering, spinners and Ctrl+C all
+        unchanged — that ALSO streams each response to `response_cb` and
+        returns them (chat_yield's contract). Used by REPL remote control: a
+        turn from the phone shows in the terminal and replies on the phone."""
+        self._response_cb = response_cb
+        self._activity_cb = activity_cb
+        self._last_response = ""
+        self._responses     = []
+        try:
+            self.chat(user_input)
+        finally:
+            self._response_cb = None
+            self._activity_cb = None
+        if self._interrupted and not self._responses:
+            return ["(interrupted at the terminal)"]
+        return self._responses or [self._last_response or f"[{self.name}] No response generated."]
 
     def retry_last(self) -> str | None:
         """Rewind the last exchange (drop the last user turn and everything after

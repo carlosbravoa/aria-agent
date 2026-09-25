@@ -18,6 +18,8 @@ Run mode (per channel, ARIA_CHANNEL_MODE_<NAME>):
   attached  runs inside the `aria` CLI only while it's open — nothing in the
             background (plugin must set supports_attached). A per-channel run
             lock (runlock.py) guarantees the CLI and a service never both poll.
+  control   attached, and its messages drive the terminal's own session
+            (remote control — see control.py)
 
 Push target outside a conversation (supervisor results, reflection notices,
 `aria --notify`, the notify tool from the REPL):
@@ -178,7 +180,7 @@ def attached_channels() -> list[ChannelPlugin]:
     """Enabled channels configured to run inside the `aria` CLI."""
     out = []
     for p in enabled():
-        if p.mode != "attached":
+        if p.mode == "service":
             continue
         if not p.supports_attached:
             if p.name not in _warned:
@@ -192,8 +194,7 @@ def attached_channels() -> list[ChannelPlugin]:
 
 def service_channels() -> list[ChannelPlugin]:
     """Enabled channels that run as background services (get systemd units)."""
-    return [p for p in enabled()
-            if not (p.mode == "attached" and p.supports_attached)]
+    return [p for p in enabled() if not p.runs_attached]
 
 
 def push_channel() -> ChannelPlugin | None:

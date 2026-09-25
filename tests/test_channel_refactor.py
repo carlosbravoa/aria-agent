@@ -161,7 +161,7 @@ def _run_repl(monkeypatch, inputs):
     monkeypatch.setattr(M, "_print_banner", lambda agent: None)
     it = iter(inputs)
 
-    def fake_prompt(session):
+    def fake_prompt(session, waker=None):
         try:
             return next(it)
         except StopIteration:

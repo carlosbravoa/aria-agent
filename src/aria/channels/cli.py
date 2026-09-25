@@ -35,8 +35,8 @@ def main(argv: list[str] | None = None) -> int:
             flags = []
             if name in on:
                 flags.append("enabled")
-                if p.mode == "attached" and p.supports_attached:
-                    flags.append("attached")
+                if p.runs_attached:
+                    flags.append(p.mode)
             if push is not None and push.name == name:
                 flags.append("push default")
             if not p.builtin:
@@ -49,7 +49,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"aria-channel: unknown channel '{args.name}' "
               f"(available: {', '.join(sorted(channels.discover()))})", file=sys.stderr)
         return 2
-    if plugin.mode == "attached" and plugin.supports_attached:
+    if plugin.runs_attached:
         print(f"aria-channel: note — {plugin.name} is configured as attached "
               f"(ARIA_CHANNEL_MODE); running it as a service anyway", file=sys.stderr)
     # Built-ins with their own entry points take the run lock themselves;

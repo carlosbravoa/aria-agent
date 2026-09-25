@@ -117,10 +117,17 @@ class ChannelPlugin:
 
     @property
     def mode(self) -> str:
-        """"service" (default: a background systemd unit) or "attached" (runs
-        inside the `aria` CLI while it's open), from ARIA_CHANNEL_MODE_<NAME>."""
+        """From ARIA_CHANNEL_MODE_<NAME>:
+          "service"  (default) a background systemd unit
+          "attached" runs inside the `aria` CLI while it's open, own sessions
+          "control"  attached, and drives the terminal's own session"""
         raw = os.environ.get(mode_key(self.name), "").strip().lower()
-        return "attached" if raw == "attached" else "service"
+        return raw if raw in ("attached", "control") else "service"
+
+    @property
+    def runs_attached(self) -> bool:
+        """Configured for (and capable of) running inside the `aria` CLI."""
+        return self.supports_attached and self.mode in ("attached", "control")
 
     def is_configured(self) -> bool:
         """True when the settings this channel needs are present. Used for the

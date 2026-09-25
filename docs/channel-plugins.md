@@ -142,6 +142,45 @@ Plugin side: set `supports_attached = True` and implement `start(stop)`, a
 receive loop that runs in a background thread and returns once `stop` is set.
 It must not install signal handlers or exit the process.
 
+### Remote control: drive the terminal session from your phone
+
+With **control**, an attached channel's messages run in the terminal's own
+session instead of a separate one. That means the same history, plan, working
+directory and project context, so you continue from your phone exactly where
+the terminal left off.
+
+```ini
+ARIA_CHANNEL_MODE_TELEGRAM=control      # attached + controls the session at startup
+```
+```text
+  You › /remote control     # hand the session to the phone (attaches if needed)
+  You › /remote release     # phone chats get their own session again (stays online)
+  You › /remote off         # release and go offline
+```
+
+- **A phone message interrupts the prompt without losing what you were
+  typing.** The prompt comes back afterwards with your text restored. If you
+  were in the middle of a turn, the message waits until the turn finishes.
+- **Phone turns render in the terminal** as `📱 telegram › …`, and the replies
+  stream to the phone. Ctrl+C at the terminal interrupts them too.
+- **Your local turns are mirrored to the phone**: first `💻 <your message>`,
+  then each reply.
+- **Phone turns keep the channel's delivery context.** `notify` replies on the
+  phone, and `shell_run` uses the unattended policy, so nothing waits on a
+  terminal prompt nobody is at.
+- **Phone commands act on the terminal session.** Telegram's `/clear` and
+  `/model` apply to it, because they act on "the conversation" and the
+  conversation is the terminal's.
+- **Every allowed user of the channel can drive the session.** Keep the
+  allow-list to yourself.
+- **When you quit `aria`, a message still waiting gets a reply** saying the
+  session was closed.
+- **Without prompt_toolkit**, which only happens on a minimal Windows install,
+  phone messages run after you next press Enter.
+
+No plugin changes are needed. The host routes a controlled channel's messages
+to the terminal.
+
 ## Configuration
 
 | Setting | Meaning |
@@ -150,7 +189,7 @@ It must not install signal handlers or exit the process.
 | *(unset)* | Legacy mode: every channel whose settings are present is enabled. For example, `TELEGRAM_TOKEN` enables Telegram and `WHATSAPP_ALLOWED` enables WhatsApp. Pre-plugin installs keep working unchanged. |
 | `ARIA_NOTIFY_CHANNEL=mychat` | Where pushes go outside a conversation. Default: `telegram` when enabled, otherwise the first enabled channel that can push. |
 | `ARIA_CHANNELS_DIR` | Plugin directory. Default `~/.aria/channels`. |
-| `ARIA_CHANNEL_MODE_<NAME>` | `service` (default) or `attached`. |
+| `ARIA_CHANNEL_MODE_<NAME>` | `service` (default), `attached`, or `control` (attached + remote control of the terminal session). |
 
 ## Commands
 

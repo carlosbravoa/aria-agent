@@ -31,7 +31,14 @@ def handle_message(channel: str, user_id: str, text: str,
     """Run one agent turn for `user_id` on `channel`; return the replies (send
     each as a separate message). `response_cb` receives each reply as soon as
     it is produced and `activity_cb` per-tool progress lines, for channels that
-    stream. Blocking — call it from a worker thread in async transports."""
+    stream. Blocking — call it from a worker thread in async transports.
+
+    When this channel controls the terminal session (`/remote control`), the
+    message runs there instead of in the channel's own session."""
+    from aria.channels import control
+    if control.is_controlled(channel):
+        return control.submit(channel, str(user_id), text,
+                              response_cb=response_cb, activity_cb=activity_cb)
     from aria import channel as _sessions
     return _sessions.handle(channel, str(user_id), text,
                             response_cb=response_cb, activity_cb=activity_cb)
@@ -39,7 +46,11 @@ def handle_message(channel: str, user_id: str, text: str,
 
 def get_agent(channel: str, user_id: str):
     """The live Agent for this conversation (for channel-specific commands
-    such as /clear or /model)."""
+    such as /clear or /model) — the terminal's own Agent while the channel
+    controls it."""
+    from aria.channels import control
+    if control.is_controlled(channel) and control.agent() is not None:
+        return control.agent()
     from aria import channel as _sessions
     return _sessions.get_session(channel, str(user_id))
 

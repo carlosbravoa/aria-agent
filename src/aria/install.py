@@ -291,8 +291,12 @@ def _configure_channel(plugin, e, dry_run: bool) -> dict[str, str]:
         from aria.channels.base import mode_key
         attached = _ask_bool(
             f"  Run {_title(plugin)} only while `aria` is open (attached mode, no "
-            f"background service)?", default=(plugin.mode == "attached"))
-        out[mode_key(plugin.name)] = "attached" if attached else "service"
+            f"background service)?", default=(plugin.mode != "service"))
+        # "control" (remote control of the terminal session) is an attached
+        # flavour — keep it if that's what was configured.
+        out[mode_key(plugin.name)] = (
+            (plugin.mode if plugin.mode != "service" else "attached")
+            if attached else "service")
     for note in _run_install_hook(plugin, dry_run):
         _print_note(note)
     return out
@@ -589,8 +593,8 @@ def _collect_services(features: set[str] | None,
         # Make sure helper files are present/current before wiring the units
         # (a services-only rerun skips the config step that also runs this).
         _run_install_hook(plugin, dry_run)
-        if plugin.mode == "attached" and plugin.supports_attached:
-            info(f"• {name}: attached mode — no background service "
+        if plugin.runs_attached:
+            info(f"• {name}: {plugin.mode} mode — no background service "
                  f"(online while `aria` is open; /remote in the REPL)")
             _retire_units([s.unit for s in specs], dry_run)
             continue

@@ -227,7 +227,7 @@ _HELP_TEXT = """
 [cmd]/cost[/]        Show session token usage
 [cmd]/usage[/]       Show lifetime token usage (all sessions, by model/channel)
 [cmd]/trust[/] [meta][clear][/]  Show/clear auto-approved shell commands
-[cmd]/remote[/] [meta][on|off] [channel][/]  Channels attached to this session (online while Aria is open)
+[cmd]/remote[/] [meta][on|off|control|release] [channel][/]  Channels online while Aria is open; [cmd]control[/] = drive this session from the phone
 [cmd]/version[/]     Show version
 [cmd]/quit[/]        Exit  [meta](or Ctrl+D)[/]
 
@@ -332,7 +332,49 @@ def _print_banner(agent: Agent) -> None:
                   style="meta")
 
 
-def _prompt(session) -> str:
+_WAKE = "\x00aria-remote-wake\x00"   # returned by _prompt when a remote turn interrupts it
+
+
+class _Waker:
+    """Interrupts the prompt when a remote-control message arrives, keeping
+    whatever the user had typed so the next prompt restores it. `wake()` is
+    called from the channel's thread; the exit runs on prompt_toolkit's loop."""
+
+    def __init__(self, session) -> None:
+        self.session = session
+        self.saved = ""
+
+    def wake(self) -> None:
+        app = self.session.app
+        loop = getattr(app, "loop", None)
+        if app.is_running and loop is not None:
+            try:
+                loop.call_soon_threadsafe(self._exit)
+            except RuntimeError:
+                pass              # prompt just finished — the loop picks the turn up
+
+    def pre_run(self) -> None:
+        # A message queued between the loop's check and the prompt starting.
+        from aria.channels import control
+        if control.pending():
+            self._exit()
+
+    def _exit(self) -> None:
+        app = self.session.app
+        if not app.is_running:
+            return
+        try:
+            self.saved = self.session.default_buffer.text
+            app.exit(result=_WAKE)
+        except Exception:
+            pass                  # already exiting (user pressed Enter)
+
+    def take_saved(self) -> str:
+        text, self.saved = self.saved, ""
+        return text
+
+
+def _prompt(session, waker: _Waker | None = None) -> str:
     """
     Read a line of input. Uses the prompt_toolkit session when available
     (history, autosuggest, completion, multi-line); falls back to a plain
@@ -342,7 +384,11 @@ def _prompt(session) -> str:
     loop treats as "exit" and "cancel line" respectively.
     """
     if session is not None:
-        return session.prompt([("class:prompt", "  You › ")]).strip()
+        if waker is None:
+            return session.prompt([("class:prompt", "  You › ")]).strip()
+        result = session.prompt([("class:prompt", "  You › ")],
+                                default=waker.take_saved(), pre_run=waker.pre_run)
+        return result if result == _WAKE else result.strip()
 
     # Fallback: ANSI-coloured input(); \001..\002 mark non-printing width.
     CYAN_BOLD = "\001\033[1;36m\002"
@@ -365,6 +411,8 @@ def _start_attached_channels() -> None:
     for p in plugins:
         ok, msg = attached.start(p)
         console.print(f"  [{'success' if ok else 'meta'}]📱 {msg}[/]")
+        if ok and p.mode == "control":
+            _take_control(p.name)
 
 
 def _stop_attached_channels() -> None:
@@ -387,16 +435,20 @@ def _remote_command(rest: str) -> None:
     capable = [p for p in channels.discover().values()
                if p.supports_attached and p.is_configured()]
 
-    if action not in ("on", "off"):
+    if action not in ("on", "off", "control", "release"):
         if action:
-            console.print("  [error]Usage: /remote [on|off] [channel][/]")
+            console.print("  [error]Usage: /remote [on|off|control|release] [channel][/]")
             return
         if not capable and not running:
             console.print("  [meta]No configured channel can run attached "
                           "(e.g. set TELEGRAM_TOKEN and TELEGRAM_ALLOWED).[/]")
             return
+        from aria.channels import control
+        ctl = control.controlled()
         for p in capable:
             state = running.get(p.name, "offline")
+            if p.name in ctl:
+                state += ", controls this session"
             console.print(f"  [cmd]{p.name:10}[/] [meta]{state}  (mode: {p.mode})[/]")
         console.print(f"  [meta]Logs: {attached.log_path()}[/]")
         return
@@ -404,31 +456,115 @@ def _remote_command(rest: str) -> None:
     if len(args) > 1:
         name = args[1].lower()
     else:
-        pool = list(running) if action == "off" else [p.name for p in capable]
+        pool = (list(running) if action in ("off", "release")
+                else [p.name for p in capable])
         if len(pool) != 1:
             console.print(f"  [error]Which channel? /remote {action} <name>"
                           f"{' — ' + ', '.join(pool) if pool else ''}[/]")
             return
         name = pool[0]
 
-    if action == "off":
-        console.print(f"  [meta]📱 {attached.stop(name)}[/]")
+    from aria.channels import control
+    if action in ("off", "release"):
+        if name in control.controlled():
+            control.disable(name)
+            console.print(f"  [meta]📱 {name} no longer controls this session "
+                          f"(its chats get their own session again)[/]")
+        if action == "off":
+            console.print(f"  [meta]📱 {attached.stop(name)}[/]")
         return
     plugin = channels.get(name)
     if plugin is None or not plugin.is_configured():
         console.print(f"  [error]{name}: unknown or not configured[/]")
         return
-    ok, msg = attached.start(plugin)
-    console.print(f"  [{'success' if ok else 'error'}]📱 {msg}[/]")
+    if name not in running:
+        ok, msg = attached.start(plugin)
+        console.print(f"  [{'success' if ok else 'error'}]📱 {msg}[/]")
+        if not ok:
+            return
+    if action == "control":
+        _take_control(name)
+
+
+def _take_control(name: str) -> None:
+    from aria.channels import control
+    try:
+        control.enable(name)
+    except RuntimeError as exc:
+        console.print(f"  [error]📱 {exc}[/]")
+        return
+    console.print(f"  [success]📱 {name} now controls this session — messages from "
+                  f"your phone run here, and your replies are mirrored there[/]")
+
+
+def _run_remote_turn(agent: Agent, turn) -> None:
+    """Run a message that arrived from a controlling channel in THIS session:
+    render it like a local turn, stream replies back to the phone, and hand
+    the replies to the waiting channel thread."""
+    from rich.markup import escape
+    from aria import context
+    console.print(f"\n  [cmd]📱 {turn.channel}[/] [meta]›[/] {escape(turn.text)}")
+    token = context.set_active(turn.channel, turn.user_id)
+    replies: list[str] = []
+    try:
+        replies = agent.chat_mirrored(turn.text, response_cb=turn.response_cb,
+                                      activity_cb=turn.activity_cb)
+    except KeyboardInterrupt:
+        console.print("\n  [meta](interrupted)[/]")
+        replies = ["(interrupted at the terminal)"]
+    except Exception as exc:
+        console.print(f"\n  [error]⚠ Unexpected error: {exc}[/]")
+        replies = [f"Sorry, something went wrong: {exc}"]
+    finally:
+        context.reset(token)
+        turn.finish(replies)
+
+
+def _mirror_to_channels(text: str) -> None:
+    """Send `text` to every controlling channel (the last user who wrote from
+    it, else its allow-list). Background thread: the REPL never waits on it."""
+    import threading
+    from aria import channels
+    from aria.channels import control
+    targets = control.controlled()
+    if not targets:
+        return
+
+    def _send() -> None:
+        for name, user in targets.items():
+            plugin = channels.get(name)
+            if plugin is None or not plugin.supports_push:
+                continue
+            try:
+                plugin.send(text, to=user)
+            except Exception:
+                pass          # best effort — the terminal is the primary surface
+
+    threading.Thread(target=_send, daemon=True, name="aria-remote-mirror").start()
+
+
+def _chat_local(agent: Agent, text: str) -> None:
+    """A turn typed at the terminal. While a channel controls the session, the
+    phone sees it too: the message, then each reply as it's produced."""
+    from aria.channels import control
+    if not control.controlled():
+        agent.chat(text)
+        return
+    _mirror_to_channels(f"💻 {text}")
+    agent.chat_mirrored(text, response_cb=_mirror_to_channels)
 
 
 def repl(agent: Agent) -> None:
+    from aria.channels import control
     session = _make_prompt_session(agent)
+    waker = _Waker(session) if session is not None else None
+    control.attach_repl(agent, waker.wake if waker is not None else None)
     _print_banner(agent)
     _start_attached_channels()
     try:
-        _repl_loop(agent, session)
+        _repl_loop(agent, session, waker)
     finally:
+        control.detach_repl()
         _stop_attached_channels()
 
     # Summarise and save session on exit — always, even after errors
@@ -440,10 +576,15 @@ def repl(agent: Agent) -> None:
         console.print("[meta]skipped.[/]")
 
 
-def _repl_loop(agent: Agent, session) -> None:
+def _repl_loop(agent: Agent, session, waker: _Waker | None = None) -> None:
+    from aria.channels import control
     while True:
+        turn = control.take()
+        if turn is not None:
+            _run_remote_turn(agent, turn)
+            continue
         try:
-            user = _prompt(session)
+            user = _prompt(session, waker)
         except EOFError:
             console.print("\n  [meta]Bye.[/]")
             break
@@ -452,7 +593,7 @@ def _repl_loop(agent: Agent, session) -> None:
             console.print()
             continue
 
-        if not user:
+        if user == _WAKE or not user:
             continue
 
         # `!cmd` → run a shell command directly, no LLM, no tokens.
@@ -608,7 +749,7 @@ def _repl_loop(agent: Agent, session) -> None:
 
         else:
             try:
-                agent.chat(_expand_mentions(user))
+                _chat_local(agent, _expand_mentions(user))
             except KeyboardInterrupt:
                 # Ctrl+C mid-response — cancel this turn, keep the session
                 console.print("\n  [meta](interrupted)[/]")
