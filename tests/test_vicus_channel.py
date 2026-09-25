@@ -252,12 +252,13 @@ def test_service_stops_gracefully_on_sigterm(vicus, monkeypatch, tmp_path):
     import os
     import signal
     import subprocess
+    src = str(Path(__file__).parents[1] / "src")
     code = (
-        "import sys; sys.path.insert(0, %r)\n"
+        f"import sys; sys.path.insert(0, {src!r})\n"
         "from aria.channels.vicus import runner\n"
-        "runner._bridge_argv = lambda: [sys.executable, %r]\n"
+        f"runner._bridge_argv = lambda: [sys.executable, {str(FAKE)!r}]\n"
         "from aria.channels.vicus import PLUGIN\n"
-        "PLUGIN.run()\n" % (str(Path(__file__).parents[1] / "src"), str(FAKE)))
+        "PLUGIN.run()\n")
     env = dict(os.environ)
     proc = subprocess.Popen([sys.executable, "-c", code], env=env)
     sock = vicus.runner.socket_path()
