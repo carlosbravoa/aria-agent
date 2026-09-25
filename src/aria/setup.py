@@ -150,6 +150,16 @@ AGENT_NAME=Aria
 # Largest WhatsApp attachment accepted/sent (MB)
 # ARIA_WA_MAX_MB=16
 
+# ── Vicus (end-to-end-encrypted messenger; see vicus/README.md) ─────────
+# Aria uses its OWN Vicus account and a built Vicus checkout.
+# VICUS_SITE=https://vicus.example.org
+# VICUS_EMAIL=aria@example.org
+# VICUS_PASSWORD=
+# VICUS_ALLOWED=you@example.org            # accounts Aria answers
+# VICUS_SOURCE_DIR=~/src/vicus
+# VICUS_GROUP_REPLIES=mention              # groups: mention (default) | all
+# ARIA_CHANNEL_MODE_VICUS=attached         # optional: only while `aria` is open
+
 # ── Inbound attachments ──────────────────────────────────────────────
 # Files sent over a channel are saved under <workspace>/inbox/ and pruned:
 # first anything older than KEEP_DAYS, then oldest-first past MAX_MB.

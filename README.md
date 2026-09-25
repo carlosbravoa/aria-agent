@@ -538,6 +538,25 @@ usual "may I access this?" approval flow first.
 
 ---
 
+## Vicus
+
+Aria can take part in [Vicus](https://github.com/carlosbravoa/vicus), the
+end-to-end-encrypted MLS messenger, as its own account. People message it like
+any contact; in group conversations it answers when mentioned (`@Aria …`).
+
+It runs a small Node sidecar (`vicus/bridge.mjs`) that drives the Vicus
+reference client. **No Vicus code ships with Aria**: point `VICUS_SOURCE_DIR`
+at a Vicus checkout you've built (client + the MLS crate for Node; see
+[`vicus/README.md`](vicus/README.md)). Then add the `VICUS_*` settings from the
+template (or run `aria-install` and select Vicus) and run `aria-channel vicus`,
+or use attached mode (`ARIA_CHANNEL_MODE_VICUS=attached` / `control`).
+
+Device state (the MLS keys) lives in `~/.aria/vicus/`. Keep it private and out
+of backups: a device that loses it has to rejoin every conversation and can't
+read earlier messages.
+
+---
+
 ## Custom channels
 
 Telegram and WhatsApp are built-in **channel plugins**. You can add your own

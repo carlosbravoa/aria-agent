@@ -1,0 +1,18 @@
+{
+  "name": "aria-vicus-bridge",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Vicus (MLS end-to-end-encrypted messenger) bridge for the Aria agent",
+  "type": "module",
+  "main": "bridge.mjs",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node bridge.mjs",
+    "test": "node --test test/"
+  },
+  "dependencies": {
+    "amazon-cognito-identity-js": "^6.3.12"
+  }
+}

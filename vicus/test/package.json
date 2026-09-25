@@ -1,0 +1,6 @@
+{
+  "private": true,
+  "type": "module",
+  "main": "bridge.test.mjs",
+  "//": "`main` lets `node --test vicus/test/` resolve the directory to the test file on Node >= 21, where --test arguments are globs rather than directories."
+}

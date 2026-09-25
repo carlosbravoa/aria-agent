@@ -126,6 +126,10 @@ installs work unchanged. Follow-ups:
   - Add multi-message replies (Telegram already sends one message per
     response).
   - Add attachment support, as on Telegram.
+- ✅ **4.12** **Vicus channel** — built: a Node sidecar driving the Vicus
+  reference client (loaded from a user's checkout), text and files both ways,
+  attached/control modes, approvals, `/stop`. **Awaiting a live test** against a
+  deployment with a bot account.
 - **4.11** **Streaming drafts on Telegram** — med / med. Edit a draft message as text
   arrives. This needs streaming model calls, which are currently always
   non-streaming.
