@@ -717,6 +717,30 @@ export function createBridge(deps) {
     }
   }
 
+  /** Deliver via `deliver(convId)` to the one-to-one conversation with each
+   *  account — never a group; accounts without one are skipped. */
+  async function toDirects(list, deliver, what) {
+    const accounts = [...new Set((Array.isArray(list) ? list : []).map(normAccount).filter(Boolean))];
+    const reached = [];
+    const skipped = [];
+    const failed = [];
+    for (const acct of accounts) {
+      if (acct === account) { skipped.push(acct); continue; }
+      const convId = directWith(acct);
+      if (!convId) { skipped.push(acct); continue; }
+      const r = await deliver(convId);
+      if (r.ok) reached.push(acct);
+      else failed.push({ account: acct, error: r.error, ...(r.queued ? { queued: true } : {}) });
+    }
+    const body = { ok: reached.length > 0, reached, skipped, failed };
+    if (!reached.length) {
+      body.error = accounts.length
+        ? 'no listed account could be reached (a one-to-one conversation with the bot is needed)'
+        : `${what} needs accounts`;
+    }
+    return body;
+  }
+
   async function runCommand(cmd) {
     const reqId = cmd.reqId;
     const result = (body) => {
@@ -747,49 +771,36 @@ export function createBridge(deps) {
           return result(await sendText(cmd.convId, cmd.text));
         }
         case 'sendfile': {
-          if (typeof cmd.convId !== 'string' || typeof cmd.path !== 'string') {
-            return result({ ok: false, error: 'sendfile needs convId and path' });
+          const broadcast = cmd.convId === undefined && Array.isArray(cmd.accounts);
+          if ((typeof cmd.convId !== 'string' && !broadcast) || typeof cmd.path !== 'string') {
+            return result({ ok: false, error: 'sendfile needs convId (or accounts) and path' });
           }
-          if (!holds(cmd.convId)) return result({ ok: false, error: `not a member of conversation ${cmd.convId}` });
+          if (!broadcast && !holds(cmd.convId)) return result({ ok: false, error: `not a member of conversation ${cmd.convId}` });
           let info;
           try { info = statSync(cmd.path); } catch (err) { return result({ ok: false, error: `cannot read ${cmd.path}: ${errText(err)}` }); }
           if (!info.isFile()) return result({ ok: false, error: `${cmd.path} is not a file` });
           const mime = cmd.mime || 'application/octet-stream';
-          const bytes = typeof fsp.openAsBlob === 'function'
-            ? await fsp.openAsBlob(cmd.path, { type: mime })
-            : new Uint8Array(readFileSync(cmd.path));
-          try {
-            const { seq } = await client.sendFile(
-              cmd.convId,
-              { name: cmd.name || basename(cmd.path), mime, bytes },
-              cmd.caption || undefined,
-            );
-            return result({ ok: true, seq });
-          } catch (err) {
-            return result({ ok: false, error: errText(err) });
-          }
+          const sendFileTo = async (convId) => {
+            const bytes = typeof fsp.openAsBlob === 'function'
+              ? await fsp.openAsBlob(cmd.path, { type: mime })
+              : new Uint8Array(readFileSync(cmd.path));
+            try {
+              const { seq } = await client.sendFile(
+                convId,
+                { name: cmd.name || basename(cmd.path), mime, bytes },
+                cmd.caption || undefined,
+              );
+              return { ok: true, seq };
+            } catch (err) {
+              return { ok: false, error: errText(err) };
+            }
+          };
+          if (!broadcast) return result(await sendFileTo(cmd.convId));
+          return result(await toDirects(cmd.accounts, sendFileTo, 'sendfile'));
         }
         case 'notify': {
-          const accounts = [...new Set((Array.isArray(cmd.accounts) ? cmd.accounts : []).map(normAccount).filter(Boolean))];
           if (typeof cmd.text !== 'string' || !cmd.text) return result({ ok: false, error: 'notify needs text' });
-          const reached = [];
-          const skipped = [];
-          const failed = [];
-          for (const acct of accounts) {
-            if (acct === account) { skipped.push(acct); continue; }
-            const convId = directWith(acct);
-            if (!convId) { skipped.push(acct); continue; }
-            const r = await sendText(convId, cmd.text);
-            if (r.ok) reached.push(acct);
-            else failed.push({ account: acct, error: r.error, ...(r.queued ? { queued: true } : {}) });
-          }
-          const body = { ok: reached.length > 0, reached, skipped, failed };
-          if (!reached.length) {
-            body.error = accounts.length
-              ? 'no listed account could be reached (a one-to-one conversation with the bot is needed)'
-              : 'notify needs accounts';
-          }
-          return result(body);
+          return result(await toDirects(cmd.accounts, (convId) => sendText(convId, cmd.text), 'notify'));
         }
         default:
           return result({ ok: false, error: `unknown command ${JSON.stringify(cmd.type)}` });

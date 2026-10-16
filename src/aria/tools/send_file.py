@@ -13,7 +13,8 @@ turn belongs to (aria.context), in that conversation. With no active channel —
 supervisor tasks, cron, `aria --notify` — it goes to channels.push_channel()
 (Telegram by default), which broadcasts to its allow-list. Only channels whose
 plugin sets supports_files can deliver files; others get a refusal naming the
-path so the model can tell the user where the file is.
+path so the model can tell the user where the file is. An explicit `channel`
+argument picks that channel instead (same rules as notify).
 """
 
 from __future__ import annotations
@@ -22,11 +23,13 @@ DEFINITION = {
     "name": "send_file",
     "description": (
         "Send a file from disk to the user as a document attachment they can "
-        "download (on channels that support files: Telegram, WhatsApp). Use when the user asks you to send, "
+        "download, on a messaging channel that supports files (e.g. Vicus, "
+        "Telegram, WhatsApp). Use when the user asks you to send, "
         "share, or deliver an actual file — a report, an export, a log, a "
         "generated document, a photo. The file must already exist: create it "
         "first with file_access or shell_run, then send it. For plain text "
-        "answers just reply normally instead of sending a file."
+        "answers just reply normally instead of sending a file. Set `channel` "
+        "when the user names one (e.g. 'send it to me on Vicus')."
     ),
     "parameters": {
         "type": "object",
@@ -40,6 +43,14 @@ DEFINITION = {
                 "description": (
                     "Optional short message shown with the file "
                     "(truncated at ~1000 characters)."
+                ),
+            },
+            "channel": {
+                "type": "string",
+                "description": (
+                    "Optional channel name to send on, e.g. 'vicus', 'telegram', "
+                    "'whatsapp'. Omit to use the current conversation's channel "
+                    "or the default notification channel."
                 ),
             },
         },
@@ -84,8 +95,17 @@ def execute(args: dict) -> str:
                     f"(e.g. with shell_run) and send the archive.")
 
         active = context.current()
-        plugin = channels.get(active.channel) if active else channels.push_channel()
-        target = active.channel if active else (plugin.name if plugin else "")
+        wanted = (args.get("channel") or "").strip().lower()
+        if wanted:
+            plugin = channels.get(wanted)
+            if plugin is None:
+                from aria.tools.notify import unknown_channel
+                names = [p.name for p in channels.enabled() if p.supports_files]
+                return unknown_channel("send_file", wanted, names) + f" The file is at {path}."
+            target = wanted
+        else:
+            plugin = channels.get(active.channel) if active else channels.push_channel()
+            target = active.channel if active else (plugin.name if plugin else "")
         if plugin is None or not plugin.supports_files:
             capable = [_title(p) for p in channels.discover().values() if p.supports_files]
             where = ", ".join(capable) or "no channel"
@@ -94,7 +114,10 @@ def execute(args: dict) -> str:
 
         name = plugin.send_file(path, caption=caption)
         size = path.stat().st_size
-        return f"[send_file] Sent {name} ({size / 1024:.0f} KB)."
+        from aria.channels import autostart
+        started = autostart.take_note()
+        return (f"[send_file] Sent {name} ({size / 1024:.0f} KB)."
+                + (f" ({started})" if started else ""))
 
     except RuntimeError as e:
         return f"[send_file error] {e}"

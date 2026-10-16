@@ -410,7 +410,9 @@ def _handle_socket_client(conn: socket.socket, bridge_ref: dict) -> None:
                 if not chunk:
                     break
                 data += chunk
-            req = json.loads(data.decode() or "{}")
+            if not data.strip():
+                return                        # online() probe: connect + close
+            req = json.loads(data.decode())
             # A push can land while the bridge is (re)starting: give it a moment.
             deadline = time.monotonic() + 30
             bridge = bridge_ref.get("bridge")
@@ -426,6 +428,24 @@ def _handle_socket_client(conn: socket.socket, bridge_ref: dict) -> None:
         except Exception as exc:
             result = {"ok": False, "error": str(exc)}
         conn.sendall((json.dumps(result) + "\n").encode())
+
+
+def online() -> bool:
+    """Is a Vicus device running — in this process, or behind the socket?"""
+    with _active_lock:
+        bridge = _active
+    if bridge is not None and bridge.alive():
+        return True
+    path = socket_path()
+    if not path.exists():
+        return False
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+        s.settimeout(2)
+        try:
+            s.connect(str(path))              # a crashed service leaves a dead file
+        except OSError:
+            return False
+    return True
 
 
 def _socket_request(req: dict) -> dict:
@@ -472,11 +492,21 @@ def request_send(text: str, to: str | None) -> None:
         raise RuntimeError(f"Vicus: {result.get('error') or 'send failed'}")
 
 
-def request_send_file(path: Path, caption: str, to: str) -> str:
+def request_send_file(path: Path, caption: str, to: str | None) -> str:
+    """Send to conversation `to`; None → the one-to-one conversation with each
+    allowed account (terminal, scheduled tasks)."""
     import mimetypes
     mime = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
-    result = _request({"type": "sendfile", "convId": to, "path": str(path),
-                       "name": path.name, "mime": mime, "caption": caption or None})
+    req: dict = {"type": "sendfile", "path": str(path), "name": path.name,
+                 "mime": mime, "caption": caption or None}
+    if to:
+        req["convId"] = to
+    else:
+        accounts = sorted(allowed())
+        if not accounts:
+            raise RuntimeError("VICUS_ALLOWED is empty — nobody to send the file to on Vicus")
+        req["accounts"] = accounts
+    result = _request(req)
     if not result.get("ok"):
         raise RuntimeError(f"Vicus: {result.get('error') or 'send failed'}")
     return path.name

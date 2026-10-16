@@ -1445,9 +1445,31 @@ class Agent:
                 if push is not None:
                     return (output.surface_note(push.name, push.output)
                             + " (This is a scheduled task: your answer is pushed there.)")
+            if self._is_terminal:
+                return self._channels_note()
         except Exception:
             pass
         return ""
+
+    @staticmethod
+    def _channels_note() -> str:
+        """Terminal turns: which messaging channels notify/send_file can reach,
+        so "send it to me on Vicus" works from here. Empty when none is enabled."""
+        from aria import channels
+        on = [p for p in channels.enabled() if p.supports_push]
+        if not on:
+            return ""
+        default = channels.push_channel()
+        lines = []
+        for p in on:
+            # "Vicus encrypted messenger  (needs Node.js …)" → "Vicus encrypted messenger"
+            what = (p.description or "").split("  (", 1)[0].strip()
+            mark = " (default)" if default and p.name == default.name else ""
+            lines.append(f"- `{p.name}`{mark}" + (f": {what}" if what else ""))
+        return ("## Messaging channels\nApps the user receives messages from you "
+                "on:\n" + "\n".join(lines) + "\nTo send them a message or a file "
+                "there (\"message me on …\", \"send it to my phone\"), use notify / "
+                "send_file, with `channel` set when they name one.")
 
     def _wire_schemas(self) -> list[dict]:
         """Tool schemas in `tools=` shape, with internal keys (`_module`,

@@ -293,6 +293,7 @@ TELEGRAM_ALLOWED=<your chat ID>
 # ARIA_FRICTION_MIN_CALLS=6        # flag high-friction turns to the user + friction log (0 off)
 # ARIA_FRICTION_REFLECT_MIN=3      # reflection diagnoses the friction log at N events per tool (0 off)
 # ARIA_CHANNEL_IDLE_MINUTES=60     # idle minutes before a channel session's window is trimmed
+# ARIA_CHANNEL_AUTOSTART=on        # start a down channel (service, else this aria window) to deliver a push
 # ARIA_OPSMEM_MAX_LINES=40         # operational memory cap (learn tool entries)
 # ARIA_WINDOW_MESSAGES=15          # exchanges kept in the rolling conversation window
 # ARIA_WINDOW_MSG_CHARS=300        # chars per message before truncation

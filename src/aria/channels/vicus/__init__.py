@@ -80,17 +80,33 @@ class VicusChannel(ChannelPlugin):
 
     # ── Outbound ──────────────────────────────────────────────────────────────
 
-    def send(self, text: str, to: str | None = None) -> None:
-        """`to` is a conversation id; None → the one-to-one conversation with
-        each allowed account."""
+    @staticmethod
+    def _conv(to: str | None) -> str | None:
+        """`to`, else the active Vicus turn's conversation, else None."""
+        if to:
+            return to
+        from aria import context
+        active = context.current()
+        return active.user_id if active and active.channel == "vicus" else None
+
+    def _ensure_online(self) -> None:
+        """Pushes need a running device: start the channel if it's down."""
+        from aria.channels import autostart
         from aria.channels.vicus import runner
-        runner.request_send(text, to)
+        autostart.ensure_online(self, runner.online)
+
+    def send(self, text: str, to: str | None = None) -> None:
+        """`to` is a conversation id; None → the active turn's conversation,
+        else the one-to-one conversation with each allowed account."""
+        from aria.channels.vicus import runner
+        self._ensure_online()
+        runner.request_send(text, self._conv(to))
 
     def send_file(self, path: Path, caption: str = "", to: str | None = None) -> str:
+        """Same targets as send()."""
         from aria.channels.vicus import runner
-        if not to:
-            raise RuntimeError("sending a file on Vicus needs a conversation")
-        return runner.request_send_file(Path(path), caption, to)
+        self._ensure_online()
+        return runner.request_send_file(Path(path), caption, self._conv(to))
 
     # ── Installation ──────────────────────────────────────────────────────────
 

@@ -13,6 +13,9 @@ Routing goes through the channel plugin registry (aria.channels):
     goes to channels.push_channel(): ARIA_NOTIFY_CHANNEL, else Telegram (the
     historical behaviour), else the first enabled channel that can push. The
     plugin broadcasts to its allow-list.
+  - an explicit `channel` argument ("send it to me on Vicus") picks that
+    channel instead. When it is the active turn's channel the reply still
+    lands in that conversation; any other channel broadcasts to its allow-list.
 
 The agent should use this tool when:
   - It finishes a long-running task and needs to report results
@@ -31,7 +34,8 @@ DEFINITION = {
         "channel of the current conversation (replies in place); outside a "
         "conversation it goes to the configured notification channel. "
         "Use this to deliver results of scheduled tasks, summaries, or any "
-        "output the user should receive as a notification."
+        "output the user should receive as a notification. Set `channel` when "
+        "the user names one (e.g. 'message me on Vicus')."
     ),
     "parameters": {
         "type": "object",
@@ -39,6 +43,14 @@ DEFINITION = {
             "message": {
                 "type": "string",
                 "description": "The message text to send. Keep it concise and human-readable.",
+            },
+            "channel": {
+                "type": "string",
+                "description": (
+                    "Optional channel name to send on, e.g. 'vicus', 'telegram', "
+                    "'whatsapp'. Omit to use the current conversation's channel "
+                    "or the default notification channel."
+                ),
             },
         },
         "required": ["message"],
@@ -55,6 +67,17 @@ def _route() -> str | None:
         return active.channel
     plugin = channels.push_channel()
     return plugin.name if plugin else None
+
+
+def available() -> list[str]:
+    """Names of the enabled channels that can push, for error messages."""
+    from aria import channels
+    return [p.name for p in channels.enabled() if p.supports_push]
+
+
+def unknown_channel(tag: str, name: str, names: list[str]) -> str:
+    return (f"[{tag}] No channel named '{name}'. Available: "
+            f"{', '.join(names) or 'none — enable one with ARIA_CHANNELS'}.")
 
 
 def _not_wired(channel: str) -> str:
@@ -75,7 +98,14 @@ def execute(args: dict) -> str:
         config.load()
 
         active = context.current()
-        if active:
+        wanted = (args.get("channel") or "").strip().lower()
+        if wanted:
+            plugin = channels.get(wanted)
+            if plugin is None:
+                return unknown_channel("notify error", wanted, available())
+            if not plugin.supports_push:
+                return _not_wired(wanted)
+        elif active:
             # Reply on the channel the user is talking on — never misroute.
             plugin = channels.get(active.channel)
             if plugin is None or not plugin.supports_push:
@@ -95,7 +125,9 @@ def execute(args: dict) -> str:
         # broadcasts to its allow-list outside a channel.
         from aria.channels.output import convert
         plugin.send(convert(message, plugin.output), to=None)
-        return "[notify] Message sent."
+        from aria.channels import autostart
+        started = autostart.take_note()
+        return "[notify] Message sent." + (f" ({started})" if started else "")
     except RuntimeError as e:
         return f"[notify error] {e}"
     except Exception as e:

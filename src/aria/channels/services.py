@@ -146,6 +146,12 @@ def missing_settings(name: str) -> list[str]:
     return _missing_settings(_plugin(name))
 
 
+def installed(name: str) -> bool:
+    """A systemd unit for the channel exists (enabled or not)."""
+    p = _plugin(name)
+    return _systemd() and (_unit_dir() / f"{p.services()[0].unit}.service").exists()
+
+
 def running_in_background(name: str) -> bool:
     p = _plugin(name)
     unit = p.services()[0].unit

@@ -268,3 +268,165 @@ def test_service_stops_gracefully_on_sigterm(vicus, monkeypatch, tmp_path):
     assert proc.wait(15) == 0
     assert not sock.exists()
     assert any(c["type"] == "shutdown" for c in vicus.commands())
+
+
+# ── Reaching Vicus from the terminal (notify / send_file `channel`) ──────────
+
+def _ready(vicus):
+    vicus.start()
+    assert _wait(lambda: vicus.runner._active is not None and vicus.runner._active.ready.is_set())
+
+
+def test_terminal_notify_on_vicus_by_name(vicus, monkeypatch):
+    from aria.tools import notify
+    monkeypatch.setenv("TELEGRAM_TOKEN", "x")          # telegram would be the default
+    _ready(vicus)
+    assert notify.execute({"message": "hi from the terminal", "channel": "Vicus"}) \
+        == "[notify] Message sent."
+    n = next(c for c in vicus.commands() if c["type"] == "notify")
+    assert n["accounts"] == ["ana@example.org", "carlos@example.org"]
+    assert n["text"] == "hi from the terminal"
+
+
+def test_terminal_send_file_on_vicus_goes_to_the_allowed_accounts(vicus, minimal_env):
+    from aria.tools import send_file
+    _ready(vicus)
+    p = minimal_env / "report.txt"
+    minimal_env.mkdir(parents=True, exist_ok=True)
+    p.write_text("body")
+    out = send_file.execute({"path": str(p), "caption": "here", "channel": "vicus"})
+    assert out.startswith("[send_file] Sent report.txt"), out
+    f = next(c for c in vicus.commands() if c["type"] == "sendfile")
+    assert "convId" not in f
+    assert f["accounts"] == ["ana@example.org", "carlos@example.org"]
+    assert f["caption"] == "here"
+
+
+def test_vicus_turn_replies_in_its_conversation(vicus, minimal_env):
+    """notify/send_file during a Vicus turn stay in that conversation (a group
+    turn must not broadcast into the one-to-one chats)."""
+    from aria import context
+    from aria.tools import notify, send_file
+    _ready(vicus)
+    p = minimal_env / "a.txt"
+    minimal_env.mkdir(parents=True, exist_ok=True)
+    p.write_text("x")
+    token = context.set_active("vicus", "g7")
+    try:
+        assert notify.execute({"message": "done"}) == "[notify] Message sent."
+        assert send_file.execute({"path": str(p)}).startswith("[send_file] Sent")
+    finally:
+        context.reset(token)
+    cmds = vicus.commands()
+    assert {"type": "send", "convId": "g7"}.items() <= next(
+        c for c in cmds if c["type"] == "send").items()
+    assert next(c for c in cmds if c["type"] == "sendfile")["convId"] == "g7"
+    assert not [c for c in cmds if c["type"] == "notify"]
+
+
+def test_unknown_channel_lists_the_available_ones(minimal_env, monkeypatch):
+    from aria.tools import notify, send_file
+    monkeypatch.setenv("ARIA_CHANNELS", "vicus")
+    out = notify.execute({"message": "x", "channel": "signal"})
+    assert "No channel named 'signal'" in out and "vicus" in out
+    p = minimal_env / "b.txt"
+    minimal_env.mkdir(parents=True, exist_ok=True)
+    p.write_text("x")
+    out = send_file.execute({"path": str(p), "channel": "signal"})
+    assert "vicus" in out and str(p) in out
+
+
+def test_terminal_turn_lists_the_reachable_channels(minimal_env, monkeypatch):
+    from aria.agent import Agent
+    monkeypatch.setenv("ARIA_CHANNELS", "vicus")
+    note = Agent._channels_note()
+    assert "`vicus` (default): Vicus encrypted messenger" in note and "notify" in note
+    monkeypatch.setenv("ARIA_CHANNELS", "none")
+    assert Agent._channels_note() == ""
+
+
+def test_the_model_is_told_about_vicus_in_terminal_turns(minimal_env, monkeypatch, native_client):
+    """The bug report: the terminal agent said it didn't know what Vicus was."""
+    from aria.agent import Agent
+    monkeypatch.setenv("ARIA_CHANNELS", "vicus")
+    a = Agent(window_key="repl", terminal=True)
+    inner = native_client("ok")
+    seen = []
+    real = inner.chat.completions.create
+    inner.chat.completions.create = lambda **kw: seen.append(kw["messages"]) or real(**kw)
+    a.client = inner
+    a._render_answer = lambda t: None
+    a.chat("message me on vicus")
+    trailing = seen[-1][-1]["content"]
+    assert "Messaging channels" in trailing and "Vicus" in trailing
+    assert "Messaging channels" not in seen[-1][0]["content"]   # cached prefix untouched
+
+
+# ── Auto-start: a push finds the channel down ────────────────────────────────
+
+@pytest.fixture
+def down(vicus, monkeypatch):
+    """Vicus configured but not running; no systemd unit installed."""
+    from aria.channels import attached, services
+    for k in ("VICUS_SITE", "VICUS_PASSWORD", "VICUS_SOURCE_DIR"):
+        monkeypatch.setenv(k, "x")
+    monkeypatch.setattr(services, "installed", lambda name: False)
+    yield vicus
+    attached.set_hosting(False)
+    attached.stop_all(timeout=5)
+
+
+def test_push_from_the_repl_attaches_a_down_channel(down):
+    from aria.channels import attached
+    from aria.tools import notify
+    attached.set_hosting(True)
+    assert not down.runner.online()
+    out = notify.execute({"message": "wake up", "channel": "vicus"})
+    assert out.startswith("[notify] Message sent."), out
+    assert "was offline" in out and "this aria window" in out
+    assert dict(attached.status()).get("vicus") == "online"
+    assert any(c["type"] == "notify" for c in down.commands())
+
+
+def test_push_starts_an_installed_service(down, monkeypatch):
+    from aria.channels import services
+    from aria.tools import notify
+    started = []
+
+    def resume(name):                       # "the service" = a runner thread here
+        started.append(name)
+        down.start()
+        return [f"{name}: active"]
+
+    monkeypatch.setattr(services, "installed", lambda name: True)
+    monkeypatch.setattr(services, "resume", resume)
+    out = notify.execute({"message": "x", "channel": "vicus"})
+    assert started == ["vicus"]
+    assert "started its background service" in out, out
+
+
+def test_no_host_and_no_service_explains(down):
+    from aria.tools import notify
+    out = notify.execute({"message": "x", "channel": "vicus"})
+    assert "isn't running" in out and "/channel on vicus" in out
+
+
+def test_autostart_can_be_turned_off(down, monkeypatch):
+    from aria.channels import attached
+    from aria.tools import notify
+    attached.set_hosting(True)
+    monkeypatch.setenv("ARIA_CHANNEL_AUTOSTART", "off")
+    out = notify.execute({"message": "x", "channel": "vicus"})
+    assert "isn't running" in out
+    assert not attached.status()
+
+
+def test_online_probe_ignores_a_stale_socket_file(vicus):
+    import socket as so
+    path = vicus.runner.socket_path()
+    s = so.socket(so.AF_UNIX, so.SOCK_STREAM)
+    s.bind(str(path))
+    s.close()                                     # file left behind, nobody listening
+    assert path.exists() and not vicus.runner.online()
+    vicus.start()
+    assert _wait(vicus.runner.online)

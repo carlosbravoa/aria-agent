@@ -46,6 +46,18 @@ _running: dict[str, _Running] = {}
 _state_lock = threading.Lock()
 _log_handler: logging.Handler | None = None
 _saved_logger_state: dict[str, tuple[int, bool]] = {}
+_hosting = False        # this process is an interactive `aria` REPL
+
+
+def set_hosting(on: bool) -> None:
+    """The REPL says it's open: channels may be attached here on demand
+    (channels.autostart), not only by /channel."""
+    global _hosting
+    _hosting = on
+
+
+def hosting() -> bool:
+    return _hosting
 
 
 class _RedactingFormatter(logging.Formatter):

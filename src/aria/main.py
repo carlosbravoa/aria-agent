@@ -801,10 +801,13 @@ def repl(agent: Agent) -> None:
     waker = _Waker(session) if session is not None else None
     control.attach_repl(agent, waker.wake if waker is not None else None)
     _print_banner(agent)
+    from aria.channels import attached
+    attached.set_hosting(True)
     _start_attached_channels()
     try:
         _repl_loop(agent, session, waker)
     finally:
+        attached.set_hosting(False)
         control.detach_repl()
         _stop_attached_channels()
 

@@ -103,6 +103,10 @@ Commands:
   account and never creates a conversation. Its result is
   `{"ok","reached":[…],"skipped":[…],"failed":[{account,error}]}`. `ok` is
   false only if no account was reached.
+- `sendfile` with `accounts` instead of `convId` does the same for a file:
+  it goes to each listed account's one-to-one conversation, with the same
+  result shape as `notify`. Aria uses this to send a file from the terminal
+  or a scheduled task, when there is no conversation to reply in.
 - `shutdown`, EOF on stdin, SIGTERM and SIGINT all make the bridge save, close
   the connection and exit 0.
 

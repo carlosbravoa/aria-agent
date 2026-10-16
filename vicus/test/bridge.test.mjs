@@ -375,6 +375,29 @@ test('sendfile: sends the file with name, mime and caption; errors are results',
   await h.bridge.shutdown();
 });
 
+test('sendfile with accounts: one-to-one conversations only, like notify', async () => {
+  const h = await started();
+  const path = join(h.stateDir, 'report.txt');
+  writeFileSync(path, 'file body');
+  h.send({ type: 'sendfile', reqId: 'fa', accounts: ['ana@example.org', 'zed@example.org'], path, name: 'r.txt', mime: 'text/plain' });
+  const r1 = await h.waitFor((e) => e.reqId === 'fa');
+  assert.equal(r1.ok, true);
+  assert.deepEqual(r1.reached, ['ana@example.org']);
+  assert.deepEqual(r1.skipped, ['zed@example.org']);
+  assert.deepEqual(h.world.files.map((f) => f.convId), ['c1']);
+
+  h.send({ type: 'sendfile', reqId: 'fb', accounts: ['zed@example.org'], path, name: 'r.txt' });
+  const r2 = await h.waitFor((e) => e.reqId === 'fb');
+  assert.equal(r2.ok, false);
+  assert.ok(r2.error);
+
+  h.send({ type: 'sendfile', reqId: 'fc', path });
+  const r3 = await h.waitFor((e) => e.reqId === 'fc');
+  assert.equal(r3.ok, false);
+  assert.match(r3.error, /needs convId/);
+  await h.bridge.shutdown();
+});
+
 test('notify: only existing one-to-one conversations, never groups; ok:false if none', async () => {
   const h = await started();
   h.send({ type: 'notify', reqId: 'n1', accounts: ['Ana@Example.org', 'bob@example.org', 'zed@example.org'], text: 'ping' });

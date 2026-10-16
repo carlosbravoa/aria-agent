@@ -112,6 +112,9 @@ AGENT_NAME=Aria
 # ~/.aria/shell_allowlist.json (manage with /trust); it then runs without asking.
 # Minutes of inactivity before a Telegram/WhatsApp session is trimmed + dropped
 # ARIA_CHANNEL_IDLE_MINUTES=60
+# When a message/file must go out on a channel that's down (e.g. Vicus), start
+# it: its service if installed, else inside the open aria window (on/off)
+# ARIA_CHANNEL_AUTOSTART=on
 # Telegram: show a live tool-progress trail message while a turn runs (on/off)
 # ARIA_TELEGRAM_PROGRESS=on
 # Telegram: restart the bot if no getUpdates poll succeeds for N minutes
