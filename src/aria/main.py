@@ -407,6 +407,13 @@ def _prompt(session, waker: _Waker | None = None) -> str:
 _paused: set[str] = set()      # services this session paused; resumed on exit
 
 
+def _channel_problem(p) -> str:
+    try:
+        return p.problem()
+    except Exception:
+        return ""
+
+
 def _channel_state(p, here: dict, ctl: dict) -> str:
     """One plain-words line for a channel."""
     from aria.channels import services
@@ -417,6 +424,8 @@ def _channel_state(p, here: dict, ctl: dict) -> str:
         where = "online in this window"
         if not here[p.name].startswith("online"):
             where = f"stopped in this window: {here[p.name]}"
+        elif problem := _channel_problem(p):
+            where = f"running in this window but not working: {problem}"
         if p.name in ctl:
             where += " · controls this session"
         if p.name in _paused:
@@ -424,6 +433,9 @@ def _channel_state(p, here: dict, ctl: dict) -> str:
         return where
     try:
         if services.running_in_background(p.name):
+            if problem := _channel_problem(p):
+                return (f"running in the background but not working: {problem}"
+                        f"  → /channel logs {p.name}")
             return "online in the background"
     except Exception:
         pass

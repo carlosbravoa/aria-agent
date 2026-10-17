@@ -29,8 +29,9 @@ and build yourself.
   explains how to build it.
 - The bridge's own dependency (`amazon-cognito-identity-js`, for SRP sign-in).
   `aria-install` copies `bridge.mjs`, `package.json` and `package-lock.json` to
-  `~/.aria/vicus-bridge/` and tells you to run `npm ci` there. To install it by
-  hand, run `npm ci` in this directory.
+  `~/.aria/vicus-bridge/` and runs `npm ci` there (again after an update that
+  changes them). If npm is missing or fails, it says so; then run `npm ci` in
+  `~/.aria/vicus-bridge/` by hand.
 - A Vicus account for the bot that is already a member of a tenant. An admin
   invites it, and you sign in once on the web to set its password. If the
   account's token has no `tenantId`/`accountId` claims, the bridge stops with

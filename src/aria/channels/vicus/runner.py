@@ -43,6 +43,7 @@ _REQUEST_TIMEOUT = 180.0
 _IDLE_WORKER_SEC = 60.0
 
 _active: _Bridge | None = None          # the bridge running in THIS process
+_serving: dict | None = None             # serve()'s bridge state, while it runs here
 _active_lock = threading.Lock()
 
 
@@ -119,19 +120,31 @@ def _bridge_argv() -> list[str]:
     return [node, str(script)]
 
 
+def _bridge_env() -> dict:
+    """The bridge's environment. Paths are expanded here: Node doesn't
+    understand `~`, so `VICUS_SOURCE_DIR=~/vicus` would otherwise resolve
+    relative to the bridge's own directory and never be found."""
+    env = dict(os.environ)
+    env.setdefault("VICUS_STATE_DIR", str(state_dir()))
+    env.setdefault("VICUS_DISPLAY_NAME", display_name())
+    for key in ("VICUS_SOURCE_DIR", "VICUS_STATE_DIR"):
+        if env.get(key, "").strip():
+            env[key] = str(Path(env[key].strip()).expanduser())
+    return env
+
+
 class _Bridge:
     """One `node bridge.mjs` child and its stdio protocol."""
 
     def __init__(self, on_message) -> None:
         argv = _bridge_argv()
-        env = dict(os.environ)
-        env.setdefault("VICUS_STATE_DIR", str(state_dir()))
-        env.setdefault("VICUS_DISPLAY_NAME", display_name())
+        env = _bridge_env()
         self._on_message = on_message
         self._write_lock = threading.Lock()
         self._results: dict[str, tuple[threading.Event, dict]] = {}
         self.ready = threading.Event()
         self.fatal: str | None = None
+        self.last_log = ""                # its latest stderr line, for status
         self.info: dict = {}
         self.proc = subprocess.Popen(
             argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
@@ -201,6 +214,7 @@ class _Bridge:
         for line in self.proc.stderr:
             if line.strip():
                 log.info("vicus bridge: %s", line.rstrip())
+                self.last_log = line.strip().removeprefix("[vicus-bridge]").strip()
 
     # stdin: commands
     def _write(self, obj: dict) -> None:
@@ -419,14 +433,17 @@ def _handle_socket_client(conn: socket.socket, bridge_ref: dict) -> None:
             if not data.strip():
                 return                        # online() probe: connect + close
             req = json.loads(data.decode())
+            if req.get("type") == "status":
+                conn.sendall((json.dumps({"ok": True, "problem": _health(bridge_ref)}) + "\n").encode())
+                return
             # A push can land while the bridge is (re)starting: give it a moment.
+            # One that died waits out its backoff, so say why at once instead.
             deadline = time.monotonic() + 30
-            bridge = bridge_ref.get("bridge")
-            while (bridge is None or not bridge.ready.is_set()) and time.monotonic() < deadline:
+            while _starting(bridge_ref) and time.monotonic() < deadline:
                 time.sleep(0.1)
-                bridge = bridge_ref.get("bridge")
+            bridge = bridge_ref.get("bridge")
             if bridge is None or not bridge.alive() or bridge.fatal:
-                result = {"ok": False, "error": "the Vicus bridge isn't running"}
+                result = {"ok": False, "error": f"the Vicus bridge isn't running: {_health(bridge_ref)}"}
             elif req.get("type") not in ("send", "sendfile", "notify"):
                 result = {"ok": False, "error": "unknown request"}
             else:
@@ -434,6 +451,47 @@ def _handle_socket_client(conn: socket.socket, bridge_ref: dict) -> None:
         except Exception as exc:
             result = {"ok": False, "error": str(exc)}
         conn.sendall((json.dumps(result) + "\n").encode())
+
+
+def _starting(bridge_ref: dict) -> bool:
+    bridge = bridge_ref.get("bridge")
+    if bridge is None:
+        return not bridge_ref.get("error")
+    return bridge.alive() and not bridge.ready.is_set()
+
+
+def _health(bridge_ref: dict) -> str:
+    """Why the device isn't working ("" when it is)."""
+    bridge = bridge_ref.get("bridge")
+    if bridge is not None and bridge.alive() and not bridge.fatal:
+        if bridge.ready.is_set():
+            return ""
+        return "still signing in" + (f" (last: {bridge.last_log})" if bridge.last_log else "")
+    return bridge_ref.get("error") or "the Vicus bridge isn't running"
+
+
+def problem() -> str:
+    """Why a running Vicus channel isn't working — asked of the serving
+    process; "" when it works, or when nothing is serving."""
+    if _serving is not None:
+        return _health(_serving)
+    path = socket_path()
+    if not path.exists():
+        return ""
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+            s.settimeout(3)
+            s.connect(str(path))
+            s.sendall(b'{"type": "status"}\n')
+            data = b""
+            while not data.endswith(b"\n"):
+                chunk = s.recv(65536)
+                if not chunk:
+                    break
+                data += chunk
+        return str(json.loads(data.decode() or "{}").get("problem") or "")
+    except (OSError, ValueError):
+        return ""
 
 
 def online() -> bool:
@@ -524,12 +582,13 @@ def serve(stop: threading.Event, service: bool) -> None:
     """Run the channel until `stop` is set. A service keeps retrying after a
     configuration error (a crash-looping unit would trip the update rollback
     watchdog); attached mode raises it so /remote shows what's wrong."""
-    global _active
+    global _active, _serving
     lock = None
     if service:
         from aria.channels.runlock import hold_for_service
         lock = hold_for_service(CHANNEL, log)
-    bridge_ref: dict[str, Any] = {"bridge": None}
+    bridge_ref: dict[str, Any] = {"bridge": None, "error": ""}
+    _serving = bridge_ref
 
     def send(conv: str, text: str) -> None:
         bridge = bridge_ref["bridge"]
@@ -558,6 +617,7 @@ def serve(stop: threading.Event, service: bool) -> None:
                 if not service:
                     raise RuntimeError(str(exc)) from None
                 log.error("Vicus: %s — retrying in %.0f s", exc, _RESTART_MAX)
+                bridge_ref["error"] = f"{exc} — retrying in {_RESTART_MAX:.0f} s"
                 stop.wait(_RESTART_MAX)
                 continue
             bridge_ref["bridge"] = bridge
@@ -578,9 +638,13 @@ def serve(stop: threading.Event, service: bool) -> None:
                 delay = _RESTART_MIN           # it ran fine for a while
             log.warning("Vicus bridge exited (code %s) — restarting in %.0f s",
                         bridge.proc.returncode, delay)
+            why = bridge.fatal or (f"it exited (code {bridge.proc.returncode})"
+                                   + (f": {bridge.last_log}" if bridge.last_log else ""))
+            bridge_ref["error"] = f"{why} — retrying in {delay:.0f} s"
             stop.wait(delay)
             delay = min(delay * 2, _RESTART_MAX)
     finally:
+        _serving = None
         with _active_lock:
             if _active is bridge_ref["bridge"]:
                 _active = None

@@ -108,6 +108,10 @@ class VicusChannel(ChannelPlugin):
         self._ensure_online()
         return runner.request_send_file(Path(path), caption, self._conv(to))
 
+    def problem(self) -> str:
+        from aria.channels.vicus import runner
+        return runner.problem()
+
     # ── Installation ──────────────────────────────────────────────────────────
 
     def install(self, dry_run: bool = False) -> list[Note]:

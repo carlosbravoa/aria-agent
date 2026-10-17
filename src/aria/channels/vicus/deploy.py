@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import subprocess
 from pathlib import Path
 
 from aria.channels.base import Note
@@ -91,5 +92,24 @@ def install(dry_run: bool = False) -> list[Note]:
     else:
         notes.append(("info", "Vicus bridge files already up to date."))
     if package_changed or not (dest / "node_modules").exists():
-        notes.append(("warn" if package_changed else "info", f"Run: cd {dest} && npm ci"))
+        notes.append(_npm_ci(dest))
     return notes + checkout_notes()
+
+
+def _npm_ci(dest: Path) -> Note:
+    """Install the bridge's Node packages. Only printing "Run: npm ci" left
+    the bridge unable to sign in when the note was missed."""
+    by_hand = f"cd {dest} && npm ci"
+    npm = shutil.which("npm")
+    if npm is None:
+        return ("warn", f"npm not found — install Node.js 20+, then run: {by_hand}")
+    try:
+        r = subprocess.run([npm, "ci", "--omit=dev", "--no-audit", "--no-fund"], cwd=dest,
+                           capture_output=True, text=True, timeout=300)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return ("warn", f"npm ci failed ({exc}) — run: {by_hand}")
+    if r.returncode:
+        tail = (r.stderr or r.stdout).strip().splitlines()
+        why = tail[-1] if tail else f"exit {r.returncode}"
+        return ("warn", f"npm ci failed ({why}) — run: {by_hand}")
+    return ("ok", f"Installed the Vicus bridge's Node packages in {dest}")

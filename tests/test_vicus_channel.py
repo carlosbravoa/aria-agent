@@ -447,3 +447,94 @@ def test_online_probe_ignores_a_stale_socket_file(vicus):
     assert path.exists() and not vicus.runner.online()
     vicus.start()
     assert _wait(vicus.runner.online)
+
+
+def test_bridge_env_expands_home_in_paths(minimal_env, monkeypatch):
+    # Node doesn't expand `~`; an unexpanded VICUS_SOURCE_DIR made the bridge
+    # look under its own directory and die on every start.
+    from aria.channels.vicus import runner
+    monkeypatch.setenv("VICUS_SOURCE_DIR", "~/vicus")
+    monkeypatch.setenv("VICUS_STATE_DIR", "~/state")
+    env = runner._bridge_env()
+    assert env["VICUS_SOURCE_DIR"] == str(Path.home() / "vicus")
+    assert env["VICUS_STATE_DIR"] == str(Path.home() / "state")
+
+
+def test_a_service_whose_bridge_keeps_dying_says_why(vicus, monkeypatch):
+    # The unit stays "active" while the bridge dies on every start; status and
+    # pushes must carry the reason instead of a bare "isn't running".
+    from aria.channels import runlock
+    runner = vicus.runner
+    monkeypatch.setattr(runlock, "hold_for_service", lambda *a: None)
+    monkeypatch.setenv("FAKE_VICUS_FATAL", "Vicus build artefacts missing under VICUS_SOURCE_DIR")
+    stop = threading.Event()
+    t = threading.Thread(target=runner.serve, args=(stop, True), daemon=True)
+    t.start()
+    try:
+        assert _wait(lambda: "artefacts missing" in runner.problem())
+        assert "retrying in" in runner.problem()
+        monkeypatch.setattr(runner, "_serving", None)      # ask like another process
+        assert "artefacts missing" in runner.problem()
+        started = time.monotonic()
+        with pytest.raises(RuntimeError, match="artefacts missing"):
+            runner.request_send("x", "c1")
+        assert time.monotonic() - started < 10              # no 30 s wait for a dead bridge
+        from aria.channels import vicus as plugin
+        assert "artefacts missing" in plugin.PLUGIN.problem()
+    finally:
+        stop.set()
+        t.join(5)
+
+
+def test_a_working_channel_has_no_problem(vicus):
+    vicus.start()
+    assert _wait(lambda: vicus.runner.online() and vicus.runner.problem() == "")
+
+
+def test_installer_runs_npm_ci(minimal_env, monkeypatch, tmp_path):
+    import subprocess
+    from aria.channels.vicus import deploy
+    src = tmp_path / "src"
+    src.mkdir()
+    for name in ("bridge.mjs", "package.json", "package-lock.json"):
+        (src / name).write_text(name)
+    dest = tmp_path / "dest"
+    monkeypatch.setattr(deploy, "source_dir", lambda: src)
+    monkeypatch.setattr(deploy, "dest_dir", lambda: dest)
+    monkeypatch.setattr(deploy.shutil, "which", lambda name: f"/usr/bin/{name}")
+    calls = []
+
+    def fake_run(argv, cwd, **kw):
+        calls.append((argv, cwd))
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(deploy.subprocess, "run", fake_run)
+    notes = deploy.install()
+    assert calls and calls[0][0][1] == "ci" and calls[0][1] == dest
+    assert any(kind == "ok" and "Node packages" in text for kind, text in notes)
+
+    # up to date and installed → nothing to run
+    (dest / "node_modules").mkdir()
+    calls.clear()
+    deploy.install()
+    assert not calls
+
+    # a failure is reported with the command to run by hand
+    (dest / "package.json").write_text("changed")
+    monkeypatch.setattr(deploy.subprocess, "run", lambda argv, cwd, **kw:
+                        subprocess.CompletedProcess(argv, 1, "", "npm ERR! network down"))
+    texts = " | ".join(t for _, t in deploy.install())
+    assert "npm ERR! network down" in texts and "npm ci" in texts
+
+
+def test_channel_status_shows_a_background_problem(minimal_env, monkeypatch):
+    from aria import main
+    from aria.channels import services
+    from aria.channels import vicus as plugin
+    monkeypatch.setattr(services, "missing_settings", lambda name: [])
+    monkeypatch.setattr(services, "running_in_background", lambda name: True)
+    monkeypatch.setattr(type(plugin.PLUGIN), "problem", lambda self: "it exited (code 1)")
+    line = main._channel_state(plugin.PLUGIN, {}, {})
+    assert "not working: it exited (code 1)" in line and "/channel logs vicus" in line
+    monkeypatch.setattr(type(plugin.PLUGIN), "problem", lambda self: "")
+    assert main._channel_state(plugin.PLUGIN, {}, {}) == "online in the background"

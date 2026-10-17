@@ -167,6 +167,12 @@ class ChannelPlugin:
         """Deliver a file; return the name it was sent as."""
         raise NotImplementedError(f"channel '{self.name}' cannot send files")
 
+    def problem(self) -> str:
+        """Why a running channel isn't actually working ("" when it is, or
+        when that can't be told). A service can stay up while what it runs
+        keeps failing; this lets status say so."""
+        return ""
+
     @property
     def display_name(self) -> str:
         return self.title or self.name.capitalize()
