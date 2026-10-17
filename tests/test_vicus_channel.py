@@ -144,6 +144,23 @@ def test_approval_answers_are_instant(vicus, monkeypatch):
     assert [c["text"] for c in vicus.commands() if c["type"] == "send"] == ["✅ Approved."]
 
 
+def test_approval_answer_in_an_attachment_caption(vicus, monkeypatch, minimal_env):
+    """A "yes 1234" caption answers the approval at once; the file still
+    reaches the agent as a turn, without the answer as its caption."""
+    from aria.channels import host
+    monkeypatch.setattr(host, "answer_approval",
+                        lambda ch, conv, text: "✅ Approved." if text == "yes 1234" else None)
+    f = vicus.tmp / "incoming.pdf"
+    f.write_bytes(b"%PDF")
+    vicus.start([_msg(1, "yes 1234", attachment={"path": str(f), "name": "doc.pdf",
+                                                  "mime": "application/pdf", "size": 4})])
+    assert _wait(lambda: vicus.turns)
+    sends = [c["text"] for c in vicus.commands() if c["type"] == "send"]
+    assert sends[0] == "✅ Approved."
+    conv, text = vicus.turns[0]
+    assert "doc.pdf" in text and "yes 1234" not in text
+
+
 def test_attachment_moves_into_the_inbox(vicus, minimal_env):
     f = vicus.tmp / "incoming.jpg"
     f.write_bytes(b"\xff\xd8jpeg")

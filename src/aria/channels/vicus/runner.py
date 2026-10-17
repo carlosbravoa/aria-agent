@@ -277,6 +277,14 @@ class _Router:
                 self._ack(msg_id)
                 return
             text = stripped if stripped is not None else text
+        from aria.channels import host
+        answered = host.answer_approval(CHANNEL, conv, text)
+        if answered is not None:
+            self._reply(conv, answered)
+            if not ev.get("attachment"):
+                self._ack(msg_id)
+                return
+            text = ""                  # the caption was the answer; the file is still a turn
         if ev.get("attachment"):
             try:
                 text = _attachment_text(conv, ev["attachment"], text)
@@ -286,13 +294,11 @@ class _Router:
                 self._ack(msg_id)
                 return
         else:
-            from aria.channels import host
-            instant = host.answer_approval(CHANNEL, conv, text)
-            if instant is None:
-                from aria.channels import commands
-                parsed = commands.parse(text)
-                if parsed is not None and parsed[0] in commands.INSTANT:
-                    instant = host.run_command(CHANNEL, conv, text)
+            from aria.channels import commands
+            instant = None
+            parsed = commands.parse(text)
+            if parsed is not None and parsed[0] in commands.INSTANT:
+                instant = host.run_command(CHANNEL, conv, text)
             if instant is not None:
                 self._reply(conv, instant)
                 self._ack(msg_id)
