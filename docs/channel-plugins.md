@@ -72,7 +72,7 @@ PLUGIN = MyChat()
 | `send(text, to=None)` | for push | Deliver text. Without it, `notify` explains that the channel can't push. |
 | `send_file(path, caption, to)` + `supports_files = True` | no | Enables the `send_file` tool on this channel. |
 | `output = ChannelFormat(...)` | no | What your channel can show: `markdown="commonmark" \| "basic" \| "whatsapp" \| "plain"`, `tables`, `headings`, `long_reply_chars`, `surface`. The default is basic Markdown, no tables or headings, 3000 characters. |
-| `send_approval(code, summary, to, expires_min)` | no | How approval requests look. The default is a text message answered with `yes <code>`. |
+| `send_approval(code, summary, to, expires_min, grantable)` | no | How approval requests look. The default is a text message answered with `yes <code>` / `no <code>`, plus `task <code>` when `grantable`. Older plugins without the `grantable` parameter still work. |
 | `config_fields` | no | Settings the installer prompts for. By default the channel counts as "configured" when all its `required` fields are set. |
 | `legacy_keys` | no | Env keys that auto-enable the channel when `ARIA_CHANNELS` is unset. |
 | `services()` | no | systemd units. Default: one `aria-channel-<name>` unit running `aria-channel <name>`. |
@@ -87,10 +87,13 @@ PLUGIN = MyChat()
   processes messages concurrently, call `host.run_command()` directly, so that
   `/stop` doesn't wait behind the running turn.
 - **Approvals.** When a turn on your channel needs approval for a risky
-  action, Aria calls `send_approval(code, summary, to)`. The default sends a
-  text asking the user to reply `yes <code>` / `no <code>`; `handle_message()`
-  or `host.answer_approval()` records the reply. Override `send_approval` for
-  buttons, as Telegram does.
+  action, Aria calls `send_approval(code, summary, to, expires_min, grantable)`.
+  The default sends a text asking the user to reply `yes <code>` / `no <code>`,
+  and — when `grantable` — `task <code>` to approve this and later actions of
+  the same kind until the task is done; `handle_message()` or
+  `host.answer_approval()` records the reply. Override `send_approval` for
+  buttons, as Telegram does (its third button calls
+  `approval.answer(code, True, channel, user, grant=True)`).
   - Handle approval answers **before** any per-chat lock or queue. The turn
     waiting for the answer is holding them.
   - A transport that handles one message at a time can't deliver the answer

@@ -118,7 +118,7 @@ cmd_model = cmd_save = on_command
 
 
 async def on_approval_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """✅/❌ on an approval request (aria.approval)."""
+    """✅ / ✅ For this task / ❌ on an approval request (aria.approval)."""
     from aria import approval
     from aria.channels.telegram.notify import APPROVAL_PREFIX
     query = update.callback_query
@@ -129,7 +129,10 @@ async def on_approval_button(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
     code, _, choice = query.data[len(APPROVAL_PREFIX):].partition(":")  # type: ignore[index]
     chat_id = str(update.effective_chat.id)  # type: ignore[union-attr]
-    result = approval.answer(code, choice == "y", CHANNEL, chat_id)
+    if choice == "t":
+        result = approval.answer(code, True, CHANNEL, chat_id, grant=True)
+    else:
+        result = approval.answer(code, choice == "y", CHANNEL, chat_id)
     await query.answer(result)
     try:
         original = getattr(query.message, "text_html", "") or ""

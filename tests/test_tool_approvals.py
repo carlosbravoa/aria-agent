@@ -27,9 +27,13 @@ class _Asks:
         self.ok = ok
         self.why = why or ("approved" if ok else "denied by the user")
         self.summaries: list[str] = []
+        self.kinds: list[str | None] = []
+        self.grantable: list[bool] = []
 
-    def __call__(self, summary: str):
+    def __call__(self, summary: str, kind: str | None = None, grantable: bool = True):
         self.summaries.append(summary)
+        self.kinds.append(kind)
+        self.grantable.append(grantable)
         return self.ok, self.why
 
 
@@ -69,7 +73,8 @@ def terminal(monkeypatch):
 @pytest.fixture(autouse=True)
 def _clean_approval_env(minimal_env, monkeypatch):
     for k in ("ARIA_APPROVALS", "ARIA_APPROVAL_REQUIRED", "ARIA_APPROVAL_TIMEOUT",
-              "ARIA_TASK_ID", "ARIA_SHELL_UNATTENDED", "ARIA_SHELL_SAFE_EXTRA"):
+              "ARIA_TASK_ID", "ARIA_SHELL_UNATTENDED", "ARIA_SHELL_CHANNEL",
+              "ARIA_SHELL_SAFE_EXTRA"):
         monkeypatch.delenv(k, raising=False)
     context.clear()
     yield
@@ -93,19 +98,76 @@ def sr(monkeypatch):
     return shell_run
 
 
-def test_shell_safe_mode_non_allowlisted_asks_and_runs(sr, asks, channel_turn):
+def test_shell_channel_turn_runs_ordinary_commands_unasked(sr, asks, channel_turn):
+    """A live channel turn is attended (the user just sent the message), so
+    the REPL rules apply: ordinary work runs without asking — the early
+    Vicus transcript where `claude --help` asked five times must not recur."""
+    stub = asks(False)
+    for cmd in ("make build", "which claude; claude --help 2>&1 | head -50",
+                "pytest -q", "pip install -e .",
+                'nohup x-terminal-emulator -e bash -c "claude; exec bash" >/tmp/t.log 2>&1 &'):
+        assert sr.execute({"command": cmd}) == "RAN", cmd
+    assert stub.summaries == []
+
+
+def test_shell_channel_turn_destructive_asks_in_the_chat(sr, asks, channel_turn):
+    stub = asks(True)
+    assert sr.execute({"command": "rm -rf build/"}) == "RAN"
+    assert stub.summaries == ["run: rm -rf build/"]
+    assert stub.kinds == ["shell"] and stub.grantable == [True]
+
+
+def test_shell_channel_turn_destructive_denied_tells_the_model_to_move_on(sr, asks, channel_turn):
+    asks(False)
+    out = sr.execute({"command": "rm -rf build/"})
+    assert out.startswith("[shell_run] Refused") and "destructive" in out
+    assert "denied by the user" in out and approval.DENIED_NOTE in out
+    assert sr.ran == []
+
+
+def test_shell_channel_safe_mode_non_allowlisted_asks_and_runs(sr, asks, channel_turn, monkeypatch):
+    monkeypatch.setenv("ARIA_SHELL_CHANNEL", "safe")
     stub = asks(True)
     assert sr.execute({"command": "make build"}) == "RAN"
     assert stub.summaries == ["run: make build"]
     assert sr.ran == ["make build"]
 
 
-def test_shell_safe_mode_non_allowlisted_denied(sr, asks, channel_turn):
+def test_shell_channel_safe_mode_non_allowlisted_denied(sr, asks, channel_turn, monkeypatch):
+    monkeypatch.setenv("ARIA_SHELL_CHANNEL", "safe")
     asks(False)
     out = sr.execute({"command": "make build"})
     assert "not on the unattended-safe allowlist" in out
     assert "denied by the user" in out
     assert sr.ran == []
+
+
+def test_shell_task_keeps_the_allowlist(sr, asks, task_turn):
+    """A scheduled task is genuinely unattended: non-allowlisted commands
+    still ask (ARIA_APPROVAL_TASKS=on here) rather than run."""
+    stub = asks(True)
+    assert sr.execute({"command": "make build"}) == "RAN"
+    assert stub.summaries == ["run: make build"]
+
+
+def test_shell_task_grant_skips_later_asks(sr, asks, channel_turn, monkeypatch):
+    """Approved "for this task" once → later shell asks in this conversation
+    run without asking; a secret-path hit still asks."""
+    stub = asks(True)
+    approval.grant("shell")
+    assert sr.execute({"command": "rm -rf build/"}) == "RAN"
+    assert sr.execute({"command": "pkill -f devserver"}) == "RAN"
+    assert stub.summaries == []
+    sr.execute({"command": "cat ~/.ssh/id_rsa"})
+    assert stub.summaries == ["run: cat ~/.ssh/id_rsa"] and stub.grantable == [False]
+    # another conversation has no such grant
+    context.clear()
+    token = context.set_active("telegram", "9999")
+    try:
+        sr.execute({"command": "rm -rf build/"})
+    finally:
+        context.reset(token)
+    assert stub.summaries[-1] == "run: rm -rf build/"
 
 
 def test_shell_allowlisted_runs_without_asking(sr, asks, channel_turn):
@@ -137,7 +199,7 @@ def test_shell_full_mode_destructive_asks(sr, asks, channel_turn, monkeypatch):
 
 def test_shell_script_summary_has_interpreter_and_first_lines(sr, asks, channel_turn):
     stub = asks(True)
-    script = "import shutil\nshutil.rmtree('build')\n"
+    script = "import shutil\nshutil.rmtree('build')\n"      # destructive → asks
     assert sr.execute({"script": script, "interpreter": "python3"}) == "RAN"
     assert len(stub.summaries) == 1
     assert "python3" in stub.summaries[0]
@@ -152,11 +214,24 @@ def test_shell_off_mode_never_asks(sr, asks, channel_turn, monkeypatch):
     assert stub.summaries == [] and sr.ran == []
 
 
-def test_shell_secret_path_never_asks(sr, asks, channel_turn):
+def test_shell_secret_path_never_asks_in_a_task(sr, asks, task_turn):
     stub = asks(True)
     out = sr.execute({"command": "cat ~/.ssh/id_rsa"})
     assert "Refused" in out and "sensitive path" in out
     assert stub.summaries == [] and sr.ran == []
+
+
+def test_shell_secret_path_on_a_channel_asks_but_is_never_granted(sr, asks, channel_turn):
+    stub = asks(True)
+    assert sr.execute({"command": "cat ~/.ssh/id_rsa"}) == "RAN"
+    assert stub.kinds == ["shell"] and stub.grantable == [False]
+
+
+def test_shell_channel_off_via_channel_var(sr, asks, channel_turn, monkeypatch):
+    monkeypatch.setenv("ARIA_SHELL_CHANNEL", "off")
+    stub = asks(True)
+    out = sr.execute({"command": "ls"})
+    assert "ARIA_SHELL_CHANNEL=off" in out and stub.summaries == [] and sr.ran == []
 
 
 def test_shell_approvals_off_is_old_behaviour(sr, asks, channel_turn, monkeypatch):
@@ -586,3 +661,150 @@ def test_shell_kind_is_configurable(monkeypatch, asks, channel_turn):
     monkeypatch.setenv("ARIA_APPROVAL_REQUIRED", "delete")
     out = shell_run.execute({"command": "rm -rf /tmp/nothing-here"})
     assert "Refused" in out and not stub.summaries
+
+
+# ── task grants ("for this task") ─────────────────────────────────────────────
+
+def test_task_grant_by_text_reply_then_no_more_asks(fakechan, monkeypatch):
+    """`task 1234` approves AND records a grant for the kind in this
+    conversation; approval.check then passes without asking. A different
+    conversation is not covered."""
+    monkeypatch.setattr(approval, "_timeout", lambda: 5.0)
+    token = context.set_active("fakechan", "u1")
+    replies: list = []
+    try:
+        t = _answer_when_sent(fakechan, lambda code: replies.append(
+            approval.try_answer_text("fakechan", "u1", f"task {code}")))
+        assert approval.check("delete", "delete build/") is None
+        t.join(2)
+        assert replies == ["✅ Approved for this task."]
+        assert approval.has_grant("delete") and approval.grants() == ["delete"]
+        assert approval.check("delete", "delete dist/") is None      # no second ask
+        assert len(fakechan) == 1
+        assert not approval.has_grant("git_push")                    # per kind
+    finally:
+        context.reset(token)
+    token = context.set_active("fakechan", "u2")
+    try:
+        assert not approval.has_grant("delete")
+    finally:
+        context.reset(token)
+
+
+def test_task_grant_variants_and_plain_yes(fakechan, monkeypatch):
+    monkeypatch.setattr(approval, "_timeout", lambda: 5.0)
+    token = context.set_active("fakechan", "u1")
+    try:
+        for text, granted in (("yes", False), ("yes task", True), ("yes all", True),
+                              ("all", True)):
+            approval.revoke_grants()
+            t = _answer_when_sent(fakechan, lambda code, text=text: approval.try_answer_text(
+                "fakechan", "u1", f"{text} {code}"))
+            ok, why = approval.request("push", kind="git_push")
+            t.join(2)
+            assert ok and (why == "approved for this task") is granted, text
+            assert approval.has_grant("git_push") is granted, text
+            fakechan.clear()
+    finally:
+        context.reset(token)
+
+
+def test_task_grant_not_offered_or_recorded_when_not_grantable(fakechan, monkeypatch):
+    """A secret-path shell hit asks with grantable=False: 'task 1234' still
+    approves this once but records nothing."""
+    monkeypatch.setattr(approval, "_timeout", lambda: 5.0)
+    token = context.set_active("fakechan", "u1")
+    try:
+        t = _answer_when_sent(fakechan, lambda code: approval.try_answer_text(
+            "fakechan", "u1", f"task {code}"))
+        assert approval.request("run: cat ~/.ssh/id_rsa", kind="shell",
+                                grantable=False) == (True, "approved")
+        t.join(2)
+        assert not approval.has_grant("shell")
+    finally:
+        context.reset(token)
+
+
+def test_task_grant_ends_with_the_task(minimal_env, monkeypatch):
+    """end_turn drops the grant once a turn ends with no open plan steps;
+    while the plan has unfinished steps it survives. /clear revokes."""
+    from aria.tools import plan
+    token = context.set_active("fakechan", "u1")
+    try:
+        approval.grant("shell")
+        plan_token = plan.set_scope("fakechan:u1")
+        try:
+            plan.execute({"action": "set", "todos": [{"task": "a", "status": "pending"}, {"task": "b", "status": "pending"}]})
+        finally:
+            plan.reset_scope(plan_token)
+        assert approval.end_turn("fakechan:u1") is False and approval.has_grant("shell")
+        plan.clear("fakechan:u1")
+        assert approval.end_turn("fakechan:u1") is True and not approval.has_grant("shell")
+        approval.grant("delete")
+        assert approval.revoke_grants("fakechan:u1") and not approval.has_grant("delete")
+    finally:
+        context.reset(token)
+
+
+def test_task_grant_hard_cap(minimal_env, monkeypatch):
+    token = context.set_active("fakechan", "u1")
+    try:
+        approval.grant("shell")
+        monkeypatch.setenv("ARIA_APPROVAL_GRANT_MAX_MIN", "1")
+        data = approval._load_grants()
+        data["fakechan:u1"]["shell"]["granted"] -= 120
+        approval._save_grants(data)
+        assert not approval.has_grant("shell")
+    finally:
+        context.reset(token)
+
+
+def test_no_grant_scope_on_the_terminal(terminal):
+    assert approval.grant_scope() is None
+    approval.grant("shell")                      # no-op without a scope
+    assert not approval.has_grant("shell") and approval.grants() == []
+
+
+def test_old_plugins_without_grantable_still_get_asked(fakechan, monkeypatch):
+    """The fake plugin's send_approval predates `grantable`; request() must
+    call it with the old signature."""
+    monkeypatch.setattr(approval, "_timeout", lambda: 5.0)
+    token = context.set_active("fakechan", "u1")
+    try:
+        t = _answer_when_sent(fakechan, lambda code: approval.answer(code, True, "fakechan", "u1"))
+        assert approval.request("delete x", kind="delete") == (True, "approved")
+    finally:
+        context.reset(token)
+    t.join(2)
+
+
+def test_default_plugin_text_mentions_task_only_when_grantable(minimal_env):
+    from aria.channels.base import ChannelPlugin
+    sent = []
+
+    class P(ChannelPlugin):
+        name = "p"
+        def send(self, text, to=None):
+            sent.append(text)
+    P().send_approval("1234", "delete x", grantable=True)
+    P().send_approval("5678", "cat ~/.ssh/id_rsa", grantable=False)
+    assert "task 1234" in sent[0] and "yes 1234" in sent[0]
+    assert "task 5678" not in sent[1] and "yes 5678" in sent[1]
+
+
+def test_telegram_offers_for_this_task_button(minimal_env, monkeypatch):
+    pytest.importorskip("telegram")
+    from aria.channels.telegram import notify
+    monkeypatch.setenv("TELEGRAM_ALLOWED", "42")
+    monkeypatch.setenv("TELEGRAM_TOKEN", "t")
+    posted = []
+    monkeypatch.setattr(notify, "_post_message",
+                        lambda url, cid, text, html_mode, reply_markup=None:
+                        posted.append((cid, text, reply_markup)))
+    notify.send_approval("1234", "rm -rf build", chat_id=42, grantable=True)
+    _, text, markup = posted[0]
+    assert [b["callback_data"] for b in markup["inline_keyboard"][0]] == [
+        "aria-approve:1234:y", "aria-approve:1234:t", "aria-approve:1234:n"]
+    assert "task 1234" in text
+    notify.send_approval("5678", "cat ~/.ssh/id_rsa", chat_id=42, grantable=False)
+    assert len(posted[1][2]["inline_keyboard"][0]) == 2

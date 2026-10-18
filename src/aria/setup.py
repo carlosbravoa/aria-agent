@@ -100,9 +100,16 @@ AGENT_NAME=Aria
 # Flag a high-friction turn to the user (>=N tool calls with >40% errors,
 # repeated calls, or a hard stop) and log it for reflection (0 disables)
 # ARIA_FRICTION_MIN_CALLS=6
-# shell_run policy in non-interactive contexts (Telegram/WhatsApp/supervisor):
-#   safe (default) = block destructive + secret-path commands, allow the rest
-#   off            = no shell outside the interactive REPL
+# shell_run policy on a live channel turn (Telegram/WhatsApp/Vicus, remote
+# control) — you just sent the message, so it counts as attended:
+#   full (default) = terminal rules: ordinary commands run; destructive or
+#                    secret-touching ones ask you in the chat
+#   safe           = only the read-only allowlist runs unasked; the rest asks
+#   off            = no shell on channels
+# ARIA_SHELL_CHANNEL=full
+# shell_run policy inside scheduled tasks (nobody necessarily watching):
+#   safe (default) = only the read-only allowlist (ls, cat, grep, git status …)
+#   off            = no shell outside the interactive REPL (channels included)
 #   full           = legacy (destructive still blocked, secret-path allowed)
 # ARIA_SHELL_UNATTENDED=safe
 # Optional real isolation: a command prefix that every shell_run invocation is
@@ -142,14 +149,17 @@ AGENT_NAME=Aria
 
 # ── Approvals (risky actions when nobody is at the terminal) ─────────
 # On a channel turn or in remote control, risky actions ask you first —
-# Telegram shows ✅/❌ buttons, any channel accepts "yes 1234"/"no 1234"; /stop
-# cancels the wait. Shell commands the unattended policy would refuse are
-# asked for too ("shell"). Scheduled tasks keep the old behaviour unless
-# ARIA_APPROVAL_TASKS=on (then they ask the push channel and wait).
-# ARIA_APPROVALS=on                         # off = old behaviour (never ask)
+# Telegram shows ✅ / ✅ For this task / ❌ buttons, any channel accepts
+# "yes 1234" / "task 1234" / "no 1234"; /stop cancels the wait. "For this
+# task" grants that kind of action (shell, delete, git_push, …) for the rest
+# of the task in that conversation (ends with the plan, /clear, or the cap
+# below); secret-path shell hits always ask. Scheduled tasks keep the old
+# behaviour unless ARIA_APPROVAL_TASKS=on (then they ask the push channel).
+# ARIA_APPROVALS=on                         # off = never ask
 # ARIA_APPROVAL_REQUIRED=delete,git_push,update,shell   # + gmail_send, calendar_create; or none
 # ARIA_APPROVAL_TASKS=off
 # ARIA_APPROVAL_TIMEOUT=300                 # seconds; no answer = denied
+# ARIA_APPROVAL_GRANT_MAX_MIN=480           # a "for this task" grant never outlives this
 # Largest WhatsApp attachment accepted/sent (MB)
 # ARIA_WA_MAX_MB=16
 

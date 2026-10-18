@@ -35,6 +35,11 @@ def minimal_env(tmp_path, monkeypatch, request):
     envf  = tmp_path / ".env"
     envf.write_text("")  # ARIA_ENV set → is_first_run() is False
 
+    # The developer's shell may export Aria's own config (ARIA_CHANNELS,
+    # VICUS_*, TELEGRAM_TOKEN, …) — scrub it, or tests see the real channels.
+    for k in list(os.environ):
+        if k.startswith(("ARIA_", "VICUS_", "TELEGRAM_", "WHATSAPP_")):
+            monkeypatch.delenv(k, raising=False)
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("ARIA_ENV", str(envf))
     monkeypatch.setenv("ARIA_WORKSPACE", str(ws))

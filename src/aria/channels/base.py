@@ -155,13 +155,16 @@ class ChannelPlugin:
         raise NotImplementedError(f"channel '{self.name}' cannot push messages")
 
     def send_approval(self, code: str, summary: str, to: str | None = None,
-                      expires_min: int = 5) -> None:
+                      expires_min: int = 5, grantable: bool = False) -> None:
         """Ask the user to approve a risky action (aria.approval). The default
         is a text message answered by replying "yes <code>" / "no <code>" —
-        the host intercepts those replies. Override for nicer UI (Telegram
-        uses inline buttons)."""
-        self.send(f"🔐 Approval needed:\n{summary}\n\nReply `yes {code}` to approve or "
-                  f"`no {code}` to deny (expires in {expires_min} min).", to=to)
+        the host intercepts those replies. When `grantable`, "task <code>"
+        approves this and later actions of the same kind until the task is
+        done. Override for nicer UI (Telegram uses inline buttons)."""
+        task = (f", `task {code}` to approve this and similar actions until the task "
+                f"is done" if grantable else "")
+        self.send(f"🔐 Approval needed:\n{summary}\n\nReply `yes {code}` to approve{task}, "
+                  f"or `no {code}` to deny (expires in {expires_min} min).", to=to)
 
     def send_file(self, path: Path, caption: str = "", to: str | None = None) -> str:
         """Deliver a file; return the name it was sent as."""

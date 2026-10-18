@@ -138,6 +138,21 @@ installs work unchanged. Follow-ups:
   attached/control modes, approvals, `/stop`. Live-tested 2026-09-25 against a
   real deployment (bot account, Android peer): join by invitation, decrypt,
   reply, receipts, files and group mentions.
+- ✅ **4.15** **Autonomy on channels: attended-remote policy + task grants** —
+  done (October 2026). A live channel turn (incl. remote control) is
+  *attended*: `shell_run` uses the REPL rules there (`ARIA_SHELL_CHANNEL`,
+  default `full`), so `pytest`, `pip install`, `claude --help` … run unasked
+  and only destructive/secret-path commands ask — in the chat. The read-only
+  allowlist (`ARIA_SHELL_UNATTENDED`) now applies to scheduled tasks only.
+  Approvals can be answered **for this task** (Telegram button / `task 1234`):
+  `approval.grant()` records the kind per conversation, `approval.check()`
+  and the shell gate honour it, and the grant ends when a turn finishes with
+  no open plan steps, on `/clear`, or after `ARIA_APPROVAL_GRANT_MAX_MIN`.
+  Secret-path hits are never grantable. A denial now tells the model to skip
+  the step rather than work around it. Follow-ups: scope-aware rules
+  (repo/cwd), reversibility-aware gating (undo-able edits never ask),
+  batch approval from the plan, grants declared at `schedule` time, and
+  "sandbox implies trust" (6.9).
 - **4.11** **Streaming drafts on Telegram** — med / med. Edit a draft message as text
   arrives. This needs streaming model calls, which are currently always
   non-streaming.

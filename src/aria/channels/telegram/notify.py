@@ -224,21 +224,28 @@ APPROVAL_PREFIX = "aria-approve:"
 
 
 def send_approval(code: str, summary: str, chat_id: int | None = None,
-                  expires_min: int = 5) -> None:
+                  expires_min: int = 5, grantable: bool = False) -> None:
     """Ask for approval with ✅/❌ inline buttons (answered by the bot's
-    callback handler); the text also says how to answer by typing, for a
-    client that doesn't show buttons. Same targeting as send()."""
+    callback handler) — plus "✅ For this task" when `grantable`; the text
+    also says how to answer by typing, for a client that doesn't show
+    buttons. Same targeting as send()."""
     import html
     token   = _token()
     targets = _targets(chat_id)
     url     = f"https://api.telegram.org/bot{token}/sendMessage"
+    typed = f"<code>yes {code}</code> / <code>no {code}</code>"
+    if grantable:
+        typed += f" / <code>task {code}</code> (this and similar, until the task is done)"
     text = (f"🔐 <b>Approval needed</b>\n{html.escape(summary)}\n\n"
-            f"<i>Expires in {expires_min} min · or reply</i> <code>yes {code}</code> / "
-            f"<code>no {code}</code>")
-    markup = {"inline_keyboard": [[
+            f"<i>Expires in {expires_min} min · or reply</i> {typed}")
+    buttons = [
         {"text": "✅ Approve", "callback_data": f"{APPROVAL_PREFIX}{code}:y"},
         {"text": "❌ Deny",    "callback_data": f"{APPROVAL_PREFIX}{code}:n"},
-    ]]}
+    ]
+    if grantable:
+        buttons.insert(1, {"text": "✅ For this task",
+                           "callback_data": f"{APPROVAL_PREFIX}{code}:t"})
+    markup = {"inline_keyboard": [buttons]}
     errors: list[str] = []
     delivered = 0
     for cid in targets:

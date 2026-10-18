@@ -4,17 +4,22 @@ aria/tools/shell_run.py — Execute shell commands with a context-aware policy.
 Safety policy (applies to BOTH command and script content):
   - Interactive REPL: destructive (rm, dd, kill, mv …) or secret-touching
     (~/.ssh, cloud creds) ops prompt for confirmation; everything else runs.
-  - Non-interactive (Telegram/WhatsApp/supervisor), via ARIA_SHELL_UNATTENDED:
+  - A live channel turn (Telegram/WhatsApp/Vicus, incl. remote control): the
+    user just sent the message and is watching, so the REPL rules apply with
+    the confirmation routed to that chat (aria.approval): ordinary commands
+    run; destructive or secret-touching ones ask — approve once, or "for this
+    task" (not offered for secret paths). ARIA_SHELL_CHANNEL changes this:
+      full (default) → as described
+      safe           → only the read-only allowlist runs unasked; the rest asks
+      off            → no shell on channels
+  - A scheduled task (supervisor, ARIA_TASK_ID), via ARIA_SHELL_UNATTENDED:
       safe (default) → ONLY a curated allowlist of read-only commands runs
                        (ls, cat, grep, git status, …; extensible via
-                       ARIA_SHELL_SAFE_EXTRA); everything else is refused
-      off            → no shell at all outside the REPL
-      full           → destructive + secret-path rejected, ordinary cmds allowed
-                       (legacy blacklist behaviour)
-    On a channel turn / remote control / scheduled task (aria.approval), a
-    command refused under safe/full (not allowlisted, or destructive) is sent
-    to the user for approval instead of being refused outright — unless
-    ARIA_APPROVALS=off, ARIA_SHELL_UNATTENDED=off, or it hits a secret path.
+                       ARIA_SHELL_SAFE_EXTRA); everything else is refused —
+                       or asked on the push channel with ARIA_APPROVAL_TASKS=on
+      off            → no shell at all outside the REPL (channels included)
+      full           → destructive rejected (approvable), secret-path allowed,
+                       ordinary commands allowed (legacy blacklist behaviour)
   Destructive detection scans every sub-command (split on ; && || | $() ),
   so chaining like `echo ok && rm -rf ~` is caught. Wrapper prefixes (sudo,
   env, nohup, time, xargs, …) are peeled off before matching, `bash -c '…'`
@@ -171,8 +176,22 @@ _SECRET_PATH_RE = re.compile(
 _PYTHON_REPL_RE = re.compile(r"^\s*python3?\s*$")
 
 
+def _channel_policy() -> str:
+    """Shell policy for a live channel turn (attended remotely).
+    full (default) = REPL rules, confirmations go to the chat;
+    safe = read-only allowlist runs unasked, everything else asks;
+    off = no shell. An explicit ARIA_SHELL_UNATTENDED=off also means off here:
+    whoever set it wanted no shell outside the terminal at all."""
+    val = os.environ.get("ARIA_SHELL_CHANNEL", "").strip().lower()
+    if val in ("full", "safe", "off"):
+        return val
+    if os.environ.get("ARIA_SHELL_UNATTENDED", "").strip().lower() == "off":
+        return "off"
+    return "full"
+
+
 def _unattended_policy() -> str:
-    """Shell policy for non-interactive contexts (channels/supervisor).
+    """Shell policy for a scheduled task (nobody necessarily watching).
     safe (default) = only read-only allowlisted commands run;
     off = no shell at all; full = legacy blacklist (destructive + secret-path
     blocked, everything else allowed)."""
@@ -495,29 +514,37 @@ def _gate(payload: str, summary: str = "") -> str | None:
 
     - Interactive REPL: destructive/secret-touching ops prompt for confirmation;
       everything else runs (no friction for normal dev work).
-    - Non-interactive (Telegram/WhatsApp/supervisor), per ARIA_SHELL_UNATTENDED:
+    - Live channel turn (approval.attended_remote()), per ARIA_SHELL_CHANNEL:
+        full → REPL rules: ordinary commands run; destructive/secret-path ask
+        safe → the read-only allowlist runs; everything else asks
+        off  → all shell rejected
+    - Scheduled task, per ARIA_SHELL_UNATTENDED:
         off  → all shell rejected
         safe → only the read-only allowlist runs (_check_safe_unattended);
                destructive AND secret-path always rejected
         full → destructive rejected; secret-path allowed; ordinary commands
                allowed (legacy blacklist behavior)
-      When nobody is at a terminal (approval.unattended(): channel turn,
-      remote control, scheduled task) and ARIA_APPROVALS is on, a refused
-      non-allowlisted or destructive command is sent to the user for approval
-      (`summary`, default "run: <payload>") instead — approved → it runs;
-      denied/expired → the refusal plus the reason. Never asked: shell off,
-      secret-path hits under 'safe'.
+      Where the policy says "ask" or a refusal is approvable and ARIA_APPROVALS
+      is on, the command is sent to the user for approval (`summary`, default
+      "run: <payload>") — approved → it runs; approved "for this task" → it
+      runs and later shell asks in this conversation are skipped (never for a
+      secret-path hit); denied/expired → the refusal plus the reason. Never
+      asked: shell off, secret-path hits in a task under 'safe'.
     """
-    refusal, approvable = _gate_policy(payload)
+    refusal, approvable, grantable = _gate_policy(payload)
     if refusal is None or not approvable:
         return refusal
     # Nobody at a terminal (channel turn / remote control / scheduled task):
-    # ask the user where they are instead of refusing outright.
+    # ask the user where they are instead of refusing outright — unless they
+    # already approved shell "for this task" (a secret-path hit still asks).
     from aria import approval
     if not (approval.required("shell") and approval.should_ask()):
         return refusal
-    ok, why = approval.request(summary or f"run: {payload}")
-    return None if ok else f"{refusal} (approval: {why})"
+    if grantable and approval.has_grant("shell"):
+        return None
+    ok, why = approval.request(summary or f"run: {payload}", kind="shell",
+                               grantable=grantable)
+    return None if ok else f"{refusal} (approval: {why}). {approval.DENIED_NOTE}"
 
 
 def _script_summary(script: str, interpreter: str) -> str:
@@ -528,51 +555,62 @@ def _script_summary(script: str, interpreter: str) -> str:
     return f"run {interpreter} script:\n{head}{more}"
 
 
-def _gate_policy(payload: str) -> tuple[str | None, bool]:
+def _gate_policy(payload: str) -> tuple[str | None, bool, bool]:
     """The shell policy proper (see _gate). Returns (refusal or None,
-    approvable): approvable refusals may be overridden by the user approving
-    remotely; hard ones (shell off, secret paths under 'safe', a TTY
-    cancellation) never are."""
+    approvable, grantable): approvable refusals may be overridden by the user
+    approving remotely; hard ones (shell off, secret paths in a task under
+    'safe', a TTY cancellation) never are. Grantable ones may also be approved
+    "for this task"; a secret-path hit never is — it asks every time."""
+    from aria import approval
     interactive = _is_interactive()
-    policy      = _unattended_policy()
+    remote      = approval.attended_remote()
+    policy      = _channel_policy() if remote else _unattended_policy()
+    where       = ("ARIA_SHELL_CHANNEL" if remote and os.environ.get("ARIA_SHELL_CHANNEL")
+                   else "ARIA_SHELL_UNATTENDED")
 
     if not interactive and policy == "off":
         return ("[shell_run] Shell is disabled outside the interactive REPL "
-                "(ARIA_SHELL_UNATTENDED=off)."), False
+                f"({where}=off)."), False, False
 
     reasons: list[str] = []
     dest = _is_destructive(payload)
     if dest:
         reasons.append(dest)
-    if _touches_secret(payload):
+    secret = _touches_secret(payload)
+    if secret:
         reasons.append("references a sensitive path (SSH keys / cloud credentials / Aria secrets)")
 
     if not reasons:
         if interactive or policy == "full":
-            return None, False  # ordinary command — allowed
-        # Non-interactive 'safe': only the read-only allowlist runs.
+            return None, False, False  # ordinary command — allowed
+        # 'safe': only the read-only allowlist runs unasked.
         hit = _check_safe_unattended(payload)
-        return hit, True
+        return hit, True, True
 
-    if interactive:
+    if interactive or remote:
         # A command the user previously approved with "always" runs without a
-        # repeat prompt (learnable trust). Everything else still confirms.
+        # repeat prompt (learnable trust) — on a channel too: "always" means
+        # always. Everything else confirms: on the TTY here; for a channel
+        # turn the caller (_gate) asks in the chat.
         if _is_allowlisted(payload):
-            return None, False
-        if _confirm(payload, "; ".join(reasons)):
-            return None, False
-        return "[shell_run] Cancelled by user.", False
+            return None, False, False
+        if interactive:
+            if _confirm(payload, "; ".join(reasons)):
+                return None, False, False
+            return "[shell_run] Cancelled by user.", False, False
+        return (f"[shell_run] Refused — {'; '.join(reasons)} — not run on a channel "
+                "turn without your confirmation.", True, not secret)
 
-    # Non-interactive + risky: destructive is always refused; secret-path is
+    # A scheduled task + risky: destructive is always refused; secret-path is
     # refused under 'safe' but permitted under 'full'.
     if dest or policy == "safe":
         refusal = (f"[shell_run] Refused — {'; '.join(reasons)} — in non-interactive mode "
                    f"(ARIA_SHELL_UNATTENDED={policy}). Run it yourself in a terminal if intended.")
         # A destructive command may be approved by the user; a secret-path hit
         # that the policy refuses ('safe') never is.
-        secret_refused = policy == "safe" and _touches_secret(payload)
-        return refusal, not secret_refused
-    return None, False
+        secret_refused = policy == "safe" and secret
+        return refusal, not secret_refused, not secret
+    return None, False, False
 
 
 # Interpreters allowed for the script field — no shell metacharacters possible

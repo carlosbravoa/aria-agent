@@ -103,7 +103,8 @@ def test_channel_turn_takes_unattended_policy_despite_tty(minimal_env, monkeypat
     # A channel turn now asks the user via aria.approval instead of the TTY;
     # stub the answer (denied) so no real channel is contacted.
     from aria import approval
-    monkeypatch.setattr(approval, "request", lambda summary: (False, "denied by the user"))
+    monkeypatch.setattr(approval, "request",
+                        lambda summary, **kw: (False, "denied by the user"))
     token = context.set_active("telegram", "123456789")
     try:
         out = sr.execute({"command": "rm -rf /tmp/x"})

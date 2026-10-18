@@ -199,15 +199,31 @@ After `git pull && pip install .`:
   channels) now have the same commands: `/stop` (new), `/clear`, `/memory`,
   `/tools`, `/models`, `/model <name>`, `/save`, `/version`, `/help`. Lists are
   formatted the same way on every channel.
-- **Risky actions ask first when you chat from a channel.** On a channel turn
-  or in remote control, deletes (Drive, Calendar, files), `git push`,
-  self-update, and shell commands the unattended policy used to refuse ask
-  for approval: ✅/❌ buttons on Telegram, or reply `yes 1234`. `/stop` cancels
-  the wait.
+- **A chat from your phone is treated as attended.** On a channel turn or in
+  remote control you just sent the message and are reading the reply, so
+  `shell_run` follows the same rules as the terminal: ordinary commands
+  (`pytest`, `pip install`, `make`, `claude --help`, …) run without asking.
+  Only risky actions ask first: destructive or secret-touching shell
+  commands, deletes (Drive, Calendar, files), `git push` and self-update —
+  ✅/❌ buttons on Telegram, or reply `yes 1234`. `/stop` cancels the wait.
+  - **Approve once, or for the task.** Telegram offers a third button,
+    **✅ For this task**; on any channel reply `task 1234`. That records a
+    grant for that kind of action (shell, delete, git_push, …) in this
+    conversation, so the fifth `rm -rf build/` of a long job doesn't ask
+    again. The grant ends when a turn finishes with no unfinished plan
+    steps, on `/clear`, or after `ARIA_APPROVAL_GRANT_MAX_MIN` (8 h) at the
+    latest. Commands touching SSH keys, cloud credentials or Aria's own
+    secrets always ask individually and can't be granted.
+  - A denied action tells the model to skip that step and carry on, instead
+    of improvising a workaround.
+  - `ARIA_SHELL_CHANNEL=safe` restores the read-only allowlist for channel
+    turns (everything else asks); `off` disables shell on channels.
+    `ARIA_SHELL_UNATTENDED` now governs scheduled tasks only (an explicit
+    `off` still means no shell anywhere outside the terminal).
   - **Scheduled tasks are unchanged** unless you set `ARIA_APPROVAL_TASKS=on`.
     Then they ask on the push channel and wait up to `ARIA_APPROVAL_TIMEOUT`
     (300 s); no answer means denied.
-  - `ARIA_APPROVALS=off` restores the old behaviour everywhere.
+  - `ARIA_APPROVALS=off` restores the pre-3.0 behaviour everywhere.
   - `ARIA_APPROVAL_REQUIRED` picks the actions; `gmail_send` and
     `calendar_create` are opt-in.
 - **WhatsApp replies arrive as separate messages as they're produced**, with
@@ -299,7 +315,8 @@ TELEGRAM_ALLOWED=<your chat ID>
 # ARIA_WINDOW_MSG_CHARS=300        # chars per message before truncation
 
 # ── Shell security ────────────────────────────────────────────────────────────
-# ARIA_SHELL_UNATTENDED=safe       # channels/supervisor: safe | off | full
+# ARIA_SHELL_CHANNEL=full          # live channel turns: full (REPL rules, asks in the chat) | safe | off
+# ARIA_SHELL_UNATTENDED=safe       # scheduled tasks: safe | off | full
 # ARIA_SHELL_SANDBOX=              # optional wrapper, e.g. "firejail --quiet --private-tmp"
 # ARIA_SHELL_SAFE_EXTRA=make,pytest # extra read-only commands allowed in safe mode
 # ARIA_SHELL_ENV_ALLOW=             # env var names passed to shell_run despite looking secret

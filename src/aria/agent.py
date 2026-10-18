@@ -738,6 +738,12 @@ class Agent:
         finally:
             self._busy = False
             approval.unbind_cancel(cancel_token)
+            # A "for this task" approval lasts while the task does: drop it
+            # once a turn ends with no unfinished plan steps in this chat.
+            try:
+                approval.end_turn(self.window_key)
+            except Exception:
+                pass
 
     def request_stop(self) -> bool:
         """Ask the running turn to stop after its current step (a model call
@@ -1965,6 +1971,9 @@ class Agent:
             pass
         from aria.tools import plan as _plan_tool
         _plan_tool.clear(self.window_key)
+        # …and any "for this task" approvals granted in this conversation.
+        from aria import approval
+        approval.revoke_grants(self.window_key)
 
     def close(self) -> None:
         """
