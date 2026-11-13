@@ -58,3 +58,15 @@ def tools_dir() -> Path:
     if raw:
         return Path(raw).expanduser().resolve()
     return Path.home() / ".aria" / "tools"
+
+
+def skills_dir() -> Path:
+    """
+    Skills directory (see aria/skills.py). Resolution order:
+      1. $ARIA_SKILLS_DIR
+      2. ~/.aria/skills
+    """
+    raw = os.environ.get("ARIA_SKILLS_DIR")
+    if raw:
+        return Path(raw).expanduser().resolve()
+    return Path.home() / ".aria" / "skills"

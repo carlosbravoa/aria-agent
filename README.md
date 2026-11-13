@@ -51,14 +51,15 @@ The result is an agent that will impress you with how useful it can be while rem
 16. [Built-in tools](#built-in-tools)
 17. [Web fetching](#web-fetching)
 18. [Adding custom tools](#adding-custom-tools)
-19. [Gmail & Calendar setup](#gmail--calendar-setup)
-20. [Jira setup](#jira-setup)
-21. [IMAP setup](#imap-setup)
-22. [Browser automation (experimental)](#browser-automation-experimental)
-23. [Running as a background service](#running-as-a-background-service)
-24. [Development](#development)
-25. [Workspace layout](#workspace-layout)
-26. [Project structure](#project-structure)
+19. [Skills](#skills)
+20. [Gmail & Calendar setup](#gmail--calendar-setup)
+21. [Jira setup](#jira-setup)
+22. [IMAP setup](#imap-setup)
+23. [Browser automation (experimental)](#browser-automation-experimental)
+24. [Running as a background service](#running-as-a-background-service)
+25. [Development](#development)
+26. [Workspace layout](#workspace-layout)
+27. [Project structure](#project-structure)
 
 ---
 
@@ -353,6 +354,10 @@ TELEGRAM_ALLOWED=<your chat ID>
 # ARIA_ENV=~/.aria/.env
 # ARIA_WORKSPACE=~/.aria/workspace
 # ARIA_TOOLS_DIR=~/.aria/tools
+# ARIA_SKILLS_DIR=~/.aria/skills
+# ARIA_SKILLS_MAX=20                # skills listed in the prompt (0 = no index)
+# ARIA_SKILL_DESC_CHARS=120         # description length in that list
+# ARIA_SKILL_MAX_CHARS=5000         # skill body characters per load / per save
 ```
 
 ### Recommended models
@@ -871,6 +876,7 @@ at startup — no registration needed.
 | `notify`      | Push a message to the user on the channel of the current turn (Telegram or WhatsApp); broadcasts via Telegram outside a channel. |
 | `remember`    | Save / `list` / `forget` permanent user facts in core memory. |
 | `learn`       | Save / `list` / `forget` operational notes (global or project-scoped). |
+| `skill`       | Load / `list` / `save` / `import` / `delete` skills — on-demand how-to procedures in `~/.aria/skills/` (see [Skills](#skills)). |
 | `memory_search` | Search across all memory stores (core, operational, patterns, project notes) for a phrase — on-demand recall without loading all memory into context. |
 | `schedule`    | Create, list, and cancel scheduled tasks for the supervisor.              |
 | `reflect`     | Trigger memory reflection on demand.                                      |
@@ -988,6 +994,75 @@ DEFINITION = {
 def execute(args: dict) -> str:
     return f"Result: {args['input']}"
 ```
+
+---
+
+## Skills
+
+A skill teaches Aria how to work with something — a CLI, an API, a multi-step
+routine — without spending tokens until it is needed. Each skill is a markdown
+file with a one-line description. Only the **names and descriptions** are sent
+with each request (a few dozen tokens per skill); the instructions are loaded
+by the `skill` tool when a task matches.
+
+```
+~/.aria/skills/
+├── gh-release/
+│   ├── SKILL.md          ← frontmatter + instructions
+│   └── checklist.md      ← optional supporting files, loaded on request
+└── deploy-staging.md     ← single-file form
+```
+
+```markdown
+---
+description: Cut a GitHub release with gh (tag, notes, assets)
+---
+1. Check the tree is clean: `git status --porcelain`
+2. ...
+```
+
+The directory (or file) name is the skill's name: lowercase letters, digits,
+`-` and `_`. This is the common `SKILL.md` layout, so skills written for other
+agents can be dropped in as they are. Skills run through Aria's existing tools
+(`shell_run`, `web_fetch`, …) and their usual approvals — a skill adds
+knowledge, not permissions.
+
+**Importing.** Ask Aria to import a skill from disk ("import the skill in
+`~/Downloads/pdf-tools`") and it copies the folder — scripts and reference
+files included — into `~/.aria/skills/`. Skills written for Claude usually work
+as they are. When one doesn't fit, Aria adapts it with the model you are
+currently using, and only then:
+
+- a description longer than `ARIA_SKILL_DESC_CHARS` (or a missing one) is
+  rewritten to fit;
+- instructions that rely on Claude Code features — its tool names,
+  `$ARGUMENTS`, `` !`command` `` injection — are rewritten for Aria's tools.
+
+A compatible skill costs no model call. If a skill can't be made to fit — the
+model says it depends on something Aria lacks (subagents, for instance), the
+rewrite doesn't hold up, or no model answers — the import is refused with
+"no way" and the reason, and nothing is installed. On Telegram/WhatsApp/Vicus
+an import asks for your approval first (`skill_import` in
+`ARIA_APPROVAL_REQUIRED`); scheduled tasks can't import. Bundled scripts are
+run by their full path, and `${CLAUDE_SKILL_DIR}` in a skill resolves to its
+folder. Claude Code settings such as `allowed-tools` or `context: fork` are
+dropped (and reported).
+
+Aria can also write skills itself: after working out a reusable procedure it
+may `save` it, and you can ask it to ("save that as a skill"). Self-written
+skills are marked `source: aria`, are presented to the model as its own notes
+rather than as your instructions, and are the only ones it can overwrite or
+delete. Saving is refused in unattended task runs.
+
+Everything is capped so skills never grow the prompt unnoticed:
+
+| Setting | Default | Caps |
+|---|---|---|
+| `ARIA_SKILLS_MAX` | 20 | Skills listed in the prompt. Beyond it the most recently changed are listed and the rest are found with `skill list <query>`. `0` sends no list. |
+| `ARIA_SKILL_DESC_CHARS` | 120 | Length of each description in that list. |
+| `ARIA_SKILL_MAX_CHARS` | 5000 | Characters of a skill returned per load (longer skills are paged), and the maximum size Aria may save. |
+
+New or edited skills are picked up by the next session.
 
 ---
 
@@ -1264,6 +1339,7 @@ nohup aria-supervisor  >> ~/.aria/supervisor.log  2>&1 &
 ├── shell_allowlist.json                      ← "always" shell approvals (/trust)
 ├── usage.jsonl                               ← token usage log (aria --usage)
 ├── tools/                                    ← custom tool .py files
+├── skills/                                   ← skills: <name>/SKILL.md or <name>.md
 ├── whatsapp/                                 ← Node.js WhatsApp bridge
 │   ├── package.json
 │   ├── bridge.js
@@ -1375,6 +1451,7 @@ aria-agent/
         ├── install.py                 ← setup wizard (aria-install)
         ├── main.py                    ← CLI entry point (prompt_toolkit REPL + rich)
         ├── project.py                 ← per-project conventions file + project-scoped notes
+        ├── skills.py                  ← skills: discovery, capped prompt index, load/save
         ├── reflect.py                 ← three-phase memory reflection (aria-reflect)
         ├── setup.py                   ← first-run wizard, env template
         ├── supervisor.py              ← task supervisor with periodic reflection (aria-supervisor)
@@ -1402,6 +1479,7 @@ aria-agent/
             ├── remember.py            ← add/list/forget permanent user facts
             ├── schedule.py            ← create/list/cancel supervisor tasks
             ├── send_file.py           ← send a file to the user over Telegram
+            ├── skill.py               ← load/list/save/delete skills
             ├── shell_run.py           ← shell commands, script mode, learnable approval, opt-in sandbox
             ├── update.py              ← self-update from git source + rollback watchdog
             └── web_fetch.py           ← web page fetcher (trafilatura)

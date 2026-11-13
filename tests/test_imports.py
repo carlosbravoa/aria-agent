@@ -67,6 +67,10 @@ def test_main_module_imports(minimal_env):
     # Native tool engine + memory tools (the 2.0 rewrite surface):
     ("aria.tools.remember", "execute"),
     ("aria.tools.learn", "execute"),
+    ("aria.tools.skill", "execute"),
+    ("aria.skills", "index_block"),
+    ("aria.skills", "fence"),
+    ("aria.config", "skills_dir"),
     # File exchange over channels (2.4 surface):
     ("aria.context", "set_active"),
     ("aria.context", "current"),

@@ -47,6 +47,12 @@ AGENT_NAME=Aria
 # ── Path overrides ───────────────────────────────────────────────────
 # ARIA_WORKSPACE=~/.aria/workspace
 # ARIA_TOOLS_DIR=~/.aria/tools
+# Skills: on-demand how-to procedures (~/.aria/skills/<name>/SKILL.md). Only a
+# capped index of names + one-line descriptions is sent with each request.
+# ARIA_SKILLS_DIR=~/.aria/skills
+# ARIA_SKILLS_MAX=20               # skills listed in the prompt (0 = no index)
+# ARIA_SKILL_DESC_CHARS=120        # description length in that list
+# ARIA_SKILL_MAX_CHARS=5000        # skill body characters per load / per save
 # Path to the source directory — used by the update tool
 # ARIA_SOURCE_DIR=~/aria-agent
 # ARIA_UPDATE_BRANCH=main
@@ -156,7 +162,7 @@ AGENT_NAME=Aria
 # below); secret-path shell hits always ask. Scheduled tasks keep the old
 # behaviour unless ARIA_APPROVAL_TASKS=on (then they ask the push channel).
 # ARIA_APPROVALS=on                         # off = never ask
-# ARIA_APPROVAL_REQUIRED=delete,git_push,update,shell   # + gmail_send, calendar_create; or none
+# ARIA_APPROVAL_REQUIRED=delete,git_push,update,shell,skill_import   # + gmail_send, calendar_create; or none
 # ARIA_APPROVAL_TASKS=off
 # ARIA_APPROVAL_TIMEOUT=300                 # seconds; no answer = denied
 # ARIA_APPROVAL_GRANT_MAX_MIN=480           # a "for this task" grant never outlives this

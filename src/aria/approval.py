@@ -32,7 +32,8 @@ Config:
   ARIA_APPROVALS=on|off          off → never ask (risky actions are refused
                                  where they used to be, and run elsewhere)
   ARIA_APPROVAL_REQUIRED=…       actions that need approval when not on a TTY
-                                 (default: delete,git_push,update,shell; add
+                                 (default: delete,git_push,update,shell,
+                                 skill_import; add
                                  gmail_send, calendar_create, … or "none")
   ARIA_APPROVAL_TASKS=off|on     also ask inside scheduled tasks
   ARIA_APPROVAL_TIMEOUT=300
@@ -52,7 +53,7 @@ import time
 import uuid
 from pathlib import Path
 
-_DEFAULT_REQUIRED = "delete,git_push,update,shell"
+_DEFAULT_REQUIRED = "delete,git_push,update,shell,skill_import"
 # "yes 1234" / "no 1234" / "task 1234" / "yes task 1234" / "yes all 1234"
 _ANSWER_RE = re.compile(
     r"^\s*(yes|y|approve|ok|no|n|deny|task|all)(?:\s+(task|all))?\s+(\d{4})\s*$", re.I)

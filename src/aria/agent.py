@@ -639,12 +639,16 @@ class Agent:
             "the learn tool.\n\n"
             f"{ops_mem}\n\n"
             if ops_mem else "")
+        # Capped index of installed skills (names + one-liners); bodies are
+        # fetched on demand with the skill tool. Empty when there are none.
+        from aria import skills as _skills
+        skills_block = _skills.index_block()
 
         return (
             f"{soul}\n\n"
             "## Core Memory\n"
             f"{memory}\n\n"
-            f"{cwd_block}{onboard_block}{ops_block}{notify_block}"
+            f"{cwd_block}{onboard_block}{ops_block}{skills_block}{notify_block}"
             "## Memory\n"
             "These tools tailor you to this user — use them proactively. You may "
             "answer the user in the same turn you call them.\n"
@@ -1379,7 +1383,13 @@ class Agent:
         with any guard notes appended outside the untrusted fence."""
         for tc, result in zip(tool_calls, results, strict=True):
             name = tc.function.name
-            content = _wrap_untrusted(result) + guard.record_result(name, result)
+            # A loaded skill is a procedure to follow, not untrusted data — it
+            # gets its own fence. Everything else (incl. skill errors) is data.
+            fenced = None
+            if name == "skill":
+                from aria import skills as _skills
+                fenced = _skills.fence(result)
+            content = (fenced or _wrap_untrusted(result)) + guard.record_result(name, result)
             self.history.append({
                 "role": "tool",
                 "tool_call_id": tc.id,
@@ -1984,15 +1994,32 @@ class Agent:
 
     # ── Tool execution ────────────────────────────────────────────────────────
 
+    def _side_llm(self, prompt: str) -> str:
+        """One plain, tool-less completion on the active profile, for a tool
+        that needs the model's help. Raises on transport errors."""
+        resp = self.client.chat.completions.create(
+            model=self.model,
+            messages=[{"role": "user", "content": prompt}], stream=False)
+        self._record_usage(getattr(resp, "usage", None))
+        return (resp.choices[0].message.content or "").strip()
+
     def _execute_tool(self, name: str, args: dict) -> str:
         # Tools are module-level functions; the plan tool needs to know whose
         # plan it is editing. Bound per call so it holds in worker threads too.
         from aria.tools import plan as _plan_tool
         token = _plan_tool.set_scope(self.window_key)
+        # Importing a skill may need the model to adapt it — lend the tool this
+        # conversation's active profile for the duration of the call.
+        llm_token = None
+        if name == "skill":
+            from aria import skills as _skills
+            llm_token = _skills.set_llm(self._side_llm)
         try:
             result = tools.dispatch(name, args, self.tool_schemas)
         finally:
             _plan_tool.reset_scope(token)
+            if llm_token is not None:
+                _skills.reset_llm(llm_token)
         if len(result) > 6000:
             result = result[:6000] + "\n\u2026 [truncated]"
         return result
